@@ -17,7 +17,7 @@ This is a proposal that will allow Forge to support this with minimal changes to
 
 ## Design
 
-The Sharded DAG Index will gain a `blocks` property - a list of blocks "inlined" in the index. See [#66](https://github.com/storacha/RFC/pull/66).
+The Sharded DAG Index will gain a `nodes` property - a list of UnixFS nodes "inlined" in the index (renamed from `blocks` as proposed in [#66](https://github.com/storacha/RFC/pull/66)).
 
 For a given upload (a `PutObject` or `UploadPart` request) the S3 facade will shard data at the current threshold (256MB) and keep track of the CIDs of the shards that have been created as well as the order.
 
@@ -27,9 +27,9 @@ When the `PutObject` request ends or the multipart `CompleteMultipartUpload` req
 
 A Sharded DAG Index is created, that contains entries for each shard. Each shard entry has a single slice entry which is the slice of the entire shard from byte 0 to (up to) 256MB.
 
-The order in which the shards should be served is encoded in the root UnixFS node, which is added to the Sharded DAG Index `blocks` property.
+The order in which the shards should be served is encoded in the root UnixFS node, which is added to the Sharded DAG Index `nodes` property.
 
-To enable retrieval Guppy will need to be updated to consider the `blocks` property, and load the blocks into it's own cache. Retrieval can then proceed as usual.
+To enable retrieval Guppy will need to be updated to consider the `nodes` property, and load the node(s) into it's own cache. Retrieval can then proceed as usual.
 
 ## References
 
