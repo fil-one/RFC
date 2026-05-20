@@ -53,16 +53,22 @@ All DID methods defined under this scheme share the same DID Document structure.
     {
       "id": "<the subject DID>#attestation",
       "type": "AuthorityAttestation",
-      "controller": "<the subject DID>"
+      "controller": "<the subject DID>",
+      "authority": "<the attesting authority DID>"
     }
   ],
-  "authentication": [
+  "capabilityInvocation": [
+    "<the subject DID>#attestation"
+  ],
+  "capabilityDelegation": [
     "<the subject DID>#attestation"
   ]
 }
 ```
 
-The `AuthorityAttestation` verification method type indicates that authentication for this DID is performed by a trusted authority, with the specific authority and verification method encoded in the Varsig header and attestation bytes respectively (see §4).
+The `AuthorityAttestation` verification method type indicates that authentication for this DID is performed by a trusted authority, named in the `authority` field.
+
+In theory, this verification method is available to any kind of DID which can put one in its DID document. In practice, this verification method is likely only useful for the narrow cases described in this document.
 
 ### 2.2 Resolution
 
@@ -114,22 +120,37 @@ Before issuing an attestation, the authority MUST perform out-of-band verificati
 
 ### 3.1 `did:mailto`
 
-1. The authority computes the SHA-256 hash of the canonical (DAG-CBOR) encoding of the delegation payload.
-2. The authority sends an email to the address encoded in the `did:mailto` DID, containing a verification link whose identifying parameter is that hash.
-3. When the user clicks the link, the authority recomputes the hash from the payload and confirms it matches. No stored token lookup is required — the payload hash serves as the token.
-4. The authority produces an attestation (§4.2) and returns it to the requesting party.
+1. The client authors a delegation payload in which the `did:mailto` issues some capability to the client's agent identity, and issues an invocation to the authority asking for it to be signed.
+2. The authority computes a an HMAC over `(delegation_payload, iat, exp)` using a key the authority controls, where `delegation_payload` is the canonical (DAG-CBOR) encoding of the delegation payload, `iat` is the time the link was issued, and `exp` is some expiration time for the link. `iat` is optional, but will result in a timestamp on the final signature for tracking purposes.
+3. The authority sends an email to the address encoded in the `did:mailto` DID, containing a verification link pointing back to the authority's web server. The URL's params include the delegation payload, the `exp`, and the HMAC, suitably encoded.
+4. When the user clicks the link, the authority validates the HMAC.
+5. The authority produces an attestation (§4.3) and builds a signed delegation from the payload, using the attestation bytes as the signature. It stores that delegation for later retrieval.
 
-The attestation operation is idempotent: attesting the same payload hash for the same subject always produces the same statement. The attestation `exp` field (§4.3) bounds how long after the email loop the attestation may be used to construct a valid delegation.
+The authority MAY use any format it chooses for the verification link URL. The authority MAY encode both the payload and the HMAC in the URL using any URL-suitable encoding. The authority produces and consumes this URL, so the format is irrelevant to the spec, as long as the authority can recover the values from the URL.
 
-TK: Should we put anything else in the link? Does it need to be presigned with an exp?
+The authority SHOULD include a full description of the delegation payload in the email it sends. For instance, it could show the DAG-JSON representation, or a more human readable layout. This ensures that the controller of the email inbox has an opportunity to understand what they're authorizing.
+
+If the clicked link is not valid, either because the HMAC does not match or because the `exp` time has passed, the authority MUST NOT create an attestation. The authority's web server MAY display a useful message explaining the failure. The authority's web server MAY offer to send a new email with a new link for the same delegation payload.
+
+The attestation operation is idempotent: clicking the same link a second time produces a byte-identical delegation.
+
+The authority MAY define a policy governing what delegations it will verify and attest to, and reject requests which are not permitted by that policy. For instance, the authority may reject delegations without a recent `nbf` ("not before"), or with an `exp` ("expiration") that is `null` or too far in the future. To reject an attestation request, the authority MUST return a failure for the original attestation request invocation. If it does not reject the request, the authority MUST use the delegation payload as given, with no changes.
+
+The verification link should have a reasonably short expiration. 15–60 minutes is RECOMMENDED.
+
+The authority MAY use a digest in place of the full payload in the URL, but this requires it to store the pending payload while waiting for verification. In this configuration, the stored payload can be evicted from the store when the link expires.
+
+The exact invocation to request an email-loop verification is not specified here. It must send the desired delegation payload in its `args`.
 
 ### 3.2 `did:oauth`
+
+*This section is non-normative. It is a proof-of-concept illustration to demonstrate that the broader spec is sound and extensible. It is expected that this section will be normatively redefined more carefully in a future RFC, before implementation.*
 
 1. The requesting party initiates an OAuth2 authorisation flow with the identity provider (IdP) named in the `did:oauth` DID, obtaining an authorisation code.
 2. The requesting party presents the authorisation code to the authority.
 3. The authority exchanges the authorisation code with the IdP for an ID token, verifies it, and extracts the `sub` claim.
 4. The authority confirms the `sub` claim and IdP domain match the `did:oauth` DID.
-5. The authority produces an attestation (§4.2) and returns it to the requesting party.
+5. The authority produces an attestation (§4.3) and returns it to the requesting party.
 
 The authority MUST NOT include OAuth token material in the attestation bytes.
 
@@ -155,153 +176,93 @@ A Varsig header for this type has the following structure:
 0x34                       Varsig prefix
 0x01                       Varsig version 1
 0x300001                   authority-attestation algorithm discriminant (varint)
-<authority-did-length>     unsigned varint: byte length of the authority DID string
-<authority-did-bytes>      UTF-8 encoded authority DID (e.g. "did:key:zAuth...")
 0x71                       Payload encoding: DAG-CBOR
 ```
 
-The authority DID is encoded inline in the header so that verifiers can locate the correct key without any out-of-band configuration. Since the Varsig header is included in the signed payload (per the Varsig recommendation), the authority DID is itself covered by the attestation signature.
+The header is a constant value which signals that the signature should be interpreted as an authority-attestation signature.
 
+### 4.3 Signature Invocation
 
-### 4.3 Signature Bytes
-
-The signature bytes (the `.0` field of the UCAN envelope) for this type are a DAG-CBOR encoded map:
+The signature bytes (the `.0` field of the UCAN envelope) for this type are the DAG-CBOR encoding of a UCAN invocation with a specific shape:
 
 ```
-{
-  "payload": {
-    "subject":      <string: the attested subject DID>,
-    "payload_hash": <bytes: SHA-256 hash of the canonical DAG-CBOR encoding of the delegation payload>,
-    "timestamp":    <integer: Unix timestamp of successful verification>,
-    "exp":          <integer: Unix timestamp after which this attestation is no longer valid>,
-    "alg":          <bytes: authority's Varsig header for its own key type, e.g. Ed25519+DAG-CBOR>
-  },
-  "sig": <bytes: authority's raw signature over the canonical DAG-CBOR encoding of "payload">
-}
+// DAG-JSON
+[
+  {"/": {"bytes": "..."}},
+  {
+    "h": {"/": {"bytes": "..."}},
+    "ucan/inv@1.0.0-rc.1": {
+      "iss": "did:example:attestingauthority",
+      "sub": "did:example:attestingauthority",
+      "cmd": "/ucan/attest/proof",
+      "args": {
+        "digest": {"/": {"bytes": "..."}}
+      },
+      "prf": []
+      "nonce": {"/": {"bytes": ""}},
+      "exp": null,
+    }
+  }
+]
 ```
 
-### 4.4 What the Authority Signs
+* The **`iss`** and **`sub`** are both the authority's DID. As an issuer, the DID must be resolvable to a verification method which can sign the invocation.
+* **`aud`** is missing, because the invocation is not addressed to anyone in particular.
+* **`cmd`** is `/ucan/attest/proof`.
+* **`args`** contains a single field, `digest`, whose value is a multihash digest of the outer delegation's `SigPayload` (the token payload plus the Varsig header). The digest SHOULD be SHA-256, [the only required algorithm in the UCAN cryptosuite](https://github.com/ucan-wg/spec/blob/main/README.md#cryptosuite). Using another algorithm may limit interoperability.
+* **`prf`** is empty. This invocation is issued by its subject, with inherent authority and no proofs required.
+* **`meta`** is optional, and can be used by the authority to track extra facts about the verification process, for informational purposes. Information stored in `meta` MUST NOT be considered to affect the validity of the signature.
+* **`nonce`** is empty. As an assertion of fact, the invocation is inherently idempotent.
+* **`exp`** is `null`. As an assertion of fact, the invocation cannot expire: the signature cannot have not happened because time has passed. The delegation's `exp` controls the expiration of the delegation.
+* **`iat`** is optional, and for informational purposes only. If it is provided, it MUST be the time that the attestation request was received, not the time that the signature was created. This ensures that verifying the same request twice produces an identical signature and delegation.
+* **`cause`** is optional, and for informational purposes only. If present, it MUST be a link to the receipt of the attestation request invocation, which itself MUST list the signature as an effect. This means that the receipt cannot be created until the signature is created, and cannot be returned synchronously during the attestation request. This is a lot of machinery which may not be of any value, making this field especially optional.
 
-The authority signs the canonical DAG-CBOR encoding of the `payload` field. The verifier extracts `payload`, re-encodes it canonically as DAG-CBOR, resolves the authority DID to obtain its public key, and verifies `sig` against that encoding.
-
-The `payload_hash` field binds the attestation to the specific delegation. The `alg` field identifies the authority's own signature algorithm and is included in the signed payload so that neither it nor the authority's key type can be substituted after the fact.
-
+This invocation is itself signed in the normal way, by its issuer, the attesting authority.
 
 ---
 
-## 5. UCAN Delegation Structure
+## 5. Verification
 
-A root delegation issued under this scheme looks as follows. Note that `iss` is the attested subject DID — this is the structural goal of the scheme.
+When a verifier encounters a delegation with a Varsig header with the algorithm discriminant `0x300001`, it should:
 
-**Email identity:**
+1. **Decode the signature invocation**: Interpret the signature bytes as a canonically encoded UCAN invocation.
 
-```json
-{
-  "iss": "did:mailto:example.com:alice",
-  "aud": "did:key:zInvoker...",
-  "sub": "did:mailto:example.com:alice",
-  "cmd": "/widget/crank",
-  "pol": [],
-  "nonce": "<random bytes>",
-  "exp": 1234567890
-}
-```
+1. **Resolve the issuer DID**: Perform the "Resolve" operation on the delegation issuer's DID. For a `did:mailto`, for instance, this means expanding the DID algorithmically into its DID document. Then find a `capabilityDelegation` verification method with the type `AuthorityAttestation` and an `authority` matching the signature invocation's issuer. If none is found, fail.
 
-**OAuth identity:**
+2. **Validate the signature invocation**: Resolve the authority's DID and validate the authority's signature on the invocation. If the invocation is invalid, fail.
 
-```json
-{
-  "iss": "did:oauth:accounts.google.com:1234567890",
-  "aud": "did:key:zInvoker...",
-  "sub": "did:oauth:accounts.google.com:1234567890",
-  "cmd": "/widget/crank",
-  "pol": [],
-  "nonce": "<random bytes>",
-  "exp": 1234567890
-}
-```
+4. **Verify the digest**: Take the digest of the delegation's `SigPayload` using the same algorithm as the value of `.digest` in the invocation's `args`. If the algorithm is not supported, fail. If the computed digest does not match the invocation args, fail.
 
-In both cases, the UCAN envelope `.0` field contains the `authority-attestation` signature bytes (§4.3) rather than a conventional asymmetric signature. The Varsig header in `.1.h` encodes the `authority-attestation` type and the authority DID.
+5. **Succeed**: If the process has not failed yet, the delegation is valid.
+
+If the process fails at any point, the verifier should consider the delegation to have an invalid signature.
 
 ---
 
-## 6. Proof Chain
+## 6. Security Considerations
 
-A complete invocation proof chain using this scheme (shown for `did:mailto`; the structure is identical for other attested DID methods):
+### 6.1 The Trust Gap
 
-```
-Delegation 1  (root)
-  iss: did:mailto:example.com:alice
-  aud: did:key:zInvoker...
-  sub: did:mailto:example.com:alice
-  cmd: /widget/crank
-  sig: authority-attestation bytes (authority: did:key:zAuth..., method: "email-loop")
+This scheme does not eliminate the need for out-of-band trust configuration. The executor must decide whether to trust a given authority for a given DID method and domain or provider. This is unavoidable: no cryptographic scheme can bootstrap trust from an identity that has no keypair. The scheme makes the trust relationship explicit and self-describing rather than implicit.
 
-Invocation
-  iss: did:key:zInvoker...
-  aud: did:key:zExecutor...
-  sub: did:mailto:example.com:alice
-  cmd: /widget/crank
-  prf: [CID of Delegation 1]
-```
+The trusted authority is designated in the verification method. Therefore, the trust gap is manifested in the algorithm which expands a DID document from a `did:mailto` or similar DID. DIDs of methods with stored, non-algorithmic DID documents can select their own trusted authority.
 
-The chain satisfies the UCAN proof chain requirement that `prf[0].iss == sub` (both are `did:mailto:example.com:alice`) and `prf[0].aud == invocation.iss` (`did:key:zInvoker...`).
+### 6.2 Authority Compromise
 
----
+If the authority's keypair is compromised, an attacker can issue attestations for arbitrary subjects. In this case, the authority SHOULD rotate keys, and reflect that in the authority's own DID document. Executors SHOULD notice the updated DID document and no longer validate attestations signed by the compromised key.
 
-## 7. Verification
-
-Upon receiving an invocation, the executor MUST:
-
-1. **Standard UCAN chain validation**: verify principal alignment, time bounds, and command attenuation as specified in the UCAN Delegation and Invocation specs.
-
-2. **Detect the attestation type**: inspect the Varsig header of the root delegation. If the algorithm discriminant is `0x300001`, proceed with `authority-attestation` verification.
-
-3. **Extract the authority DID** from the Varsig header.
-
-4. **Trust policy check**: determine whether the authority DID is trusted to attest for the subject DID's method and domain or provider. This is a local policy decision. Executors SHOULD maintain an explicit allowlist of trusted authorities per DID method and domain.
-
-5. **Resolve the authority DID** to obtain its public key.
-
-6. **Verify the authority's signature** in the attestation bytes against the delegation's `SigPayload`.
-
-7. **Verify the payload hash** in the attestation bytes matches the SHA-256 of the canonical DAG-CBOR encoding of the delegation payload.
-
-8. **Verify the attestation timestamp and expiry** are within acceptable bounds.
-
-Steps 2–7 are application-defined logic. The executor MUST NOT accept the invocation if any step fails.
-
----
-
-## 8. Security Considerations
-
-### 8.1 The Trust Gap
-
-This scheme does not eliminate the need for out-of-band trust configuration. The executor must decide whether to trust a given authority for a given DID method and domain or provider. This is unavoidable: no cryptographic scheme can bootstrap trust from an identity that has no keypair. The scheme makes the trust relationship explicit and self-describing (the authority DID is in the Varsig header) rather than implicit.
-
-### 8.2 Authority Compromise
-
-If the authority's keypair is compromised, an attacker can issue attestations for arbitrary subjects. Executors SHOULD support revocation of authority trust, and authorities SHOULD use short-lived attestations (small `exp` windows).
-
-### 8.3 Subject Identity Compromise
+### 6.3 Subject Identity Compromise
 
 The attestation is no stronger than the underlying identity:
 
-- **`email-loop`**: if the email account is compromised, an attacker can complete the email loop and obtain a valid attestation. This is an inherent property of email-based identity.
-- **`oauth2`**: if the OAuth account is compromised, or the IdP is malicious, an attacker can obtain a valid ID token and thus a valid attestation. The authority has no way to detect this.
+- **`did:mailto`**: If the email account is compromised, an attacker can complete the email loop and obtain a valid attestation. This is an inherent property of email-based identity.
+- **`did:oauth2`**: If the OAuth account is compromised, or the IdP is malicious, an attacker can obtain a valid ID token and thus a valid attestation. The authority has no way to detect this.
 
-### 8.4 Replay
+### 6.4 Replay
 
-Attestation is an idempotent operation: attesting the same payload hash for the same subject always produces the same statement, so replaying an attestation has no meaningful effect. An attestation for one payload cannot be used for a different payload, since the authority's signature covers the full `SigPayload`. Replay protection at the invocation level is provided by the UCAN `nonce` field per the standard UCAN spec. The attestation `exp` field limits the window within which a completed verification can be used to construct a delegation.
+Attestation is an idempotent operation: attesting the same payload always produces the same invocation, so replaying the verification has no meaningful effect. An attestation for one payload cannot be used for a different payload, since the authority's signature covers the full `SigPayload`.
 
-### 8.5 Canonicalization
+### 6.5 Canonicalization
 
 The payload hash in the attestation bytes MUST be computed over the canonical DAG-CBOR encoding of the delegation payload, consistent with UCAN's canonicalization requirements. This is the same encoding that is signed over in the `SigPayload`, preventing canonicalization attacks.
 
----
-
-## 9. Open Questions
-
-- The `AuthorityAttestation` verification method type defined here is not exclusive to `did:mailto` and `did:oauth`. Any DID document — including those resolved via conventional means such as `did:web` — MAY include an `AuthorityAttestation` verification method, indicating that authentication for that DID is delegated to a trusted authority. The implications of this for DID document publishing and authority discovery are not yet specified.
-- Should the attestation bytes include the authority's full Varsig header (`alg`), or is the signature algorithm implied by the authority DID's key type? Including it is more explicit but adds bytes.
-- Should `did:oauth` encode the IdP as a DID (e.g. `did:web:accounts.google.com`) rather than a bare domain, for consistency with the rest of the DID ecosystem?
