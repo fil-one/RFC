@@ -26,8 +26,6 @@ After a bucket is created, a delegation to the tenant MUST be issued and stored.
 
 Ingot MUST then issue a `/provider/add` invocation to Sprue to register the bucket/space and assert the bucket's ownership by the tenant.
 
-If a bucket is created _after_ an access key has been created, a root delegation will be issued and stored for each powerline access key owned by the tenant. See [bucket access](#bucket-access).
-
 ### Bucket name mapping
 
 Ingot MUST maintain a mapping of bucket names to identifiers (DIDs) so that requests with buckets names in the URL can be mapped to bucket identifiers for authorization (see [access key creation](#access-key-creation)).
@@ -37,7 +35,7 @@ Ingot MUST maintain a mapping of bucket names to identifiers (DIDs) so that requ
 
 Ingot MUST create and store a secret key per S3 access key.
 
-Access keys MUST be cryptographic keys. They SHOULD be ed25519 keys, where the `accessKeyId` is the `did:key` (public key) and the `secretAccessKey` is the 32 byte ed25519 private key, prefixed with multiformat varint for ed25519 (`0x1300`) and encoded using multibase base64pad.
+Access keys MUST be cryptographic keys. They SHOULD be ed25519 keys. The `accessKeyId` is the ed25519 public key, encoded as a DID but with `did:key:` prefix removed. The `secretAccessKey` is the 32 byte ed25519 private key, prefixed with multiformat varint for ed25519 (`0x1300`) and encoded using multibase base64pad.
 
 You might generate this in ucantone with the following code:
 
@@ -46,12 +44,13 @@ package main
 
 import (
 	"fmt"
+	"strings"
 	"github.com/fil-forge/ucantone/principal/ed25519"
 )
 
 func main() {
 	sk, _ := ed25519.Generate()
-	fmt.Printf("accessKeyId: %s\n", sk.DID())
+	fmt.Printf("accessKeyId: %s\n", strings.TrimPrefix(sk.DID().String(), "did:key:"))
 	fmt.Printf("secretAccessKey: %s\n", ed25519.Format(sk))
 }
 ```
@@ -59,8 +58,8 @@ func main() {
 Output:
 
 ```sh
-accessKeyId: did:key:z6Mkmsr9AESUCv2XJWjfKpLBediyHP8p9yUFE9BmhGLfhFR9
-secretAccessKey: MgCZdkM3wKlJc0T8muCVH5lQVSmIPQGWQo+gP5vTuD3l+DA==
+accessKeyId: z6Mkve2hqQVMc4qGyHJmn29xp8LX6LfeGkJMryGnCEkpsPqo
+secretAccessKey: MgCaxva2aIeovfSx6aI55lSjGwhVI68GxAmo2rGlIVJ6DbQ==
 ```
 
 **S3 IAM role based permissions are modeled as UCAN delegations**, where the AWS "resource" is the UCAN subject, the "action" is the UCAN command, and the "condition" is the UCAN policy. This allows us to use existing machinery to validate an access key is permitted to perform an action.
@@ -84,11 +83,11 @@ Object-level:
 
 Note: there is an AWS quirk where `s3:ListBucket` lists _objects_ in a bucket, while `s3:ListAllMyBuckets` lists buckets. Similarly, `s3:ListBucketVersions` allows listing _object_ versions in a bucket.
 
-Given a tenant key `did:key:tenant`, a bucket `did:key:bucket`, and an access key `did:key:access`, granting the `s3:GetObject` and `s3:PutObject` actions involves creating and storing the following 2 UCAN delegations:
+Given a tenant key `did:plc:tenant`, a bucket `did:key:bucket`, and an access key `did:key:access`, granting the `s3:GetObject` and `s3:PutObject` actions involves creating and storing the following 2 UCAN delegations:
 
 ```json
 {
-  "iss": "did:key:tenant",
+  "iss": "did:plc:tenant",
   "aud": "did:key:access",
   "sub": "did:key:bucket",
   "cmd": "/s3/getobject",
@@ -99,7 +98,7 @@ Given a tenant key `did:key:tenant`, a bucket `did:key:bucket`, and an access ke
 
 ```json
 {
-  "iss": "did:key:tenant",
+  "iss": "did:plc:tenant",
   "aud": "did:key:access",
   "sub": "did:key:bucket",
   "cmd": "/s3/putobject",
@@ -125,9 +124,7 @@ Onward invocations made by Ingot to the Forge network MUST use the access key to
 
 ### Bucket access
 
-It's typical to allow the access key to access any bucket created by the tenant that exists at the time of creation as well as any bucket that may exist at any time in the future. This is modeled as a "powerline" delegation.
-
-If a bucket is created _after_ an access key has been created, a root delegation will be issued and stored (where issuer = tenant, subject = bucket and audience = access key) to allow validation to succeed ([powerline cannot be the root delegation](https://github.com/ucan-wg/delegation#powerline)).
+It's typical to allow the access key to access any bucket created by the tenant that exists at the time of creation as well as any bucket that may exist at any time in the future. This is modeled as a "powerline" delegation, where the UCAN subject is `null`.
 
 ### Key expiry
 
