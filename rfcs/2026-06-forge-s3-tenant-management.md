@@ -17,6 +17,7 @@ Tenant keys MUST be cryptographic key pairs, they MUST also be `did:plc` keys, a
 
 After a tenant key has been created, the Ingot service MUST issue a `/account/add` invocation to Sprue to register the account. Note: this is a new capability that does not exist at time of writing. The authority (delegation) needed for Ingot to invoke this capability is out of scope of this document.
 
+
 ## Bucket creation
 
 A bucket MUST be a cryptographic key pair. They SHOULD be ed25519 keys although other key types MAY be used. A bucket maps to a space in Forge.
@@ -30,6 +31,7 @@ If a bucket is created _after_ an access key has been created, a root delegation
 ### Bucket name mapping
 
 Ingot MUST maintain a mapping of bucket names to identifiers (DIDs) so that requests with buckets names in the URL can be mapped to bucket identifiers for authorization (see [access key creation](#access-key-creation)).
+
 
 ## Access key creation
 
