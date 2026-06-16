@@ -163,18 +163,7 @@ Given a tenant key `did:plc:tenant`, a bucket `did:key:bucket`, and an access ke
 }
 ```
 
-...and the following 3 Forge delegations:
-
-```jsonc
-{
-  "iss": "did:plc:tenant",
-  "aud": "did:key:access",
-  "sub": "did:key:bucket",
-  "cmd": "/content/retrieve",
-  "pol": [],
-  // ...
-}
-```
+...and the following 4 Forge delegations:
 
 ```jsonc
 {
