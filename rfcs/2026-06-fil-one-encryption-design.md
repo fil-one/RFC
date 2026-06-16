@@ -68,7 +68,7 @@ We've discussed tenant DIDs being `did:key`s so far, possibly just by default. H
    - Ingot streams the plaintext through FEE encryption, computing the **plaintext CID** inline as the bytes flow. Only the _ciphertext_ is buffered (to disk).
    - Ingot requests the tenant public key from Hilt (through a cache).
 3. Ingot builds a FEE header with the tenant as the recipient (and thus containing the tenant-wrapped CEK).
-4. Ciphertext (header ‖ payload) is pushed to Forge via Guppy/Sprue.
+4. Envelope blob (header ‖ ciphertext) is pushed to Forge via Guppy/Sprue.
 5. Ingot asks its KMS to wrap the CEK with its own region key.
 6. On successful push, a manifest row (including the region-wrapped key) is committed. On any failure, the buffer is discarded and nothing is committed.
 
@@ -97,7 +97,7 @@ However, multipart itself is a separate concern, and these operations are alread
 
 Notes:
 
-- No data (plaintext or ciphertext) is buffered to disk, for security and for performance. Everything is streamed.
+- No data (plaintext or ciphertext) is buffered to disk, for security and for performance. Everything is streamed. (This is a feature, but not a requirement. We can choose to relax this in the future if, say, caching objects will result in better performance in some cases. But we should do so with care.)
 
 There is **no Hilt dependency on the read path.**
 
@@ -226,6 +226,10 @@ Region key rotation is analogous to Tier 0 tenant rotation: a new region key is 
    The plaintext CIDs are also in the bucket entries. If those remain in MSTs and we continue to plan not to encrypt the MSTs, we have plaintext CIDs hanging around in plaintext anyway.
 
 2. **AES vs X25519 for the region key.** There is _one_ use case for the region key being an asymmetric keypair. If Ingot's wrapped keys were lost, or if a blob were moved or replicated to another region (not currently planned, but in the realm of things we might want), we'd need to restore Ingot's wrapped CEK. Under an asymmetric scheme, Hilt could encrypt the CEK with the region's public key and send it that. Is that enough to change this decision?
+
+3. **One region key vs many.** This proposal describes a single key for the entire region. We can further limit the blast radius by keeping a key per tenant or per bucket. This complicates the interaction with the KMS slightly, but it's a reasonable tradeoff. We also get to decide this late (or change our minds), because this doesn't impact the envelopes at all. We can migrate by re-wrapping the Ingot DB's contents, just like in region key rotation.
+
+4. **One key per tenant vs one key per bucket.** This proposal associates the canonical wrapping key with a _tenant_. We could use a different key per _bucket_ instead. That does a few things: it limits the blast radius of exposing a single key, it makes remediation of an exposure easier by limiting what we need to Tier-2 rotate, and it makes bucket transfer between tenants easier (which has not been planned or discussed). The downside is pretty much that there are more keys to manage. This one is harder to decide later, because it does impact the envelope, but as in Tier 2 rotation, we _do_ get a hand in the bookkeeping from the `kid` in the FEE header, so we'll never lose track of which key is correct. Still, better to pick this up front.
 
 ## Evaluation Criteria
 
