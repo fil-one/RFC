@@ -26,7 +26,7 @@ A trusted centralized service for tenant management exists so that storing secre
 
 ### Tenant API
 
-Hilt MUST be configured with a pre-shared bearer key allowing only the **Fil One service** to call it's [Tenant API](https://github.com/fil-one/fil-one/blob/main/docs/architectural-decisions/2026-04-service-orchestrator-management-api.md).
+Hilt MUST be configured with a pre-shared bearer key allowing only the **Fil One service** to call its [Tenant API](https://github.com/fil-one/fil-one/blob/main/docs/architectural-decisions/2026-04-service-orchestrator-management-api.md).
 
 The tenant API enables "tenants" and S3 style access keys to be created. Both concepts correspond to private keys and are stored securely by Hilt.
 
@@ -61,7 +61,7 @@ Hilt MUST then issue a `/provider/add` invocation to Sprue to register the bucke
 
 ##### Bucket name mapping
 
-Hilt MUST maintain a mapping of bucket names to identifiers (DIDs) so that requests with buckets names in the URL can be mapped to bucket identifiers for authorization (see [access key creation](#access-key-creation)).
+Hilt MUST maintain a mapping of bucket names to identifiers (DIDs) so that requests with bucket names in the URL can be mapped to bucket identifiers for authorization (see [access key creation](#access-key-creation)).
 
 #### Access key creation
 
@@ -234,7 +234,7 @@ Key expiry is simply a UCAN expiration time set on the delegations created for t
 
 ### UCAN API
 
-Hilt is configured with a list of Ingot service DIDs what are allowed to call it's UCAN API. It provides a single UCAN command that may be invoked:
+Hilt is configured with a list of Ingot service DIDs that are allowed to call its UCAN API. It provides a single UCAN command that may be invoked:
 
 #### `/aws/request/authorize`
 
@@ -356,7 +356,7 @@ e.g.
 <details>
 <summary>Sigv4a derived signing key</summary>
 
-A [Sigv4a derived signing key](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_sigv-create-signed-request.html#derive-signing-key-sigv4a) is a ECDSA P256 key. To encode as a DID, you need to multibase base58 encode the compressed public key bytes and tag with the ECDSA P256 public key codec. e.g.
+A [Sigv4a derived signing key](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_sigv-create-signed-request.html#derive-signing-key-sigv4a) is an ECDSA P256 key. To encode as a DID, you need to multibase base58 encode the compressed public key bytes and tag with the ECDSA P256 public key codec. e.g.
 
 ```go
 package main
@@ -387,7 +387,7 @@ func main() {
 
 When handling an authorization request the following steps are performed:
 
-1. Lookup the secret key corresponding to the `accessKeyId` from `x-amz-credential` header.
+1. Lookup the secret key corresponding to the `accessKeyId` from the `Authorization` header credential (signed requests) or the `X-Amz-Credential` query parameter (presigned URLs).
 1. Verify SigV4 signature.
 1. Lookup bucket DID (the subject) from its name in the request URL.
 1. Find proofs necessary to authorize a request to the specific endpoint.
@@ -406,7 +406,7 @@ It is RECOMMENDED to perform some of these steps in parallel and make use of in-
 
 #### Bucket operations
 
-In the future this section will document how Ingot will perform bucket level operations. Tentatively a `/aws/request/authorize` invocation is enough to action bucket level oeprations on Hilt with an authorized API key.
+In the future this section will document how Ingot will perform bucket level operations. Tentatively a `/aws/request/authorize` invocation is enough to action bucket level operations on Hilt with an authorized API key.
 
 
 ## Alternatives considered
@@ -419,8 +419,7 @@ This is not possible for the reason that `/access/delegate` requires the subject
 
 ### Alternative for tracking IAM role based permissions
 
-An alternative to modeling S3 permissions as UCAN delegations would be to have a separate store that maps access keys to their S3 permission set. The `/aws/request/authorize` invocation would need to return this list in the response, so that Hilt can determine if an existing delegation 
-
+An alternative to modeling S3 permissions as UCAN delegations would be to have a separate store that maps access keys to their S3 permission set. The `/aws/request/authorize` invocation would need to return this list in the response, so that Hilt can determine whether the access key is permitted to perform the requested S3 action.
 
 ## Resources
 
