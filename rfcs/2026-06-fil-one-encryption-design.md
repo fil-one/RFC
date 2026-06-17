@@ -18,6 +18,8 @@ Each object is encrypted per [FEE](https://github.com/filecoin-project/FIPs/disc
 
 This RFC is the design we intend to build under [FIL-273](https://linear.app/filecoin-foundation/issue/FIL-273). It's published to get holes poked in it before we write the code.
 
+> **[Key Wrapping](https://en.wikipedia.org/wiki/Key_wrap):** A wrapped key is simply a key (private or symmetric) encrypted with another key. Thus, a wrapped key can be publically visible, and can only be used (by being unwrapped—ie., decrypted) by the holder of the wrapping key. Key wrapping algorithms are a class of encryption algorithms, parallel to (eg.) signing algorithms.
+
 ## Motivation
 
 The requirements that shaped this design:
@@ -66,11 +68,11 @@ We've discussed tenant DIDs being `did:key`s so far, possibly just by default. H
 1. S3 PUT arrives at Ingot; authorization validated.
 2. Ingot generates a fresh CEK. In parallel:
    - Ingot streams the plaintext through FEE encryption, computing the **plaintext CID** inline as the bytes flow. Only the _ciphertext_ is buffered (to disk).
-   - Ingot requests the tenant public key from Hilt (through a cache).
-3. Ingot builds a FEE header with the tenant as the recipient (and thus containing the tenant-wrapped CEK).
+   - Ingot requests the tenant public key from Hilt (via DID resolution, through a cache).
+3. Ingot uses the tenant public key to build a FEE header with _only_ the tenant as the recipient (and thus containing the tenant-wrapped CEK—but _not_ the region-wrapped CEK).
 4. Envelope blob (header ‖ ciphertext) is pushed to Forge via Guppy/Sprue.
 5. Ingot asks its KMS to wrap the CEK with its own region key.
-6. On successful push, a manifest row (including the region-wrapped key) is committed. On any failure, the buffer is discarded and nothing is committed.
+6. On successful push, an Object row and Part rows (including the region-wrapped keys) are committed. On any failure, the buffer is discarded and nothing is committed.
 
 Notes:
 
@@ -78,9 +80,9 @@ Notes:
 
 ### Multipart
 
-Each part is encrypted separately: its own CEK, its own FEE envelope, its own blob. An object is therefore an ordered manifest of segments; a plain single-part PUT is just a one-segment object, so single-part and multipart share all read-side code.
+Each part is encrypted separately: its own CEK, its own FEE envelope, its own blob. An object is therefore an ordered list of parts; a plain single-part PUT is just a one-part object, so single-part and multipart share all read-side code.
 
-This makes parts independent, which is what S3 multipart needs (parts arrive in parallel, out of order, and can be re-uploaded). It also bounds buffer space to one part rather than one object, lets parts be pushed as they arrive, and makes `CompleteMultipartUpload` a pure atomic manifest commit. The cost is two cleanup obligations, since parts hit Forge _before_ the upload completes:
+This makes parts independent, which is what S3 multipart needs (parts arrive in parallel, out of order, and can be re-uploaded). It also bounds buffer space to one part rather than one object and lets parts be pushed as they arrive. The cost is two cleanup obligations, since parts hit Forge _before_ the upload completes:
 
 - **Abort / abandonment** must cryptoshred orphaned parts' key rows and queue their blobs for true deletion.
 - **Superseded parts** (re-uploaded part numbers; last write wins at Complete) must shred the replaced part's key row.
@@ -91,8 +93,8 @@ However, multipart itself is a separate concern, and these operations are alread
 
 1. S3 GET arrives at Ingot; authorization validated.
 2. Ingot looks up the object's parts. For each part, it asks its KMS to unwrap the region-wrapped CEK.
-3. Ingot streams ciphertext from the local Piri, decrypts segment-by-segment in manifest order, and streams plaintext to the client. An auth-tag (tampered data) failure mid-stream terminates the response as an error.
-4. **Range GET** maps the object range to segment spans via the manifest's cumulative plaintext sizes, then to chunk spans via the stored envelope byte lengths, fetches only the affected ciphertext chunks (byte-range retrieval from Piri), and decrypts only those.
+3. Ingot streams ciphertext from the local Piri, decrypts part-by-part in order, and streams plaintext to the client. An auth-tag (tampered data) failure mid-stream terminates the response as an error.
+4. **Range GET** maps the object range to part spans via the parts' cumulative plaintext sizes, then to chunk spans via the stored envelope byte lengths, fetches only the affected ciphertext chunks (byte-range retrieval from Piri), and decrypts only those.
 5. **HEAD/List** report plaintext Content-Length and ETag from stored metadata (not the ciphertext or envelope sizes).
 
 Notes:
@@ -105,21 +107,21 @@ If the region key is ever lost, recovery is: pull the envelope, unwrap its tenan
 
 ### Deletion (cryptoshredding)
 
-DELETE destroys every segment's **region-wrap row** in Ingot's DB. Subsequent GET/HEAD return `NoSuchKey`, and the blobs are queued for the future true-deletion mechanism. That's the cryptoshred: the region can no longer read the object, immediately.
+Object DELETE destroys every part's row in Ingot's DB. Subsequent GET/HEAD return `404 Not Found`, and the blobs are queued for the future true-deletion mechanism. That's the cryptoshred: the region can no longer read the object, immediately.
 
 **What survives:** the **tenant recipient in the envelope** still exists wherever the blob still exists on the network, and Hilt's tenant key still exists (it's shared across the tenant's objects, so it can't be destroyed per-object). So a deleted object remains recoverable _by Fil One_ until the blob itself is truly deleted. Because this is not a normal read path, this should be acceptable.
 
 ### The keys
 
-| Name                      | Type                  | One Per                     | Location (Unencrypted)                 | Purpose                                                              |
-| ------------------------- | --------------------- | --------------------------- | -------------------------------------- | -------------------------------------------------------------------- |
-| Blob CEK                  | AES-256               | Blob                        | —                                      | Encrypts the blob contents. Constant across regions when replicated. |
-| Region KEK                | AES-256               | Region                      | Region secure storage[^secure-storage] | Wraps the Blob CEK for the read path.                                |
-| Region-KEK(Blob-CEK)      | A256KW Result         | Region × Blob[^replication] | Region Ingot DB                        | Unwrapped by Ingot to serve read requests.                           |
-| Tenant KEK                | X25519                | Tenant                      | Hilt DB (public key only)              | Wraps the Blob CEK for the region-independent decryption.            |
-| Tenant-KEK(Blob-CEK)      | ECDH-ES+A256KW Result | Blob                        | FEE Header at start of blob, in Forge  | Unwrapped by tenant for region-independent decryption.               |
-| Hilt Root KEK             | AES-256               | Hilt (i.e., exactly one)    | FilOne secure storage[^secure-storage] | Seals the KEKs in the Hilt DB.                                       |
-| Hilt-Root-KEK(Tenant-KEK) | A256KW Result         | Tenant                      | Hilt DB.                               | Unsealed by Hilt to unwrap keys as tenant.                           |
+| Name                      | Type                  | One Per                     | Location (Unencrypted)                  | Purpose                                                              |
+| ------------------------- | --------------------- | --------------------------- | --------------------------------------- | -------------------------------------------------------------------- |
+| Blob CEK                  | AES-256               | Blob                        | —                                       | Encrypts the blob contents. Constant across regions when replicated. |
+| Region KEK                | AES-256               | Region                      | Region secure storage[^secure-storage]  | Wraps the Blob CEK for the read path.                                |
+| Region-KEK(Blob-CEK)      | A256KW Result         | Region × Blob[^replication] | Region Ingot DB                         | Unwrapped by Ingot to serve read requests.                           |
+| Tenant KEK                | X25519                | Tenant                      | Hilt DB (public key only)               | Wraps the Blob CEK for region-independent recovery.                  |
+| Tenant-KEK(Blob-CEK)      | ECDH-ES+A256KW Result | Blob                        | FEE Header at start of blob, in Forge   | Unwrapped by Hilt for region-independent recovery.                   |
+| Hilt Root KEK             | AES-256               | Hilt (i.e., exactly one)    | Fil One secure storage[^secure-storage] | Seals the KEKs in the Hilt DB.                                       |
+| Hilt-Root-KEK(Tenant-KEK) | A256KW Result         | Tenant                      | Hilt DB.                                | Unsealed by Hilt to unwrap keys as tenant.                           |
 
 Key types:
 
@@ -194,7 +196,7 @@ There are three levels of rotation available to protect the tenant key. We defin
   - **When:** On a regular schedule, and immediately in response to any DB exposure. Schedule can be implemented in the future.
 - **Tier 1: Rotate the wrap key for _new_ envelopes (prospective).** Hilt publishes a new tenant key (eg., `#wrap-2`) and marks it as the current key. New blobs will use the new key. Old envelopes are untouched and stay valid. They self-describe their key via `kid`, and Hilt's still holds the matching private half. This bounds how much data any single key protects. It is _not_ revocation: a leaked old key still reads old envelopes until those blobs are re-encrypted and truly deleted.
   - **When:** On a regular schedule. Schedule can be implemented in the future. _Not_ in response to exposure—this limits future exposure, but does nothing to remediate an attack.
-- **Tier 2: Re-encrypt existing blobs (retroactive).** Hilt creates a new tenant key as in Tier 1. Ingot walks the tenant's segments, decrypts each with the _region_ key (so plaintext never leaves the region, and Hilt isn't needed), re-encrypts under a fresh CEK, wraps with the new tenant `kid` and with the (unchanged) region KEK, pushes the new blob, atomically swaps the manifest entry, shreds the old region row, and queues the old blob for true deletion. Because objects are content-mutable in the bucket model (a key points at a current blob, tracked in DB or MST), this is just a self-overwrite.
+- **Tier 2: Re-encrypt existing blobs (retroactive).** Hilt creates a new tenant key as in Tier 1. Ingot walks the tenant's object parts, decrypts each with the _region_ key (so plaintext never leaves the region, and Hilt isn't needed), re-encrypts under a fresh CEK, wraps with the new tenant `kid` and with the (unchanged) region KEK, pushes the new blob, atomically swaps the part entry, shreds the old region row, and queues the old blob for true deletion. Because objects are content-mutable in the bucket model (a key points at a current blob, tracked in DB or MST), this is just a self-overwrite.
   - **When:** Immediately in response to key exposure.
 
 #### Region
@@ -205,7 +207,7 @@ Region key rotation is analogous to Tier 0 tenant rotation: a new region key is 
 
 - **FEE library**: A Go package (initially inside Ingot's module; promotable to its own repo if it's needed beyond Ingot). Envelope encode/decode, STREAM encrypt/decrypt, X25519 recipient wrap/unwrap, range decryption. Cross-checked against the TypeScript `foc-encryption` implementation with shared test vectors.
 - **Hilt**: Tenant wrap-key registry and custody, wrap-context DID documents, key distribution to regions. Recovery-unwrap-as-a-service is future; v1 proves recoverability with a library-level test.
-- **Ingot**: The object/segment schema (manifest + wrapped keys + plaintext metadata), the encrypting write path, the decrypting read path, deletion, and the region-key provider interface.
+- **Ingot**: The object/part schema (parts + wrapped keys + plaintext metadata), the encrypting write path, the decrypting read path, deletion, and the region-key provider interface.
 
 ## Alternatives Considered
 
@@ -215,7 +217,7 @@ Region key rotation is analogous to Tier 0 tenant rotation: a new region key is 
 
 **Asymmetric X25519 region and Hilt keypairs instead of symmetric AES keys.** These keys are only used to wrap values for storage at rest locally: the CEKs and the tenant keys, respectively. No other party needs to encrypt with these, so we don't need a public key. Using AES gives us better compatibility with key management systems (especially hardware security modules) which can hold a non-exportable key and en/decrypt for us on demand. Conversely, the _tenant_ key is used by the region for encryption, so we want a public key it can use, and to hold the (encrypted) private key in Hilt. (But: see Open Question #2.)
 
-**Transcode multipart into one envelope at Complete.** Buffer parts under an ephemeral key, then re-encrypt into a single canonical FEE object at `CompleteMultipartUpload`. Rejected in favor of per-part envelopes: transcoding needs up-to-object-size buffer and an extra crypto pass, while per-part envelopes are naturally independent, bound buffers to one part, and make Complete a metadata-only commit. The cost (a manifest, plus abort/supersede cleanup) is bookkeeping we need anyway.
+**Transcode multipart into one envelope at Complete.** Buffer parts under an ephemeral key, then re-encrypt into a single canonical FEE object at `CompleteMultipartUpload`. Rejected in favor of per-part envelopes: transcoding needs up-to-object-size buffer and an extra crypto pass, while per-part envelopes are naturally independent, bound buffers to one part, and make Complete a metadata-only commit. The cost (an object row and part rows, plus abort/supersede cleanup) is bookkeeping we need anyway.
 
 **`did:key` tenant identity.** `did:key`s do offer an X25519 `keyAgreement` verification method. But `did:key`s, by their nature, can't rotate their keys. The spec is clear that they shouldn't be used for long-term identity for exactly this reason. Whatever DID method we use should be able to rotate its keys.
 
@@ -227,9 +229,9 @@ Region key rotation is analogous to Tier 0 tenant rotation: a new region key is 
 
 2. **AES vs X25519 for the region key.** There is _one_ use case for the region key being an asymmetric keypair. If Ingot's wrapped keys were lost, or if a blob were moved or replicated to another region (not currently planned, but in the realm of things we might want), we'd need to restore Ingot's wrapped CEK. Under an asymmetric scheme, Hilt could encrypt the CEK with the region's public key and send it that. Is that enough to change this decision?
 
-3. **One region key vs many.** This proposal describes a single key for the entire region. We can further limit the blast radius by keeping a key per tenant or per bucket. This complicates the interaction with the KMS slightly, but it's a reasonable tradeoff. We also get to decide this late (or change our minds), because this doesn't impact the envelopes at all. We can migrate by re-wrapping the Ingot DB's contents, just like in region key rotation.
+3. **In region: One key vs many.** This proposal describes a single key for the entire region, held by a KMS at the region (either as part of the delivered appliance or run by the region provider). We can further limit the blast radius by having Ingot manage a read-path key per tenant or per bucket. This complicates the interaction with the KMS slightly, but it's a reasonable tradeoff. We also get to decide this late (or change our minds), because this doesn't impact the envelopes at all. We can migrate by re-wrapping the Ingot DB's contents, just like in region key rotation.
 
-4. **One key per tenant vs one key per bucket.** This proposal associates the canonical wrapping key with a _tenant_. We could use a different key per _bucket_ instead. That does a few things: it limits the blast radius of exposing a single key, it makes remediation of an exposure easier by limiting what we need to Tier-2 rotate, and it makes bucket transfer between tenants easier (which has not been planned or discussed). The downside is pretty much that there are more keys to manage. This one is harder to decide later, because it does impact the envelope, but as in Tier 2 rotation, we _do_ get a hand in the bookkeeping from the `kid` in the FEE header, so we'll never lose track of which key is correct. Still, better to pick this up front.
+4. **In Hilt: One key per tenant vs. one key per bucket.** This proposal associates the canonical wrapping key with a _tenant_. We could use a different key per _bucket_ instead. That does a few things: it limits the blast radius of exposing a single key, it makes remediation of an exposure easier by limiting what we need to Tier-2 rotate, and it makes bucket transfer between tenants easier (which has not been planned or discussed). The downside is pretty much that there are more keys to manage. This one is harder to decide later, because it does impact the envelope, but as in Tier 2 rotation, we _do_ get a hand in the bookkeeping from the `kid` in the FEE header, so we'll never lose track of which key is correct. Still, better to pick this up front.
 
 ## Evaluation Criteria
 
