@@ -181,11 +181,11 @@ For multiple buckets, multiple delegations are created. Powerline delegations MA
 
 S3 permissions where there is not an equivalent Forge delegation MUST be handled directly by Ingot or forwarded to a UCAN API at Hilt.
 
-### Bucket access
+#### Bucket access
 
 It's typical to allow the access key to access any bucket created by the tenant that exists at the time of creation as well as any bucket that may exist at any time in the future. This is modeled as a "powerline" delegation, where the UCAN subject is `null`.
 
-### Key expiry
+#### Key expiry
 
 Key expiry is simply a UCAN expiration time set on the delegations created for the key.
 
