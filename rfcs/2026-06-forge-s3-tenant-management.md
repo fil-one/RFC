@@ -761,7 +761,7 @@ Get tenant private key.
 
 Create UCAN delegations, signed with the tenant key:
 
-```json
+```jsonc
 {
   "iss": "tenant DID",
   "aud": "access key DID",
@@ -797,7 +797,7 @@ Could be Fil One, but also generic S3 client with an access key.
 
 Invoke `/s3/bucket/create` on Hilt. e.g.
 
-```json
+```jsonc
 {
   "iss": "ingot DID",
   "aud": "hilt DID",
@@ -853,7 +853,7 @@ CREATE TABLE bucket (
 
 Create UCAN delegation to tenant, sign with bucket key:
 
-```json
+```jsonc
 {
   "iss": "bucket DID",
   "aud": "tenant DID",
@@ -896,7 +896,7 @@ Could be Fil One, but also generic S3 client with an access key.
 
 Invoke `/s3/request/authorize` on Hilt.
 
-```json
+```jsonc
 {
   "iss": "ingot DID",
   "aud": "hilt DID",
@@ -968,7 +968,7 @@ The response only includes _temporary_ (24 hour expiry) delegations from the acc
 
 Invoke `/s3/bucket/info` on Hilt. e.g.
 
-```json
+```jsonc
 {
   "iss": "ingot DID",
   "aud": "hilt DID",
