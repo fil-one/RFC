@@ -195,9 +195,9 @@ Hilt provides a UCAN RPC API for the following commands:
 
 #### `/s3/request/authorize`
 
-Issuer: Ingot
-Audience: Hilt
-Subject: Hilt
+* Issuer: Ingot
+* Audience: Hilt
+* Subject: Hilt
 
 Authorizes AWS S3 API requests. Given the incoming request and Sigv4 signature, this handler:
 
@@ -379,9 +379,9 @@ It is RECOMMENDED to perform some of these steps in parallel and make use of in-
 
 #### `/s3/bucket/create`
 
-Issuer: Ingot
-Audience: Hilt
-Subject: Hilt
+* Issuer: Ingot
+* Audience: Hilt
+* Subject: Hilt
 
 Creates a bucket and provisions it with Sprue. Returns the bucket DID and any existing delegations that now automatically have access to it.
 
@@ -426,9 +426,9 @@ This returns the same structure as a call to [`/s3/request/authroize`](#s3reques
 
 #### `/s3/bucket/delete`
 
-Issuer: Ingot
-Audience: Hilt
-Subject: Hilt
+* Issuer: Ingot
+* Audience: Hilt
+* Subject: Hilt
 
 Deletes an _empty_ bucket by removing it from Hilt's stores and revoking any delegations that allow access to it.
 
@@ -458,9 +458,9 @@ Successful deletion returns a unit result (`{}`).
 
 #### `/s3/bucket/info`
 
-Issuer: Ingot
-Audience: Hilt
-Subject: Hilt
+* Issuer: Ingot
+* Audience: Hilt
+* Subject: Hilt
 
 Retrieves information for a bucket by global name. Returns the bucket DID and a delegation chain from the bucket to the access key DID provided in the arguments.
 
@@ -545,9 +545,9 @@ Where:
 
 #### `/s3/bucket/list`
 
-Issuer: Ingot
-Audience: Hilt
-Subject: Hilt
+* Issuer: Ingot
+* Audience: Hilt
+* Subject: Hilt
 
 Lists buckets for the tenant.
 
