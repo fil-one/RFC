@@ -20,17 +20,15 @@ Pre-reading: [Fil One Service Orchestrator API](https://github.com/fil-one/fil-o
 | Tenant  | A Fil One organization.                                      |
 
 
-## Hilt - an S3 tenant management service
+## Hilt - Tenant API
 
 A trusted centralized service for tenant management exists so that storing secrets is not a requirement for Ingot deployments. Hilt implements the [Tenant API](https://github.com/fil-one/fil-one/blob/main/docs/service-orchestrator-integration/management-openapi.yaml), provides a UCAN API for retrieving proof chains for invocations into the Forge network and speaks to the Forge upload service.
-
-### Tenant API
 
 Hilt MUST be configured with a pre-shared bearer key allowing only the **Fil One service** to call its [Tenant API](https://github.com/fil-one/fil-one/blob/main/docs/service-orchestrator-integration/management-openapi.yaml).
 
 The tenant API enables "tenants" and S3 style access keys to be created. Both concepts correspond to private keys and are stored securely by Hilt.
 
-#### Tenant creation
+### Tenant creation
 
 Hilt MUST create and store a secret key per tenant. Per tenant keys limit blast radius in case of a security breach.
 
@@ -40,7 +38,7 @@ Tenant keys MUST be cryptographic key pairs, they MUST also be `did:plc` keys, a
 
 After Ingot creates a tenant key, it MUST issue a `/account/add` invocation to Sprue to register the account. Note: this is a new capability that does not exist at time of writing. The means of obtaining authority (delegation) needed for Ingot to invoke this capability is out of scope of this document.
 
-#### Bucket creation
+### Bucket creation
 
 A bucket MUST be a cryptographic key pair. They SHOULD be ed25519 keys although other key types MAY be used. A bucket is a space in Forge.
 
@@ -59,11 +57,11 @@ A bucket is created by Hilt via the tenant API. After creation, a delegation to 
 
 Hilt MUST then issue a `/provider/add` invocation to Sprue to register the bucket (space) and assert the bucket's ownership by the tenant.
 
-##### Bucket name mapping
+#### Bucket name mapping
 
 Hilt MUST maintain a mapping of bucket names to identifiers (DIDs) so that requests with bucket names in the URL can be mapped to bucket identifiers for authorization (see [access key creation](#access-key-creation)).
 
-#### Access key creation
+### Access key creation
 
 Hilt MUST create and store a secret key per S3 access key.
 
@@ -181,19 +179,21 @@ For multiple buckets, multiple delegations are created. Powerline delegations MA
 
 S3 permissions where there is not an equivalent Forge delegation MUST be handled directly by Ingot or forwarded to a UCAN API at Hilt.
 
-#### Bucket access
+### Bucket access
 
 It's typical to allow the access key to access any bucket created by the tenant that exists at the time of creation as well as any bucket that may exist at any time in the future. This is modeled as a "powerline" delegation, where the UCAN subject is `null`.
 
-#### Key expiry
+### Key expiry
 
 Key expiry is simply a UCAN expiration time set on the delegations created for the key.
 
-### UCAN API
+## Hilt - UCAN API
+
+Hilt is a trusted centralized service for tenant management exists so that storing secrets is not a requirement for Ingot deployments. Hilt provides a UCAN API for Ingot to retrieving proof chains for invocations into the Forge network and it also speaks to the Forge upload service.
 
 Hilt provides a UCAN RPC API for the following commands:
 
-#### `/s3/request/authorize`
+### `/s3/request/authorize`
 
 * Issuer: Ingot
 * Audience: Hilt
@@ -207,7 +207,7 @@ Authorizes AWS S3 API requests. Given the incoming request and Sigv4 signature, 
 1. Re-delegates capabilities to the **invocation issuer**.
 1. Returns the derived signing key and delegations.
 
-##### Arguments
+#### Arguments
 
 **IPLD schema**
 
@@ -256,7 +256,7 @@ e.g.
 }
 ```
 
-##### Result
+#### Result
 
 A successful authorization will return a SigV4/SigV4a derived signing key that can be used to verify requests, and a set of delegations for the invocation issuer that allows access to the Forge network. The delegations MUST have a 24 hour or less TTL.
 
@@ -364,7 +364,7 @@ func main() {
 ```
 </details>
 
-##### Authorization steps
+#### Authorization steps
 
 When handling an authorization request the following steps are performed:
 
@@ -377,7 +377,7 @@ When handling an authorization request the following steps are performed:
 
 It is RECOMMENDED to perform some of these steps in parallel and make use of in-memory caches.
 
-#### `/s3/bucket/create`
+### `/s3/bucket/create`
 
 * Issuer: Ingot
 * Audience: Hilt
@@ -385,7 +385,7 @@ It is RECOMMENDED to perform some of these steps in parallel and make use of in-
 
 Creates a bucket and provisions it with Sprue. Returns the bucket DID and any existing delegations that now automatically have access to it.
 
-##### Arguments
+#### Arguments
 
 **IPLD schema**
 
@@ -420,11 +420,11 @@ e.g.
 }
 ```
 
-##### Result
+#### Result
 
 This returns the same structure as a call to [`/s3/request/authroize`](#s3requestauthorize).
 
-#### `/s3/bucket/delete`
+### `/s3/bucket/delete`
 
 * Issuer: Ingot
 * Audience: Hilt
@@ -432,7 +432,7 @@ This returns the same structure as a call to [`/s3/request/authroize`](#s3reques
 
 Deletes an _empty_ bucket by removing it from Hilt's stores and revoking any delegations that allow access to it.
 
-##### Arguments
+#### Arguments
 
 **IPLD schema**
 
@@ -452,11 +452,11 @@ type DeleteArguments struct {
 ```
 </details>
 
-##### Result
+#### Result
 
 Successful deletion returns a unit result (`{}`).
 
-#### `/s3/bucket/info`
+### `/s3/bucket/info`
 
 * Issuer: Ingot
 * Audience: Hilt
@@ -464,7 +464,7 @@ Successful deletion returns a unit result (`{}`).
 
 Retrieves information for a bucket by global name. Returns the bucket DID and a delegation chain from the bucket to the access key DID provided in the arguments.
 
-##### Arguments
+#### Arguments
 
 **IPLD schema**
 
@@ -486,7 +486,7 @@ type InfoArguments struct {
 ```
 </details>
 
-##### Result
+#### Result
 
 **IPLD schema**
 
@@ -543,7 +543,7 @@ Where:
 * `delegations` is a map of `string(CID)` → `[CID]`. Keys are string encoded CID of a delegation whose audience is the access key DID. Values are a proof chain of delegation links from the bucket to the access key.
 
 
-#### `/s3/bucket/list`
+### `/s3/bucket/list`
 
 * Issuer: Ingot
 * Audience: Hilt
@@ -551,7 +551,7 @@ Where:
 
 Lists buckets for the tenant.
 
-##### Arguments
+#### Arguments
 
 **IPLD schema**
 
@@ -571,7 +571,7 @@ type ListArguments struct {
 ```
 </details>
 
-##### Result
+#### Result
 
 **IPLD schema**
 
@@ -622,15 +622,15 @@ type Owner struct {
 </details>
 
 
-## Ingot - an S3 facade co-located with a Forge Piri node
+## Ingot - S3 API
 
-### S3 API
+Ingot is an S3 facade co-located with a Forge Piri node.
 
-#### Bucket operations
+### Bucket operations
 
 Bucket operations are forwarded onto Hilt as [`/s3/bucket/create`](#s3bucketcreate), [`/s3/bucket/delete`](#s3bucketdelete) and [`/s3/bucket/list`](#s3bucketlist) invocations.
 
-#### Object operations
+### Object operations
 
 All object operations are handled by Ingot, after request authorization via local cache or via Hilt.
 
