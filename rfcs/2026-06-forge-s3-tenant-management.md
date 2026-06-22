@@ -127,11 +127,11 @@ When an access key is created, Forge related permissions are delegated from the 
 | `s3:ListAllMyBuckets`    | n/a                                      |
 | `s3:DeleteBucket`        | n/a                                      |
 
-Observe that in the table above, multiple actions map to the same forge command and some actions do not have an equivalent Forge command. Hilt and Ingot MUST be able to determine if an access key is authorized to perform the S3 action and cannot do this by simply receiving Forge delegations alone.
+Observe that in the table above, multiple permissions map to the same forge command and some permissions do not have an equivalent Forge command. Hilt and Ingot MUST be able to determine if an access key is authorized to perform the S3 action and cannot do this by simply receiving Forge delegations alone.
 
 To address this problem and facilitate authorization at Ingot, delegations for accessing the Forge network MUST be accompanied by the list of S3 permissions assigned to the access key. See [`/s3/request/authorize`](#s3requestauthorize).
 
-Given a tenant key `did:plc:tenant`, a bucket `did:key:bucket`, and an access key `did:key:access`, granting the `s3:GetObject` and `s3:PutObject` actions involves creating and storing the following 4 UCAN delegations:
+Given a tenant key `did:plc:tenant`, a bucket `did:key:bucket`, and an access key `did:key:access`, granting the `s3:GetObject` and `s3:PutObject` permissions involves creating and storing the following 4 UCAN delegations:
 
 ```jsonc
 {
@@ -492,7 +492,7 @@ type InfoArguments struct {
 
 ```ipldsch
 type InfoOK struct {
-  id          String # Bucket DID
+  id          String               # Bucket DID
   permissions { String: [String] } # S3 permissions for access key
   delegations { String: [Link] }
 }
@@ -656,7 +656,7 @@ Pre-authorizing Ingot to `/provider/add` raises additional concerns:
 
 We considered modelling S3 IAM role based permissions as UCAN delegations. The AWS "resource" is the UCAN subject, the "action" is the UCAN command, and the "condition" is the UCAN policy. This would have allowed us to use existing machinery to validate an access key is permitted to perform an action.
 
-Actions are mapped to commands by lowercasing, replacing ":" with "/" and prefixing with "/". e.g. `s3:GetObject` becomes `/s3/getobject`. This makes actions compliant with the rules for [command segment structure](https://github.com/ucan-wg/spec#segment-structure).
+Permissions are mapped to commands by lowercasing, replacing ":" with "/" and prefixing with "/". e.g. `s3:GetObject` becomes `/s3/getobject`. This makes permissions compliant with the rules for [command segment structure](https://github.com/ucan-wg/spec#segment-structure).
 
 The combination of S3 action delegations and Forge delegations allows Ingot to determine if an access key is authorized to perform an S3 action, and map the S3 action to an authorized invocation into the Forge network.
 
@@ -767,7 +767,6 @@ Create UCAN delegations, signed with the tenant key:
   "aud": "access key DID",
   "sub": null, // OR per bucket in request
   "cmd": "...", // per command mapped from permissions
-  "meta": { "s3perms": ["s3:..."] } // authorized S3 permissions this delegation can be used for (enforced by Ingot)
 }
 ```
 
@@ -776,8 +775,8 @@ Store in DB:
 ```sql
 CREATE TABLE delegation (
     id       TEXT PRIMARY KEY, -- CID of delegation
-    audience TEXT NOT NULL, -- DID
-    subject  TEXT, -- DID
+    audience TEXT NOT NULL,    -- DID
+    subject  TEXT,             -- DID
     command  TEXT,
     data     BYTEA NOT NULL
 );
@@ -835,7 +834,7 @@ Hilt unpacks the access key ID from the AWS API request, and verifies the signat
 
 The access key details are fetched from the DB and the following verifications are performed:
 
-* The `s3:CreateBucket` action is present in the authorized `actions` for the key.
+* The `s3:CreateBucket` action is present in the authorized `permissions` for the key.
 * The access key `tenant_id` matches the invocation issuer DID.
 
 Hilt generates a bucket key.
@@ -868,17 +867,7 @@ Discard the bucket private key.
 
 Delegations from the bucket DID to the access key are recursively fetched from the `delegation` table and included in the response.
 
-```ipldsch
-type CreateOK struct {
-  id          String # Bucket DID
-  delegations { String: [Link] }
-}
-```
-
-Where:
-
-* `id` is the DID of the newly created bucket.
-* `delegations` is a map of `string(CID)` → `[CID]`. Keys are string encoded CID of a delegation whose audience is the access key DID. Values are a proof chain of delegation links from the bucket to the access key.
+This returns the same structure as a call to [`/s3/request/authroize`](#s3requestauthorize).
 
 This response should be cached by Ingot in the same way as `/s3/bucket/info` responses, so that it can handle listing buckets for the access key.
 
@@ -932,7 +921,8 @@ The access key details are fetched from the DB and the following verifications a
 
 ```ipldsch
 type AuthorizeOK struct {
-  bucket      String # DID
+  bucket      String               # DID
+  permissions { String: [String] } # S3 permission set for the access key
   keys        { String: [VerificationKey] }
   delegations { String: [Link] }
 }
@@ -950,9 +940,9 @@ type VerificationKey struct {
 
 Where:
 
-* `keys` is a map of access key ID → derived signing key(s).
-* `VerificationKey` is a derived SigV4 or SigV4a signing key for verifying the request and additional requests until the key expires.
-* `delegations` is a map of `string(CID)` → `[CID]`. Keys are string encoded CID of a delegation whose audience is the invocation issuer. Values are a proof chain of delegation links. This will be only 1 value in the initial implementation but is defined as a list to allow multiple to be included if necessary.
+* `permissions` is a map of `DID` (access key) → list of assigned S3 permission strings.
+* `keys` is a map of `DID` (access key) → `bytes` (derived signing key). Hilt MUST return s derived signing key that matches the signing key kind used in the AWS API request. It MAY return the other key kind.
+* `delegations` is a map of `string(CID)` → `[CID]`. Keys are string encoded CID of a delegation whose audience is the invocation issuer. Values are a proof chain of delegation links. This will be only 1 value in the initial implementation but is defined as a list to allow multiple to be included in the future if necessary.
 
 Hilt then fetches ALL delegations for the access key. e.g.
 
@@ -998,7 +988,8 @@ Delegations from the bucket DID to the `accessKey` are recursively fetched from 
 
 ```ipldsch
 type InfoOK struct {
-  id          String # Bucket DID
+  id          String               # Bucket DID
+  permissions { String: [String] } # S3 permissions for access key
   delegations { String: [Link] }
 }
 ```
@@ -1006,6 +997,7 @@ type InfoOK struct {
 Where:
 
 * `id` is the DID of the bucket.
+* `permissions` is a map of `DID` (access key) → list of assigned S3 permission strings.
 * `delegations` is a map of `string(CID)` → `[CID]`. Keys are string encoded CID of a delegation whose audience is the access key DID. Values are a proof chain of delegation links from the bucket to the access key.
 
 ##### 6. Ingot
@@ -1065,7 +1057,7 @@ Hilt unpacks the access key ID from the AWS API request, and verifies the signat
 
 The access key details are fetched from the DB and the following verifications are performed:
 
-* The `s3:DeleteBucket` action is present in the authorized `actions` for the key.
+* The `s3:DeleteBucket` action is present in the authorized `permissions` for the key.
 * The access key `tenant_id` matches the invocation issuer DID.
 
 Hilt must then verify the bucket is empty. This involves fetching the tenant key and delegation from the bucket to the tenant and invoking `/blob/list`.
