@@ -225,6 +225,8 @@ Region key rotation is analogous to Tier 0 tenant rotation: a new region key is 
 
 1. **In Hilt: One key per tenant vs. one key per bucket.** This proposal associates the canonical wrapping key with a _tenant_. We could use a different key per _bucket_ instead. That does a few things: it limits the blast radius of exposing a single key, it makes remediation of an exposure easier by limiting what we need to Tier-2 rotate, and it makes bucket transfer between tenants easier (which has not been planned or discussed). The downside is pretty much that there are more keys to manage. This one is harder to decide later, because it does impact the envelope, but as in Tier 2 rotation, we _do_ get a hand in the bookkeeping from the `kid` in the FEE header, so we'll never lose track of which key is correct. Still, better to pick this up front.
 
+   **_This decicision is deferred until we truly need to make it. We just don't have enough signal yet, and there's plenty we can do in the meantime._**
+
 ## Evaluation Criteria
 
 Ideally, we'll be able to write Smelt tests around these criteria.
