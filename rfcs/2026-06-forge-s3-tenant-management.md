@@ -510,6 +510,32 @@ type InfoOK struct {
 ```
 </details>
 
+e.g.
+
+```jsonc
+// Encoded as dag-json for readability
+{
+  "id": "did:key:z6MkmNBgCewjYfEDTdKLpHkbMWUogJk29CxmiVdLeW4Kz3UG",
+  "permissions": {
+    // access key → S3 permissions
+    "did:key:z6MkjFRxLLGdBqQSLkZbVnuwUFiomK8eGBkPtim9ETvP7vec": [
+      "s3:GetObject",
+      "s3:PutObject"
+    ]
+  },
+  "delegations": {
+    "bafyreigngbemvzgbmelwddwoms2ak2g32vmhcpxg6dqlwvb6spiezoc4py": [
+      // Root delegation:
+      // space → tenant
+      { "/": "bafyreiabuvg5hkupzjfn2kqywbdp5xhsb25pmhviyfz77yxhspssvxsv5y" },
+      // Intermediate delegation:
+      // tenant → access key
+      { "/": "bafyreigngbemvzgbmelwddwoms2ak2g32vmhcpxg6dqlwvb6spiezoc4py" },
+    ]
+  }
+}
+```
+
 Where:
 
 * `id` is the DID of the bucket.
