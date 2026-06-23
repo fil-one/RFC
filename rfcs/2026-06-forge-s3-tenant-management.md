@@ -775,11 +775,12 @@ Store in DB:
 
 ```sql
 CREATE TABLE delegation (
-    id       TEXT PRIMARY KEY, -- CID of delegation
-    audience TEXT NOT NULL,    -- DID
-    subject  TEXT,             -- DID
-    command  TEXT,
-    data     BYTEA NOT NULL
+    id         TEXT PRIMARY KEY, -- CID of delegation
+    audience   TEXT NOT NULL,    -- DID
+    subject    TEXT,             -- DID
+    command    TEXT,
+    data       BYTEA NOT NULL,
+    expires_at TIMESTAMPZ
 );
 
 CREATE INDEX aud_sub_cmd_idx ON delegation (audience, subject, command);
