@@ -422,7 +422,7 @@ e.g.
 
 #### Result
 
-This returns the same structure as a call to [`/s3/request/authroize`](#s3requestauthorize).
+This returns the same structure as a call to [`/s3/request/authorize`](#s3requestauthorize).
 
 ### `/s3/bucket/delete`
 
