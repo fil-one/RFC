@@ -737,7 +737,8 @@ See [OpenAPI spec](https://github.com/fil-one/fil-one/blob/d11bdb4aca27d11771562
 
 The following verifications are performed:
 
-* The buckets in the request exist.
+* The bucket(s) in the request exist.
+* The bucket(s) belong to the tenant in question.
 * The permissions are all in the allowed set of AWS S3 permissions that may be requested.
 
 Generate and store access key in KMS:
