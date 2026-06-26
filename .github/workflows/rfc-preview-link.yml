@@ -1,0 +1,75 @@
+name: RFC Preview Link
+
+# When a PR is opened, add a link to the rendered RFC (at the PR's own ref) to
+# the top of the PR description so reviewers can read the proposal as it stands
+# on the branch. The PR template carries a placeholder comment that this
+# workflow swaps out for the real link.
+
+on:
+  pull_request:
+    types: [opened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  preview-link:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+
+            // Collect the RFC markdown files this PR adds or changes.
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number,
+            });
+
+            const rfcs = files
+              .filter(f => f.status !== 'removed')
+              .filter(f => f.filename.toLowerCase().endsWith('.md'))
+              .filter(f => f.filename.toLowerCase() !== 'readme.md');
+
+            if (rfcs.length === 0) {
+              core.info('No RFC markdown files found in this PR; nothing to do.');
+              return;
+            }
+
+            // A PR should only ever add a single RFC; if it adds more we fix it
+            // up by hand, so just link the first one. Point at the PR's head ref
+            // so the preview tracks the branch, via the head repo so forks work.
+            const rfc = rfcs[0];
+            const headRepo = pr.head.repo.full_name;
+            const headRef = pr.head.ref;
+            const url = `https://github.com/${headRepo}/blob/${encodeURIComponent(headRef)}/${rfc.filename.split('/').map(encodeURIComponent).join('/')}`;
+
+            const START = '<!-- rfc-preview-link:start -->';
+            const END = '<!-- rfc-preview-link:end -->';
+            const block = [
+              START,
+              `[📖 Preview](${url})`,
+              END,
+            ].join('\n');
+
+            let body = pr.body || '';
+
+            const blockRe = new RegExp(`${START}[\\s\\S]*?${END}`);
+            if (blockRe.test(body)) {
+              // The PR template carries the markers, so this is the usual path:
+              // replace the placeholder block in place (also idempotent on re-run).
+              body = body.replace(blockRe, block);
+            } else {
+              // Markers absent (template removed): prepend the preview block.
+              body = body ? `${block}\n\n${body}` : block;
+            }
+
+            await github.rest.pulls.update({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: pr.number,
+              body,
+            });
