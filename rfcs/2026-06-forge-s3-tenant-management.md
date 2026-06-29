@@ -219,7 +219,7 @@ type AuthorizeArguments struct {
 # AWS API request
 type Request struct {
   method  String
-  headers { String: [String] }
+  headers { String: String }
   url     String
   # TODO: needs hashed payload?
 }
@@ -234,9 +234,9 @@ type AuthorizeArguments struct {
 }
 
 type Request struct {
-  Method  string              `cborgen:"method"`
-  Headers map[string][]string `cborgen:"headers"`
-  URL     string              `cborgen:"url"`
+  Method  string            `cborgen:"method"`
+  Headers map[string]string `cborgen:"headers"`
+  URL     string            `cborgen:"url"`
 }
 ```
 </details>
