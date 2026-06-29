@@ -121,7 +121,7 @@ When an access key is created, Forge related permissions are delegated from the 
 | `s3:PutObjectLegalHold`  | `/blob/add`, `/index/add`, `/upload/add` |
 | `s3:DeleteObject`        | `/blob/remove`, `/upload/remove`         |
 | `s3:DeleteObjectVersion` | `/blob/remove`, `/upload/remove`         |
-| `s3:ListBucket`          | `/blob/list`, `/upload/list`             |
+| `s3:ListBucket`          | `/content/retrieve`                      |
 | `s3:ListBucketVersions`  | `/content/retrieve`                      |
 | `s3:CreateBucket`        | n/a                                      |
 | `s3:ListAllMyBuckets`    | n/a                                      |
@@ -717,6 +717,7 @@ Store tenant info in DB:
 ```sql
 CREATE TABLE tenant (
     id          TEXT PRIMARY KEY, -- DID
+    external_id TEXT UNIQUE,      -- external Tenant API id ({tenantId})
     provider_id TEXT REFERENCES provider(id),
     name        TEXT,
     status      TEXT NOT NULL, -- active, write-locked, disabled
@@ -754,7 +755,8 @@ CREATE TABLE access_key (
     name        TEXT,
     buckets     TEXT ARRAY,
     permissions TEXT ARRAY NOT NULL,
-    created_at  TIMESTAMPZ NOT NULL DEFAULT NOW()
+    created_at  TIMESTAMPZ NOT NULL DEFAULT NOW(),
+    expires_at  TIMESTAMPZ
 );
 ```
 
