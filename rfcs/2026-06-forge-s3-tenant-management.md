@@ -110,22 +110,22 @@ Note: there is an AWS quirk where `s3:ListBucket` lists _objects_ in a bucket, w
 
 When an access key is created, Forge related permissions are delegated from the _tenant_ to the _access key_, depending on what S3 permissions are selected:
 
-| S3 Permission            | Forge Command                            |
-| ------------------------ | ---------------------------------------- |
-| `s3:GetObject`           | `/content/retrieve`                      |
-| `s3:GetObjectVersion`    | `/content/retrieve`                      |
-| `s3:GetObjectRetention`  | `/content/retrieve`                      |
-| `s3:GetObjectLegalHold`  | `/content/retrieve`                      |
-| `s3:PutObject`           | `/blob/add`, `/index/add`, `/upload/add` |
-| `s3:PutObjectRetention`  | `/blob/add`, `/index/add`, `/upload/add` |
-| `s3:PutObjectLegalHold`  | `/blob/add`, `/index/add`, `/upload/add` |
-| `s3:DeleteObject`        | `/blob/remove`, `/upload/remove`         |
-| `s3:DeleteObjectVersion` | `/blob/remove`, `/upload/remove`         |
-| `s3:ListBucket`          | `/content/retrieve`                      |
-| `s3:ListBucketVersions`  | `/content/retrieve`                      |
-| `s3:CreateBucket`        | n/a                                      |
-| `s3:ListAllMyBuckets`    | n/a                                      |
-| `s3:DeleteBucket`        | n/a                                      |
+| S3 Permission            | Forge Command                                                 |
+| ------------------------ | ------------------------------------------------------------- |
+| `s3:GetObject`           | `/content/retrieve`                                           |
+| `s3:GetObjectVersion`    | `/content/retrieve`                                           |
+| `s3:GetObjectRetention`  | `/content/retrieve`                                           |
+| `s3:GetObjectLegalHold`  | `/content/retrieve`                                           |
+| `s3:PutObject`           | `/content/retrieve`, `/blob/add`, `/index/add`, `/upload/add` |
+| `s3:PutObjectRetention`  | `/content/retrieve`, `/blob/add`, `/index/add`, `/upload/add` |
+| `s3:PutObjectLegalHold`  | `/content/retrieve`, `/blob/add`, `/index/add`, `/upload/add` |
+| `s3:DeleteObject`        | `/blob/remove`, `/upload/remove`                              |
+| `s3:DeleteObjectVersion` | `/blob/remove`, `/upload/remove`                              |
+| `s3:ListBucket`          | `/content/retrieve`                                           |
+| `s3:ListBucketVersions`  | `/content/retrieve`                                           |
+| `s3:CreateBucket`        | n/a                                                           |
+| `s3:ListAllMyBuckets`    | n/a                                                           |
+| `s3:DeleteBucket`        | n/a                                                           |
 
 Observe that in the table above, multiple permissions map to the same forge command and some permissions do not have an equivalent Forge command. Hilt and Ingot MUST be able to determine if an access key is authorized to perform the S3 action and cannot do this by simply receiving Forge delegations alone.
 
@@ -202,9 +202,8 @@ Hilt provides a UCAN RPC API for the following commands:
 Authorizes AWS S3 API requests. Given the incoming request and Sigv4 signature, this handler:
 
 1. Determines validity of the signature.
-1. Finds stored delegations for the access key.
 1. Derives a Sigv4 signing key from the access key's private key.
-1. Re-delegates capabilities to the **invocation issuer**.
+1. Delegates capabilities needed for the request to the **invocation issuer**.
 1. Returns the derived signing key and delegations.
 
 #### Arguments
