@@ -263,7 +263,7 @@ A successful authorization will return a SigV4/SigV4a derived signing key that c
 
 ```ipldsch
 type AuthorizeOK struct {
-  bucket      String               # DID
+  bucket      optional String      # DID (optional since not all requests address a bucket e.g. CreateBucket, ListAllMyBuckets etc.)
   permissions { String: [String] } # S3 permission set for the access key
   keys        { String: [VerificationKey] }
   delegations { String: [Link] }
@@ -285,7 +285,7 @@ type VerificationKey struct {
 
 ```go
 type AuthorizeOK struct {
-  Bucket      did.DID                       `cborgen:"bucket"`
+  Bucket      *did.DID                      `cborgen:"bucket,omitempty"`
   Permissions map[did.DID][]string          `cborgen:"permissions"`
   Keys        map[did.DID][]VerificationKey `cborgen:"keys"`
   Delegations map[cid.Cid][]cid.Cid         `cborgen:"delegations"`
