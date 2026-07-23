@@ -19,7 +19,7 @@ Proposal for service identities/URLs in the Forge network.
 - `did:web:staging.signer.fil-forge.com` (Signing Service)
 - `did:web:staging.delegator.fil-forge.com` (Delegator)
 - `did:web:staging.auth.fil-forge.com` (Hilt)
-- `did:web:staging.revocations.fil-forge.com` (Swarf)
+- `did:web:staging.revoke.fil-forge.com` (Swarf)
 
 We run these services in staging but typically they are run by a 3rd party:
 
@@ -33,7 +33,7 @@ We run these services in staging but typically they are run by a 3rd party:
 - `did:web:signer.fil-forge.com` (Signing Service)
 - `did:web:delegator.fil-forge.com` (Delegator)
 - `did:web:auth.fil-forge.com` (Hilt)
-- `did:web:revocations.fil-forge.com` (Swarf)
+- `did:web:revoke.fil-forge.com` (Swarf)
 
 Multiple of these run by 3rd parties:
 
