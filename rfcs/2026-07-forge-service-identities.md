@@ -23,7 +23,7 @@ Proposal for service identities/URLs in the Forge network.
 
 We run these services in staging but typically they are run by a 3rd party:
 
-- `did:web:staging.eu-central-1.s3.fil-forge.com` (Ingot)
+- `did:web:staging.eu-central-3.s3.fil-forge.com` (Ingot)
 - `did:key:z...` `https://staging.piri-0.fil-forge.com` (Piri)
 
 ### Production
