@@ -16,7 +16,7 @@ We are producing code much faster than we are reviewing it. I propose two commit
 
 We are currently moving faster than we ever have as a development team. Since June 1, we've merged 221 PRs. The median PR review process is healthy: 6 files, merged inside two days. It's the tail that's the problem: 34 merged PRs touched 30+ files, 12 touched 60+, and p90 time-to-merge is 11 days. Unfortunately, this tail covers our most important work: ucantone #30 (attested signatures, 114 files), ingot #35 and #36 (Hilt integration, 103 files each), piri #22 (Curio PDP pipeline, 86 files).
 
-What's wrong? In short, building is more fun than reviewing, AI has made building a lot more fun and a lot more fast. I am as guilty as anyone. So our bottleneck is often review and corresponding context management -- having to keep up with the rapid pace of new code committed and new ideas explored.
+What's wrong? In short, building is more fun than reviewing, AI has made building a lot more fun and a lot more fast. So our bottleneck is often review and corresponding context management -- having to keep up with the rapid pace of new code committed and new ideas explored.
 
 ## What the evidence says
 
