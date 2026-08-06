@@ -1,4 +1,4 @@
-# RFC: Dynamic affinity routing
+# RFC: Dynamic routing candidates
 
 Status: Experimental
 
@@ -31,45 +31,47 @@ state management burden on Sprue, adds to routing complexity and necessitates an
 additional UCAN command for affinity management. It will also disallow
 multi-region buckets to exist in the future.
 
-Adding an optional affinity list to `/blob/add` will allow Ingot to constrain
+Adding an optional candidate list to `/blob/add` will allow Ingot to constrain
 Sprue's storage-node selection to its co-located Piri(s) without imposing
 additional state management on Sprue, all via a minimal backward compatible
 protocol change.
 
 The design has the following goals:
 
-1. Preserve existing `/blob/add` routing behavior when no affinity is given.
+1. Preserve existing `/blob/add` routing behavior when no candidate list is
+   given.
 2. Allow an invoker to limit a request to one or more registered Piri nodes.
 3. Keep the final choice among the allowed nodes with Sprue.
-4. Ensure that an affinity-constrained request is never routed to a node outside
-   its affinity list.
+4. Ensure that a candidate-constrained request is never routed to a node
+   outside its candidate list.
 
 ## Design
 
 ### Terminology
 
-**Affinity** is a set of storage-node DIDs supplied by an invoker of
-`/blob/add`. It is a routing constraint, not a request that any particular
-node be selected, unless the set contains just a single DID.
+**Candidates** is a set of storage-node DIDs supplied by an invoker of
+`/blob/add`. It is a routing constraint: Sprue selects exactly one node from
+the set, so it is not a request that any particular node be selected, unless
+the set contains just a single DID.
 
 **Storage node** is a Piri node registered with Sprue and eligible to receive
 blob allocations.
 
 ### `/blob/add` arguments
 
-`/blob/add` gains an optional `affinity` field:
+`/blob/add` gains an optional `candidates` field:
 
 ```ipldsch
 type BlobAddArguments struct {
   # Existing /blob/add arguments are omitted.
-  affinity optional [DID]
+  candidates optional [DID]
 }
 ```
 
-An invocation without `affinity` has the same routing semantics as it did
+An invocation without `candidates` has the same routing semantics as it did
 before this change.
 
-When present, `affinity` MUST contain one or more DIDs. Every DID in the list
+When present, `candidates` MUST contain one or more DIDs. Every DID in the list
 MUST identify a storage node registered with Sprue. An invocation with an
 empty list or a DID that does not identify a registered storage node is
 invalid and Sprue MUST reject it.
@@ -80,27 +82,27 @@ Sprue to select between them.
 
 ### Routing
 
-For an invocation with `affinity`, Sprue MUST select a storage node from the
+For an invocation with `candidates`, Sprue MUST select a storage node from the
 provided list. Sprue MUST NOT route that invocation to a storage node whose DID
-is not in `affinity`.
+is not in `candidates`.
 
 Sprue MAY use any of its normal routing considerations to choose among the
 provided nodes, including availability, capacity, and weights. It MAY choose
-any node in the affinity list at its discretion; the order of the list has no
+any node in the candidate list at its discretion; the order of the list has no
 meaning.
 
-If none of the affinity nodes can serve the request, Sprue MUST fail the
-invocation. It MUST NOT fall back to a storage node outside the affinity list.
+If none of the candidate nodes can serve the request, Sprue MUST fail the
+invocation. It MUST NOT fall back to a storage node outside the candidate list.
 
-An affinity list constrains only the storage node selected for the current
+A candidate list constrains only the storage node selected for the current
 `/blob/add` invocation. It does not guarantee that the selected node remains
 available, establish a durable placement policy, or request replication.
 
 ### Ingot use
 
 An Ingot instance SHOULD include the DID or DIDs of its co-located Piri nodes
-as `affinity` on each `/blob/add` invocation it originates. Ingot MAY omit
-`affinity` when it intentionally accepts Sprue's ordinary routing policy.
+as `candidates` on each `/blob/add` invocation it originates. Ingot MAY omit
+`candidates` when it intentionally accepts Sprue's ordinary routing policy.
 
 This preserves Sprue as the authority that selects the node while ensuring that
 an Ingot deployment does not cause a blob to be allocated to an unrelated
@@ -119,13 +121,13 @@ subsequently change). Affinity would also have to be retrieved and considered
 when routing, adding an additional complexity to an otherwise relatively simple
 decision.
 
-Conversely, dynamic affinity routing may be useful for use cases outside of an
-S3 facade. A client may have a trusted set of providers and wish to manually
+Conversely, dynamic routing candidates may be useful for use cases outside of
+an S3 facade. A client may have a trusted set of providers and wish to manually
 route blobs to particular nodes. A space-level policy would make this routing
 choice unavailable to them or require additional per-client state in Sprue.
 
-An additional benefit of dynamic affinity is that Ingot can add, remove, or
-replace its local Piri nodes _immediately_ by changing the affinity included
+An additional benefit of dynamic candidates is that Ingot can add, remove, or
+replace its local Piri nodes _immediately_ by changing the candidates included
 with each write. A static space-level assignment instead requires a separate
 update before the change takes effect, and creates a window in which Sprue may
 route to an outdated node.
