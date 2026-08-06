@@ -116,27 +116,27 @@ Note: initiating a multipart upload, uploading a part and completing an upload a
 
 When an access key is created, Forge related permissions are delegated from the _tenant_ to the _access key_, depending on what S3 permissions are selected:
 
-| S3 Permission                   | Forge Command                                                                |
-| ------------------------------- | ---------------------------------------------------------------------------- |
-| `s3:GetObject`                  | `/content/retrieve`                                                          |
-| `s3:GetObjectVersion`           | `/content/retrieve`                                                          |
-| `s3:GetObjectRetention`         | `/content/retrieve`                                                          |
-| `s3:GetObjectLegalHold`         | `/content/retrieve`                                                          |
-| `s3:PutObject`                  | `/content/retrieve`, `/blob/add`, `/index/add`, `/upload/add`, `/blob/abort` |
-| `s3:PutObjectRetention`         | `/content/retrieve`, `/blob/add`, `/index/add`, `/upload/add`, `/blob/abort` |
-| `s3:PutObjectLegalHold`         | `/content/retrieve`, `/blob/add`, `/index/add`, `/upload/add`, `/blob/abort` |
-| `s3:DeleteObject`               | `/blob/remove`, `/upload/remove`                                             |
-| `s3:DeleteObjectVersion`        | `/blob/remove`, `/upload/remove`                                             |
-| `s3:ListBucket`                 | `/content/retrieve`                                                          |
-| `s3:ListBucketVersions`         | `/content/retrieve`                                                          |
-| `s3:CreateBucket`               | n/a                                                                          |
-| `s3:ListAllMyBuckets`           | n/a                                                                          |
-| `s3:DeleteBucket`               | n/a                                                                          |
-| `s3:AbortMultipartUpload`       | `/blob/abort`, `/blob/remove`                                                |
-| `s3:ListMultipartUploadParts`   | `/content/retrieve`                                                          |
-| `s3:ListBucketMultipartUploads` | `/content/retrieve`                                                          |
+| S3 Permission                   | Forge Command                                                                                |
+| ------------------------------- | -------------------------------------------------------------------------------------------- |
+| `s3:GetObject`                  | `/content/retrieve`                                                                          |
+| `s3:GetObjectVersion`           | `/content/retrieve`                                                                          |
+| `s3:GetObjectRetention`         | `/content/retrieve`                                                                          |
+| `s3:GetObjectLegalHold`         | `/content/retrieve`                                                                          |
+| `s3:PutObject`                  | `/content/retrieve`, `/blob/add`, `/index/add`, `/upload/add`, `/blob/abort`, `/blob/remove` |
+| `s3:PutObjectRetention`         | `/content/retrieve`, `/blob/add`, `/index/add`, `/upload/add`, `/blob/abort`                 |
+| `s3:PutObjectLegalHold`         | `/content/retrieve`, `/blob/add`, `/index/add`, `/upload/add`, `/blob/abort`                 |
+| `s3:DeleteObject`               | `/blob/remove`, `/upload/remove`                                                             |
+| `s3:DeleteObjectVersion`        | `/blob/remove`, `/upload/remove`                                                             |
+| `s3:ListBucket`                 | `/content/retrieve`                                                                          |
+| `s3:ListBucketVersions`         | `/content/retrieve`                                                                          |
+| `s3:CreateBucket`               | n/a                                                                                          |
+| `s3:ListAllMyBuckets`           | n/a                                                                                          |
+| `s3:DeleteBucket`               | n/a                                                                                          |
+| `s3:AbortMultipartUpload`       | `/blob/abort`, `/blob/remove`                                                                |
+| `s3:ListMultipartUploadParts`   | `/content/retrieve`                                                                          |
+| `s3:ListBucketMultipartUploads` | `/content/retrieve`                                                                          |
 
-`/blob/abort` accompanies the write commands because an upload may not complete: it abandons a blob that was allocated and uploaded but never accepted.
+`/blob/abort` accompanies the write commands because an upload may not complete: it abandons a blob that was allocated and uploaded but never accepted. Likewise, `/blob/remove` accompanies the write commands because an S3 put may replace an existing object.
 
 Observe that in the table above, multiple permissions map to the same forge command and some permissions do not have an equivalent Forge command. Hilt and Ingot MUST be able to determine if an access key is authorized to perform the S3 action and cannot do this by simply receiving Forge delegations alone.
 
