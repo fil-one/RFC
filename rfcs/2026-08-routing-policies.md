@@ -81,16 +81,21 @@ policy** subject to replace the policy's candidate set.
 
 ```ipldsch
 type RoutingSetArguments struct {
-  candidates [DID]
+  candidates { DID: Candidate }
 }
+
+type Candidate struct {}
 ```
 
-`candidates` MUST contain one or more DIDs. Every DID in the list MUST
-identify a storage node registered with Sprue. An invocation with an empty
-list or a DID that does not identify a registered storage node is invalid and
+`candidates` MUST contain one or more entries. Every key MUST be a DID
+identifying a storage node registered with Sprue. An invocation with an empty
+map or a key that does not identify a registered storage node is invalid and
 Sprue MUST reject it.
 
-The list is a candidate set, not an ordered preference list.
+The map is a candidate set, not a preference order — map encoding is
+inherently unordered, and [dag-cbor] sorts map keys, keeping the encoding
+deterministic. The `Candidate` value is an empty struct, reserved for future
+per-node properties that influence routing decisions (e.g. weight).
 
 ```jsonc
 {
@@ -99,7 +104,10 @@ The list is a candidate set, not an ordered preference list.
   "sub": "did:key:zPolicy",
   "cmd": "/routing/set",
   "args": {
-    "candidates": ["did:key:zPiri1", "did:key:zPiri2"]
+    "candidates": {
+      "did:key:zPiri1": {},
+      "did:key:zPiri2": {}
+    }
   },
   "prf": [{ "/": "bafy..dlgPolicy" }]
   // ...
@@ -154,7 +162,7 @@ success value is the policy's candidate set:
 
 ```ipldsch
 type RoutingGetPolicyOK struct {
-  candidates [DID]
+  candidates { DID: Candidate }
 }
 ```
 
@@ -176,8 +184,7 @@ set, and MUST fail the invocation rather than fall back if no candidate can
 serve it _(error name `CandidateUnavailable`)_.
 
 Sprue MAY use any of its normal routing considerations to choose among the
-candidates, including availability, capacity, and weights. The order of the
-list has no meaning.
+candidates, including availability, capacity, and weights.
 
 A `/blob/add` invocation on a space with no policy reference has the same
 routing semantics as it did before this change.
@@ -259,3 +266,4 @@ provisioning with policy management, requires awkward update semantics
 [space]: https://github.com/fil-forge/ucan-protocol-specs/blob/main/blob.md#space
 [replication protocol]: https://github.com/fil-forge/ucan-protocol-specs/blob/main/replication.md
 [`did:key`]: https://w3c-ccg.github.io/did-key-spec/
+[dag-cbor]: https://ipld.io/specs/codecs/dag-cbor/spec/
