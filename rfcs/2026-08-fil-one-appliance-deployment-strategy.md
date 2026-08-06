@@ -43,7 +43,7 @@ Zero-downtime upgrades are not possible now, this remains an aspirational future
 
 ## Components & Dependencies
 
-There are four layers in our stack:
+Our stack can be organised into the following layers:
 
 1. Hardware
 1. Operating System
@@ -1379,3 +1379,751 @@ Beyond disks, a public IP, inbound 443, and the 2× application headroom already
 - Volume loss is a regional data-loss event, and the volume is the operator's storage with unknown
   redundancy. Backup targets for Postgres and Piri's SQLite belong in the same conversation as
   wal-g/pgBackRest to partner S3.
+
+---
+
+# 2026-08-06 What "mutable but 100% code-driven (Terraform-preferred)" unlocks
+
+_Review of the FilOne Appliance Deployment Strategy RFC, addendum to the immutable-infrastructure analysis. Scope: what NEW options become viable once immutability is dropped in favour of "mutable infrastructure, all changes code-driven, Terraform preferred", with per-layer pros/cons. The immutability decision itself is not re-litigated._
+
+## TL;DR
+
+- The relaxation unlocks a real menu at the OS layer (Ubuntu Pro + Livepatch, openSUSE/Btrfs+snapper, ZFS boot environments, Packer golden images, cloud-init on stock templates) and at the app layer (Kamal, Nomad, Compose+Watchtower, K3s on a normal distro). But two of the headline candidates — **Kamal and any inbound-SSH push tool — are disqualified by the trust boundary**, and Kamal's zero-downtime advantage **evaporates for singleton Piri/Ingot** because there is no second instance to cut over to.
+- The single highest-regret decision is **giving up unattended A/B rollback**. FCOS/bootc gave you "bad update → automatic boot into the last-good tree" for free on hardware nobody can touch. On a mutable distro you must rebuild that with **openSUSE MicroOS/Leap + snapper boot-into-snapshot** or **ZFS boot environments + zfsbootmenu**, both more moving parts and neither as clean.
+- Recommended shape: **Terraform owns only central resources** (DNS, Vault/OpenBao policies, Grafana Cloud, registry, inventory) — it has almost nothing legitimate to do _inside_ a partner VM. Pick **one** OS with native rollback (openSUSE Leap Micro/MicroOS or a ZFS-BE Ubuntu), keep the **app layer on Podman Quadlet** (it loses nothing off FCOS), add **Ubuntu Pro Livepatch or TuxCare KernelCare** only if you move off FCOS, and drive in-VM convergence with **ansible-pull (outbound-only)**. NixOS is the one option that satisfies "all changes driven by code" more completely than Terraform+Ansible ever will while keeping rollback — but only if the team pays the Nix tax.
+- **A follow-up discussion on the same date shifted the balance back toward bootc; section F records it.** Quadlet runs natively on an immutable OS and needs nothing from a mutable host, and unit-file _placement_ (`/etc` vs baked into `/usr` vs bootc bound images) is itself a per-layer cadence lever — which answers the "different approach per layer" question without adding a single extra tool. Three outputs: **do not bake Caddy or Postgres into the OS image** (§F3), **OS rollback does not roll back container images and nothing currently detects the mismatch** (§F4), and **a list of RFC-level defects that hold regardless of OS choice** (§F5) — the most serious being that `pdp-gate` lives in partner-writable, unsigned, never-rolled-back state. On the strength of §F, "keep bootc and relax only the no-layering rule" moves from _arguably the sweet spot_ to **the recommended default**.
+
+---
+
+## Key Findings
+
+1. **The trust boundary kills push-based tooling, and this is the dominant constraint.** The partner VM is semi-trusted and the management path must be outbound-only. That single requirement eliminates Kamal (mandatory inbound SSH from a controller), plain Ansible push, and any Terraform in-VM provisioner over SSH. It strongly favours pull/dial-out models: ansible-pull, K3s agent (reverse tunnel), Nomad client→server, or a GitOps agent. **This is unchanged by the immutability relaxation and it is the fact that should drive the decision.**
+
+2. **Live kernel patching is now genuinely available but buys FilOne very little.** Because Piri and Ingot are static pure-Go binaries (CGO_ENABLED=0), host glibc/OpenSSL CVEs cannot reach them, and the only public listener is containerised Caddy. Live kernel patching (Canonical Livepatch, kpatch, Ksplice, SUSE, TuxCare KernelCare) addresses kernel CVEs only — it does _not_ patch the container runtime (podman/crun) or systemd, which are exactly the components that still force a reboot. So live patching lets you _defer_ the batched-tier reboot, not eliminate it. The two-tier CVE policy survives essentially intact.
+
+3. **Kamal, the option the prior matrix marked down only for "mutable host", is still wrong here for two independent reasons.** (a) It needs inbound SSH into every partner box — trust-boundary violation. (b) Its zero-downtime cutover requires running a second container alongside the old one; Piri/Ingot cannot run two instances against the same state, so Kamal degrades to `kamal app stop` → `kamal deploy` (downtime) — exactly the in-place restart we already have with Quadlet. **The Kamal advantage evaporates precisely on FilOne's workload.** This overturns the implicit "Kamal becomes attractive once the host is mutable" reading of the prior matrix.
+
+4. **Nomad is the most coherent "Terraform-preferred" app-layer option** — client-only, dialing out to central FilOne Nomad servers (outbound-only compatible), submitted via the Terraform nomad provider — but it does not solve the singleton constraint either, and its `nomad alloc exec`/`logs` operations route through the servers over the client's outbound RPC connection, so break-glass debugging still works without inbound access. It adds a genuinely new capability (declarative fleet view, canary health-gating) at real maintenance cost.
+
+5. **The clearest loss is unattended A/B rollback**, and the credible replacements are openSUSE-style **btrfs + snapper boot-into-snapshot** (true subvolume-swap rollback, integrated bootloader entries) and **ZFS boot environments + zfsbootmenu** (boot-time snapshot browse/rollback, even over SSH). Both work, both are more complex than FCOS's built-in A/B, and both need the partner to pick a snapshot at the GRUB/ZBM menu if an update leaves the box unbootable and auto-rollback (boot-counting) is not perfectly wired.
+
+6. **The reboot is not the cheap event, and this inverts a prior conclusion.** Because a reboot stops `piri.service` on the way down and honours `TimeoutStopSec=330`, an OS promotion costs gate-wait + SIGTERM + drain (up to 300s) + boot (30–90s) + start + migrations + `HealthStartPeriod` — call it 2–7 minutes, load-dependent, consuming a PDP-safe window. A Caddy container restart is ~1–3 seconds. **If the drain is honoured on shutdown, a reboot is a strict superset of a Piri restart**, so the Piri review's "the application upgrade is the expensive event and the host reboot is the cheap one" is backwards and should be restated. This is what disqualifies baking Caddy into the OS image (§F3).
+
+7. **OS rollback and container images are independent lifecycles, and the gate script sits on the wrong side of the line.** bootc's own documentation states that for floating images — anything fetched by podman-systemd — host upgrades and rollbacks do not affect the set of images. Meanwhile `/var` is shared across ostree deployments while `/etc` is per-deployment, so _old units + new images_ is a reachable, undetected state. The more serious discovery: on ostree `/usr/local` is a symlink into `/var`, so `ExecStartPre=/usr/local/bin/pdp-gate` actually resolves to `/var/usrlocal/bin/` — **shared state that never rolls back, is writable by the partner, and is covered by no signature**, because cosign policy protects images and not shell scripts. The control that prevents slashing can be neutered with a one-line edit and nothing notices. Cheapest high-value fix in this entire review (§F4, §F5).
+
+8. **Podman's BoltDB→SQLite transition is a live hazard for a Quadlet-at-boot topology, on either OS model.** SQLite became the default during 4.x/5.0, automatic migration landed in 5.8, and 6.0 removes BoltDB entirely — Fedora's change page warns that unmigrated hosts find container state unusable after the upgrade. Podman issue #28216 (March 2026) reports the 5.8 migration is not concurrency-safe and reproduces it with several Quadlet units starting together at boot: one unit migrated while others kept writing to BoltDB, leaving a container invisible to `podman ps` despite systemd reporting the service active. Pin the stream across that boundary and serialise unit startup.
+
+## A. What the relaxation unlocks, layer by layer
+
+### A1. Operating system layer — general-purpose distros become viable
+
+Dropping "atomic/immutable OS" means you can now run a stock hoster template plus cloud-init instead of shipping a pre-baked qcow2/OVA/ISO with embedded Ignition. That is a **real** onboarding-friction reduction for requirement 1: almost every hoster and hypervisor ships ready-to-boot cloud images for Ubuntu/Debian/Rocky/openSUSE, and the partner does not have to know how to boot an ISO or import an OVA — they clone a template the hoster already has. Given Forrest's two concerns (2014-era Xeons lacking SHA extensions; "must know how to boot an ISO"), cloud-init on a stock template is the friction-minimising path.
+
+**cloud-init vs Ignition datasource/hypervisor coverage.** This is where cloud-init wins decisively for a heterogeneous partner fleet:
+
+- **cloud-init** ships datasources for essentially every platform in the RFC's list: OpenStack, VMware (vSphere GOSC via guestinfo, 7.0U3+), NoCloud (bare metal / any hypervisor via seed ISO), Proxmox (NoCloud/ConfigDrive — natively integrated in the Proxmox UI), libvirt/KVM (NoCloud/ConfigDrive), plus AWS/Azure/GCE/Oracle/Vultr and MAAS. Proxmox has _native_ cloud-init support in its VM template workflow.
+- **Ignition** supports libvirt, bare metal, Proxmox (proxmoxve, via config drive), QEMU (fw_cfg), VMware (guestinfo), OpenStack, Nutanix, VirtualBox, Oracle Cloud, and others — but the _ergonomics_ are worse on the hypervisors FilOne partners actually use. On Proxmox, feeding Ignition requires setting the `args` field (blocked for API-token auth; only root@pam password auth works), and the community workflow is "run an HTTP server in an LXC to serve the Ignition file." On VMware you must set `guestinfo.ignition.config.data`. Ignition also only runs on _Ignition-enabled OS images_ (FCOS/Flatcar/RHCOS) — you cannot Ignition a stock Ubuntu template.
+
+**Per-distro provisioning story:**
+
+- **Ubuntu LTS + Ubuntu Pro.** Best-supported cloud images everywhere; cloud-init is Canonical's own tool. Ubuntu Pro is billed per workstation ($25/year) or per server ($500/year), and is free for up to 5 machines (50 for official Ubuntu Community members) — verified against Canonical's official pricing page. It unlocks Livepatch (see A2) and — critically for requirement 7 — the **snapshot.ubuntu.com** archive service (see A4). This is the most operationally mature general-purpose option. Verdict: **strong default if you leave FCOS.**
+- **Debian stable.** Rock-solid, minimal, excellent cloud images, cloud-init native. No first-party livepatch (TuxCare covers it). No first-party archive-snapshot service (use snapshot.debian.org — see A4). Verdict: **viable, slightly more DIY than Ubuntu.**
+- **RHEL / Rocky / AlmaLinux (package mode).** Good cloud images, dnf versionlock for pinning, kpatch available on RHEL (subscription) or TuxCare on Rocky/Alma. Rocky/Alma are free. Verdict: **viable; pick Alma/Rocky + TuxCare to avoid RHEL subscription cost.**
+- **openSUSE Leap / Leap Micro / MicroOS.** The differentiator: **btrfs + snapper with boot-into-snapshot is default and deeply integrated** — every zypper transaction gets pre/post snapshots and the GRUB menu can boot a read-only snapshot, and `snapper rollback` does a true subvolume swap. Leap Micro / MicroOS give you a transactional-update model on a general-purpose base. Verdict: **the strongest OS-layer answer to "keep rollback without FCOS."**
+
+**Honest caveat:** the onboarding-friction win assumes the hoster offers a stock template. Where FilOne controls the hypervisor (Proxmox/vSphere it owns), a Packer golden image (B3) is at least as easy. Where the partner brings bare metal, you are back to ISO/PXE regardless of OS — cloud-init via a NoCloud seed ISO doesn't remove that.
+
+### A2. Live kernel patching — now available, but a small prize here
+
+| Product                           | Distro scope                                      | Userspace patching                           | Outbound-only?                       | ~Price/machine/yr                            |
+| --------------------------------- | ------------------------------------------------- | -------------------------------------------- | ------------------------------------ | -------------------------------------------- |
+| **Canonical Livepatch**           | Ubuntu LTS only                                   | No (kernel only)                             | Yes (snap dials out)                 | Bundled in Ubuntu Pro ($500 server; free ≤5) |
+| **Red Hat kpatch**                | RHEL (+ EUS for windows)                          | No                                           | Yes                                  | Rides RHEL sub (~$879 Standard)              |
+| **Oracle Ksplice**                | Oracle Linux (forces Oracle kernel)               | Yes, but after a one-time restart            | Yes                                  | Rides OL Premier (~$1,399/CPU-pair)          |
+| **SUSE Live Patching**            | SLES                                              | No                                           | Yes                                  | Rides SLES sub                               |
+| **TuxCare KernelCare Enterprise** | RHEL/Rocky/Alma/Oracle/Ubuntu/Debian + 60 distros | **Yes, via LibCare (OpenSSL/glibc, x86-64)** | Yes (or on-prem ePortal for air-gap) | ~$50/server (LibCare add-on ~$34.50)         |
+
+TuxCare is the cheapest by a wide margin and the only one that patches userspace libraries in memory and works across the mixed distro fleet a partner network implies. At 10/30/300 machines: Ubuntu Pro ≈ $5k/$15k/$150k; TuxCare KernelCare ≈ $500/$1.5k/$15k (list; volume discounts likely).
+
+**The sanity check — how much does this actually buy FilOne?** Very little, and this is a real finding. Because Piri/Ingot are static Go binaries, LibCare's OpenSSL/glibc patching — TuxCare's main differentiator — is irrelevant to them; those libraries aren't linked into the app. The only public listener is containerised Caddy, which uses its own bundled Go TLS stack, not host OpenSSL. So the userspace-patching selling point is moot. Kernel live patching does help — it lets you defer the _batched-tier_ reboot for kernel CVEs — but it patches **only the kernel**, not the container runtime (podman/crun) or systemd, which are exactly the host components the prior research identified as still requiring a reboot. **Conclusion: live kernel patching changes the two-tier policy only at the margin. If you stay on Ubuntu it comes free with Pro (which you may want anyway for snapshot.ubuntu.com); buying TuxCare purely for live patching is not justified by this workload.**
+
+### A3. Rollback and failure recovery without an A/B atomic OS — the clearest loss
+
+This is where the relaxation costs the most. On FCOS/bootc, a bad update meant the box booted the previous deployment automatically; nobody had to touch it. Substitutes, assessed for "unattended recovery at 3am on a box only the partner can physically reach":
+
+- **openSUSE btrfs + snapper (boot-into-snapshot).** The best substitute. Pre/post snapshots around every zypper transaction; GRUB can boot a read-only snapshot; `snapper rollback` swaps the default subvolume so kernel + packages + RPM DB all roll back together. **Limit:** if a kernel update leaves the box _unbootable_, recovery requires selecting the snapshot from the GRUB menu — that is a human at a console (or serial/IPMI), i.e. the partner. Auto-rollback on failed boot needs boot-counting wired up; it is not as bulletproof as FCOS's automatic greenboot-style rollback.
+- **ZFS boot environments + zfsbootmenu.** Strong: timer-and-update snapshots, boot-time snapshot browser, and **remote rollback over SSH at the ZBM prompt** (zfsbootmenu explicitly supports unlocking/rolling back over SSH). Requires the OS on a single ZFS filesystem for clean rollback, and ZFS-on-root setup is non-trivial to bake reproducibly. Still needs someone (or an SSH break-glass) to pick the BE if auto-boot-assessment isn't configured.
+- **LVM snapshots / Timeshift.** File-level restore, not a clean atomic OS swap; kernel/bootloader rollback is manual. **Not adequate** for unattended kernel-update recovery.
+- **systemd-sysupdate + systemd-sysext/confext.** Genuinely interesting middle path: sysupdate is a systemd-native A/B image updater (files/dirs/partitions, A/B/C slots, signed SHA256SUMS manifest), and sysext mounts a squashfs over /usr to add software without rebuilding the base. This effectively _reintroduces_ image-based A/B onto a systemd distro — but it requires you to build and host the image artifacts and lay out A/B partitions yourself. If you're going to do that, you are 80% of the way back to the FCOS/bootc model you just relaxed. **Coherent only if you want A/B rollback but reject rpm-ostree specifically.**
+- **Flatcar + sysext.** Flatcar is an Ignition/immutable OS like FCOS — choosing it contradicts the relaxation. Mentioned for completeness; not a "mutable distro" answer.
+
+**Concrete 3am scenario.** A kernel package update panics on boot. On FCOS: greenboot marks the deployment failed and the box rolls back automatically — zero human action. On stock Ubuntu with no snapshot layer: the box is down until someone gets console access — this is the catastrophic case, and it's the same failure class the prior research flagged for kexec on partner hardware. On openSUSE/snapper or ZFS-BE with boot-counting wired: the box boots the previous snapshot/BE automatically. **Verdict: if you leave FCOS, openSUSE Leap Micro (or ZFS-BE) with automatic boot assessment is not optional — it is the price of keeping requirement-1-compatible unattended recovery.**
+
+### A4. Reproducibility and version pinning under a mutable OS (requirement 7)
+
+"Only the combination tested in staging gets deployed" is harder when apt/dnf repos move under you. Options:
+
+- **Ubuntu snapshot service (snapshot.ubuntu.com).** The standout. Point-in-time view of the entire archive for any date after 1 March 2023; the command form is verbatim `apt install hello --update --snapshot 20240301T030400Z`, auto-detected on 24.04+ and opt-in on earlier releases (supported "in Ubuntu 23.10 onward and on updated installations of Ubuntu 20.04 LTS (starting from apt 2.0.10) and Ubuntu 22.04 LTS (starting from apt 2.4.11)" per Canonical's Server docs). This is purpose-built for "staging and prod pull byte-identical packages." **This alone is a strong reason to pick Ubuntu.** Canonical's stated retention: "We intend to ensure snapshots are available for dates up to at least 2 years in the past, which we may extend if there is demand."
+- **snapshot.debian.org.** Equivalent for Debian, long-established; pin sources.list to a timestamped snapshot. Slightly less integrated than Ubuntu's `--snapshot` flag but fully usable.
+- **apt pinning / `apt-mark hold`; dnf `versionlock` (python3-dnf-plugin-versionlock).** Pin individual packages. Fine for a handful of critical packages, brittle as a fleet-wide reproducibility strategy because transitive deps still float. Use as a supplement, not the primary mechanism.
+- **Internal mirror / Pulp / Artifactory / reprepro / aptly.** The heavyweight answer: mirror the exact repo state you tested, point all regions at it. Gives total control and offline capability but is real infrastructure to run and secure. **At 30 regions this is arguably overkill if snapshot.ubuntu.com exists; at 300 regions a mirror (or a caching proxy in front of the snapshot service) becomes attractive for bandwidth and blast-radius control.**
+
+**Operational cost read:** at 30 regions, `snapshot.ubuntu.com` + a pinned snapshot ID per release ≈ near-zero marginal cost and directly satisfies R7. At 300 regions, add a pull-through cache/mirror. Choosing Ubuntu makes R7 almost free; choosing a distro without an archive-snapshot service pushes you toward running Pulp/aptly, which is the more expensive path.
+
+## B. Configuration management and the role of Terraform
+
+### B1. Terraform's actual fit and limits
+
+**Central question, answered bluntly: if the partner provisions the VM, Terraform has almost nothing legitimate to do _inside_ the box.** Terraform's model is "reconcile declared cloud/API resources against state." A partner-owned VM is not a resource FilOne's Terraform created and cannot authoritatively manage. What Terraform _should_ own here is **central resources only:**
+
+- DNS records (Cloudflare/Route53 providers) for each region's stable domain.
+- Vault/OpenBao policies, roles, auth backends (per-region identities).
+- Grafana Cloud tenants, alert rules, dashboards, per-region tokens.
+- Registry credentials / robot accounts.
+- Per-region inventory as data (feeding the pull layer's Git repo).
+
+This is Forrest's point restated and it is correct: **"the purpose of TF is to deploy infra, not apps."**
+
+**Where FilOne _does_ control the hypervisor**, the hypervisor providers become legitimate and useful: `bpg/proxmox` (mature, actively maintained), `dmacvicar/libvirt`, `vsphere`, `openstack`, `xenorchestra` (XCP-ng), and MAAS/Tinkerbell for bare metal. There Terraform genuinely provisions the VM (clone template, attach cloud-init/Ignition, set resources). This applies to a minority of regions.
+
+**In-VM options, assessed honestly:**
+
+- **`kreuzwerker/docker` provider over SSH/TLS socket.** Works, but requires FilOne to hold an inbound path to the Docker socket — **trust-boundary violation**, and it makes Terraform state responsible for container lifecycle, which drifts the moment podman auto-update or the partner touches anything. **Reject.**
+- **remote-exec / file provisioners.** HashiCorp explicitly discourages provisioners as a last resort; they are not idempotent, not tracked in state, and need inbound SSH. **Reject.**
+- **`terraform-provider-ansible` and the new (HashiConf 2025) Terraform Actions + Ansible/AAP integration.** Terraform Actions (beta as of Sep 2025) can _trigger_ an Ansible/AAP playbook or Event-Driven Ansible from a `terraform apply` as a codified Day-2 operation. This is the sanctioned "Terraform for infra, Ansible for config" seam — but it still relies on Ansible's own connectivity model (which, for outbound-only, means ansible-pull, not AAP push). Useful as the _orchestration trigger_, not as a way to reach into the box.
+- **Nomad / Kubernetes / Helm providers.** These are legitimate: point the Terraform `nomad` provider at central Nomad servers and submit jobs declaratively. This is the clean way to do "Terraform-preferred" app deployment _without_ Terraform touching the box directly — Terraform talks to the orchestrator's API, the orchestrator's agent (dialed out from the box) does the work. **This is the most defensible in-VM-adjacent use of Terraform.**
+
+**State management at 30–300 VMs.** One monolithic state is a non-starter (blast radius, lock contention). Options: per-region **workspaces** (simple, but 300 workspaces is a lot of `plan` runs), **Terragrunt** (DRY wrapper, keeps per-region state files, battle-tested at this scale), or **Terraform Stacks** — which HashiCorp's official blog confirms went GA at HashiConf 2025 (Sep 25, 2025) "for all new HCP Terraform plans based on resources under management (RUM)," with the standalone `terraform-stacks-cli` now deprecated in favour of a `terraform stacks` subcommand in the main CLI. Stacks is purpose-built for "same components, many deployments (regions)" and is the natural fit _if_ you're on HCP Terraform and accept the RUM billing and cloud dependency. On-prem Terraform Enterprise support was still trailing GA at announcement (HashiCorp's Liese, per TechTarget: "when you actually get to the deployment stage, that's an HCP Terraform thing"). **Recommendation: Terragrunt for 5–30 regions today; evaluate Stacks at the ~30-region inflection if already on HCP Terraform.**
+
+**Drift when nobody runs `plan`.** This is the honest weakness of Terraform-for-central-resources combined with a mutable box: Terraform only knows about drift in the resources _it_ manages (DNS, Vault, Grafana). It has **zero visibility** into the partner VM's on-disk state. Drift _inside_ the box is detected only by the pull-convergence layer (ansible-pull re-asserting state every 30 min) or the orchestrator (Nomad/K3s reconciling declared jobs). **So "drift detection" splits by layer: Terraform for central, the pull agent for in-VM. Do not expect Terraform to catch a partner editing a Caddyfile.**
+
+### B2. Config management, push vs pull, under the trust boundary
+
+The outbound-only constraint is the filter. Verified network directions:
+
+- **Ansible push (ad-hoc over SSH).** Needs inbound SSH into 300 partner boxes. **Reject on trust boundary.**
+- **ansible-pull from Git.** Each box clones a Git repo (outbound HTTPS/SSH to the Git host) and runs the playbook locally via cron/systemd-timer, with `--only-if-changed` and a random sleep. **Outbound-only, scales to thousands, and is the natural convergence loop for a mutable box.** Loss vs push: no central real-time orchestration, no single-terminal view of results, and you must ship logs out (Alloy already does this). **This is the recommended in-VM convergence mechanism.**
+- **Puppet / Chef / Salt.** Puppet and Salt both have agent/minion pull models (Salt can also do `salt-ssh` push or masterless). Puppet agent dials out to a master — outbound-compatible — but is heavier than ansible-pull and adds a server to run. Salt masterless (salt-call from a Git checkout) is effectively ansible-pull with a different syntax. **No advantage over ansible-pull for this shape; more infrastructure.**
+- **Chezmoi-style / plain Git + systemd.** Lightweight dotfile-style convergence. Fine for tiny config surface; underpowered for full host convergence.
+- **GitOps agent (Flux/Argo on K3s).** Agent dials out to Git and reconciles — outbound-only compatible — but requires running K3s (see C3). Powerful declarative reconciliation and drift-healing; heavy for a single-node appliance.
+
+**Orchestrator dial-out models (verified):**
+
+- **Nomad client → server.** Client needs outbound to server ports 4646 (HTTP API) / 4647 (RPC); **the Serf WAN gossip port 4648 is server-to-server only and clients do not need it** (HashiCorp docs: "It isn't required that Nomad clients can reach this address"). Crucially, `nomad alloc logs` and `nomad alloc exec` are served through the client's RPC connection to the servers — the operator hits the _server_ API and the traffic is relayed — so **log retrieval and exec do not require inbound access to the client.** This is a strong trust-boundary fit.
+- **K3s agent → server.** Verified verbatim from official K3s docs: "K3s uses reverse tunneling such that the nodes make outbound connections to the server and all kubelet traffic runs through that tunnel." The agent maintains a websocket tunnel to the server (port 6443), and in the default `agent` egress mode this "allow[s] agents to operate without exposing the kubelet and container runtime streaming ports to incoming connections" — so **`kubectl exec` and `kubectl logs` flow back through that tunnel with no inbound port on the agent.** Also strong trust-boundary fit. (The VXLAN port 8472 must be firewalled off from the world but is only relevant in multi-node clusters; a single-node appliance has no peer agents.)
+
+**Verdict for B2:** the outbound-only requirement is satisfiable three ways — **ansible-pull (simplest, no orchestrator)**, **Nomad client (declarative, Terraform-submittable, exec/logs via server)**, or **K3s agent (GitOps-native, exec/logs via reverse tunnel)**. All three respect the trust boundary. Kamal and Ansible-push do not.
+
+### B3. Packer + Terraform golden images as a middle path
+
+Forrest is right that Packer is the HashiCorp tool for golden images, and its plugin coverage is complete for FilOne's targets: **`proxmox-iso`/`proxmox-clone`, `vsphere-iso`/`vsphere-clone`, QEMU (qcow2/raw output), VirtualBox (native OVF/OVA output)** are all official, current plugins (2025-2026, e.g. vSphere plugin v2.1.2); QEMU cannot emit OVA directly (per HashiCorp maintainer: "it can't do that directly. It only supports raw and qcow2 disks") but a shell-local post-processor bridges that. HashiConf 2025 added Packer **SBOM storage (GA)** and package-visibility (beta) via the `hcp-sbom` provisioner (Packer ≥1.12) — a supply-chain nicety.
+
+**What a Packer golden image of a mutable distro gets you over the two alternatives:**
+
+- _vs FCOS/bootc image:_ you get a general-purpose distro (Ubuntu/Rocky/openSUSE) with all its tooling and the live-patch/snapshot options above, baked to a known state — without rpm-ostree.
+- _vs stock template + cloud-init:_ you get a _pinned, tested_ starting point (versions frozen at build time, cosign-able) instead of "whatever the hoster's template has today," which directly helps R7.
+
+**The honest risk — "golden image + in-place mutation" can be the worst of both worlds.** If you bake an image _and then_ let ansible-pull mutate it continuously, you have **both** image sprawl (a new artifact per release, per output format, per hypervisor) **and** drift (the box diverges from the image the moment convergence runs). The coherent position is one of two disciplines: (a) **image is the unit of change** — rebuild and redeploy the image per release, minimal in-place mutation (this is basically re-inventing immutable infra on a mutable distro, and if you want that, systemd-sysupdate or just going back to bootc is cleaner); or (b) **image is a fast-start baseline** — bake rarely (quarterly), converge continuously with ansible-pull, and accept that the image is just to cut cloud-init time and pin the floor. **Pick (b) explicitly, or don't use Packer.** Build time is minutes-to-tens-of-minutes per image and CI cost is a per-release image build per output format — non-trivial at several hypervisor targets but not prohibitive.
+
+## C. Newly / more viable application-layer options
+
+### C1. Kamal 2.x — reject, for two independent reasons
+
+The prior matrix scored Kamal 5 on R4 (zero-downtime) and marked it down only for requiring a mutable host. With the host now mutable, one might expect Kamal to rise. **It does not, and this is worth stating plainly:**
+
+1. **Trust boundary.** Verified against official Kamal docs: Kamal runs from a controller/CI/laptop and "uses SSH to connect run commands on your hosts. By default it will attempt to connect to the root user on port 22." The target **must accept inbound SSH from the controller**. There is **no pull/agent mode** — inbound SSH is mandatory. Driving 300 partner boxes this way means holding inbound SSH into all of them. **Direct violation of the outbound-only management-path requirement.**
+2. **The singleton constraint dissolves the zero-downtime advantage.** Verified against 37signals docs and maintainer guidance: kamal-proxy achieves zero downtime by starting "a new container... Tell kamal-proxy to route traffic to the new container once it is responding with 200 OK to GET /up... Stop the old container running the previous version" — i.e. new-alongside-old. Piri/Ingot/Postgres/Vault/Caddy **cannot run two instances against the same state**. For a single-instance service the documented workaround is `kamal app stop` followed by `kamal deploy` (or a pre-deploy hook doing the stop) — i.e. **stop-then-start with downtime**, which is exactly the in-place restart Quadlet already gives you. Kamal's `boot` config only controls rollout _across hosts_, not single-node replacement.
+
+Kamal has nice ergonomics elsewhere (`.kamal/hooks/pre-deploy` aborts on non-zero exit — a clean home for the PDP gate; `.kamal/secrets` with 1Password/Bitwarden/LastPass/AWS/GCP/Doppler adapters — **but not a first-class Vault adapter**; git-SHA-tagged rollback). None of that overcomes the two disqualifiers. **Verdict: Kamal is the option the relaxation appears to unlock but does not. Do not adopt it for the partner fleet.** (It could be fine for FilOne's own centrally-controlled infra, which is a different trust domain.)
+
+### C2. HashiCorp Nomad — the genuinely newly-attractive option
+
+Given "Terraform preferred" and HashiCorp-stack coherence, Nomad is the option that most rewards the relaxation.
+
+- **Topology:** run **client-only** on each partner box, dialing out to central FilOne Nomad servers (3–5 servers, federated across regions). Outbound-only: client needs 4646/4647 outbound to servers; 4648 Serf is server-only. **Exec/logs relay through the servers — no inbound to the client.** This is the trust-boundary sweet spot.
+- **Footprint:** a single Go binary, modest RAM — comfortable on a partner VM, and lighter than a K3s control plane.
+- **Update/canary + health + external gate:** the `update` stanza with `canary`, `health_check`, `min_healthy_time` and `auto_revert` gives health-gated cutover _for services that can canary_. For Piri/Ingot it **still cannot conjure a second instance** — you express `count = 1` with `max_parallel = 1` and an in-place restart. The PDP gate is expressed as a pre-restart check (a `prestart` task/hook or an external check that Nomad honours before draining). So Nomad **does not solve the singleton constraint** either — nothing does — but it makes the in-place restart declarative and fleet-visible.
+- **Secrets:** native Vault integration + `consul-template`/`template` stanza renders short-lived creds into the alloc (tmpfs), which fits the "central Vault/OpenBao + agent rendering into tmpfs" recommendation cleanly — better than Quadlet's DIY secret handling.
+- **Terraform:** the `nomad` provider submits jobs declaratively from central Terraform — this is the "Terraform-preferred" story realised without Terraform touching the box.
+- **Honest maintenance burden:** running 3-5 Nomad servers (+ ideally Consul for service discovery, +Vault) is a real platform to operate and upgrade. Versus Quadlet (zero central infra) it is a large step up; versus K3s it is lighter and less churny (no kubelet/etcd/CNI/control-plane version treadmill). At 300 single-node clients Nomad is operationally proven for edge fleets.
+
+**Verdict:** Nomad is the right answer _if_ FilOne wants a declarative, Terraform-submittable, outbound-only fleet control plane and is willing to run the servers. At 3-10 regions it is over-built; it earns its keep around the ~30-region inflection where a declarative fleet view and canary/health-gating matter.
+
+### C3. Other app-layer options a mutable host opens up
+
+- **Podman Quadlet on a mutable distro.** **Quadlet loses nothing off FCOS.** Read this as a statement about _portability_ — Quadlet is a Podman/systemd feature (Podman ≥4.4) available on Ubuntu/Debian/Rocky/openSUSE, so moving it off an immutable base costs nothing. It is emphatically **not** a claim that Quadlet wants or needs a mutable host: Quadlet is native to FCOS/bootc and that pairing is the intended one (see §F1). This is the smallest-delta option: keep the exact app-layer design from the prior recommendation, whichever base you choose. Note `AutoUpdate=registry` and a digest-pinned `Image=` cancel out — the RFC's Piri review already resolved this in favour of a promotion-moved channel tag. Verdict: **default app layer.**
+- **Docker Compose + Watchtower / Renovate.** Storj does exactly this (single image + watchtower). Simple, familiar, but Watchtower auto-pulling floating tags contradicts requirement 7 (pin digests) and gives no health-gated cutover. Renovate proposing digest bumps into staging (already in the prior plan) is the disciplined version. Verdict: **viable but a downgrade from Quadlet; no reason to switch.**
+- **docker-rollout.** Adds blue-green to Compose — but same singleton problem as Kamal; irrelevant for Piri/Ingot.
+- **systemd units + plain binaries + socket activation.** The lightest possible; socket activation can even mask restart gaps for some services. But you lose container isolation/image distribution and take on config-management-for-drift (the prior matrix's R6=3 concern). Verdict: **not worth it given the app is already containerised.**
+- **supervisord/s6 in a single "omnibus" container (GitLab-Omnibus style).** Attractive for onboarding simplicity (one container, one thing to run) but couples Piri/Ingot/Caddy/Postgres lifecycles and fights the "each service updated frequently and independently" requirement and the PDP-gated Piri restart. Verdict: **reject for FilOne's update cadence.**
+- **Single-node K3s / k0s on a mutable distro.** Now viable without an immutable OS. Reverse-tunnel agent model is a genuine trust-boundary fit, and K3s+Flux scored 5/5 on R4/R6 in the prior matrix. But the prior "high maintenance from control-plane churn" objection **survives unchanged** — a single-node cluster still carries etcd/sqlite, kubelet, CNI, and the Kubernetes version treadmill for one pod's worth of work. Verdict: **only if FilOne independently wants Kubernetes; otherwise Nomad gives the same dial-out benefits with less churn.**
+- **NixOS — deserves a fresh look, and here is the honest read.** NixOS is declarative and code-driven with atomic generations and bootloader rollback — it delivers reproducibility, atomic upgrade, and rollback _through functional package management_, not through a read-only root. Crucially, **NixOS satisfies "all changes driven by code" more completely than Terraform+Ansible ever will**: the entire machine (packages, services, users, kernel, bootloader) is one `configuration.nix`/flake with a `flake.lock` pinning exact revisions — same inputs, same system, every time, with `nixos-rebuild switch --rollback` and per-generation boot entries. That is _exactly_ the RFC's stated ideal, and it keeps rollback without FCOS. **What it uniquely solves:** it is the only option where R6 ("mutable but fully code-driven") and R7 (exact pinned combination) and unattended rollback are all satisfied _by construction_ rather than bolted on. **The cost is real:** the Nix language and model are a steep learning curve for a small Go team, FHS-expecting software needs workarounds, and the whole team must be able to operate it at 3am — you cannot have one Nix expert and a bus factor of one across 300 regions. The prior research rejected NixOS on team-adoption cost, not technical grounds, and **that judgement still stands** — but if the team is willing to invest, NixOS is the most complete answer to the literal requirement. Verdict: **the technically-best fit for the stated requirement; adopt only with genuine team-wide Nix buy-in, otherwise its rollback/reproducibility benefits are better bought via openSUSE/snapper at a fraction of the learning cost.**
+
+## D. Mixing approaches per layer
+
+The user explicitly asks whether layers can use different tools. General principle: **each additional tool is another mental model the 3am on-call engineer must hold, and every seam between layers is a place two tools can both think they own the same file/unit.** Judge each combo by (i) distinct mental models, (ii) what breaks at the seams, (iii) where drift-detection responsibility sits.
+
+- **TF (central) + Packer image + ansible-pull (OS/infra) + Quadlet/Compose (app).** Mental models: 4 (TF, Packer, Ansible, Podman/systemd). Industry-standard combination; the seams are well-understood. Drift: TF (central), ansible-pull (in-VM OS/infra), Quadlet auto-update (app). **Seam risk:** ansible-pull and Quadlet must not both manage the same unit files — give ansible-pull ownership of _writing_ Quadlet files and let systemd/podman own runtime. Verdict: **coherent, recommended baseline.**
+- **TF + cloud-init (stock distro) + ansible-pull + Kamal.** Same as above but Kamal for app — **reject** (C1: inbound SSH + singleton). Drop Kamal, use Quadlet.
+- **TF + Nomad for everything above the OS.** Mental models: 2-3 (TF, Nomad, +Vault/Consul). Cleanest HashiCorp-stack story; Nomad owns app _and_ can run infra services as jobs. Seam risk low (one control plane). Drift: TF central, Nomad reconciles jobs. Verdict: **coherent; the "all-in on HashiCorp" path.** Best at ≥30 regions.
+- **bootc/FCOS retained for OS, "no package layering" rule relaxed, + TF central.** The _minimal_ relaxation: keep A/B rollback (the thing you'd otherwise rebuild), allow a little package layering for e.g. a kernel module or a debug tool, Terraform for central only. Mental models: 2 (rpm-ostree/bootc, TF). **This is the lowest-regret way to honour the user's request without throwing away unattended rollback** — it relaxes immutability _just enough_ to add packages while keeping the safety net. Verdict: **strongly worth considering; arguably the sweet spot.**
+- **NixOS (OS+infra) + containers (app).** Mental models: 2 (Nix, containers) but Nix is a heavy one. Everything-as-code, rollback native. Seam: Nix can _also_ declare the containers (oci-containers module) — tempting to unify, but then app cadence is coupled to nixos-rebuild. Better to let Nix own OS/infra and Quadlet/Podman own the fast-moving app. Verdict: **coherent and elegant iff the team pays the Nix tax.**
+- **K3s + Flux on a mutable distro.** Mental models: 2-3 (K8s, Flux, distro) but K8s is heavy. Everything reconciled via GitOps; drift self-heals. Seam risk: the distro's own updates (kernel/podman) sit _below_ K8s and aren't managed by Flux — you still need a host-update story (unattended-upgrades or a snapshot layer). Verdict: **only if you want K8s for its own sake.**
+
+**The cross-cutting failure mode to design against:** two tools both believing they own the same file or unit — e.g. cloud-init writing a Caddyfile _and_ ansible-pull templating it, or Quadlet auto-update bumping a digest _and_ Ansible pinning a different one. **Mitigation: assign each file/unit exactly one owner, document it, and make the other layers read-only consumers.** This is the single discipline that keeps a multi-tool stack sane.
+
+## E. Updated decision material
+
+### E1. Comparison matrix (1-5; R6 = "mutable but fully code-driven, TF-preferred")
+
+| Option (app/OS layer)                                           | R1 onboarding | R2 fast fix (hrs) | R3 observability | R4 short downtime | R5 PDP timing | R6 code-driven/TF | R7 pinning | Maint. burden | Drift resist. | Unattended rollback | Trust-boundary fit  |
+| --------------------------------------------------------------- | ------------- | ----------------- | ---------------- | ----------------- | ------------- | ----------------- | ---------- | ------------- | ------------- | ------------------- | ------------------- |
+| **Quadlet + systemd on openSUSE Leap Micro (snapper)**          | 4             | 5                 | 5                | 3                 | 5             | 4                 | 4          | 4             | 3             | **4**               | 5                   |
+| **Quadlet on Ubuntu Pro + Livepatch + snapshot.ubuntu.com**     | 4             | 5                 | 5                | 3                 | 5             | 4                 | **5**      | 4             | 3             | 2 (no A/B)          | 5                   |
+| **Quadlet on FCOS/bootc (prior rec, package-layering relaxed)** | 4             | 5                 | 5                | 3                 | 5             | 4                 | 5          | 4             | **5**         | **5**               | 5                   |
+| **Nomad client + Vault (any mutable distro)**                   | 3             | 5                 | 5                | 3                 | 5             | **5**             | 4          | 2             | 4             | 3 (OS-dependent)    | 5                   |
+| **Kamal on any mutable distro**                                 | 4             | 5                 | 4                | **2***            | 4             | 3                 | 4          | 4             | 2             | 2                   | **1 (inbound SSH)** |
+| **K3s + Flux on mutable distro**                                | 2             | 5                 | 5                | 5                 | 4             | 5                 | 4          | 2             | 5             | 3                   | 5 (reverse tunnel)  |
+| **NixOS + Quadlet**                                             | 3             | 5                 | 5                | 3                 | 5             | **5**             | **5**      | 3 (Nix tax)   | **5**         | **5**               | 5                   |
+| **Docker Compose + Watchtower (Storj-style)**                   | 4             | 4                 | 4                | 3                 | 3             | 3                 | 3          | 4             | 2             | 2                   | 5                   |
+
+*Kamal R4=2 because for singleton Piri/Ingot it degrades to stop-then-start; the 5 it would score for canary-able services does not apply here.
+
+### E2. What the relaxation costs, stated plainly
+
+The prior FCOS/bootc recommendation got four things **for free** that must now be rebuilt or accepted as risk:
+
+1. **Unattended A/B rollback.** Gone unless you re-buy it with openSUSE/snapper boot-into-snapshot, ZFS boot environments, systemd-sysupdate, or NixOS generations. On a plain mutable distro, a bad kernel update is a partner-console incident.
+2. **Drift-freeness by construction.** A read-only /usr made most drift impossible. On a mutable box, drift is prevented only by an active convergence loop (ansible-pull / orchestrator reconcile) that you must run and monitor.
+3. **Digest-pinned OS as a single signed artifact.** The signed OCI release manifest pinning OS + every container digest as one promotable unit is harder when the OS is a package set. You partially recover R7 via snapshot.ubuntu.com (Ubuntu) or a Packer image digest, but "one artifact, one digest" becomes "an image plus a pinned snapshot ID plus versionlock."
+4. **The clean "no layering" discipline.** Package mode invites ad-hoc host packages; you must impose discipline (versionlock/hold + a minimal package policy) that the immutable base enforced automatically.
+
+### E3. Prior conclusions: overturned / survive / re-verify
+
+**Overturned / newly-nuanced:**
+
+- _"Kamal becomes attractive once the host is mutable."_ **Overturned.** It is disqualified by inbound-SSH and by the singleton constraint dissolving its zero-downtime advantage.
+- _Live kernel patching was rejected on FCOS as unavailable._ **Now available** on general-purpose distros — but the fresh finding is that it **buys FilOne almost nothing** because the app is static Go and the only listener is Caddy with its own TLS stack; it defers but does not remove the batched reboot (podman/crun/systemd still need one).
+- _The cloud-init onboarding win._ **Newly true and material** — stock template + cloud-init genuinely reduces requirement-1 friction versus shipping an OVA/ISO, and cloud-init's hypervisor/datasource coverage is broader and more ergonomic than Ignition's on Proxmox/vSphere specifically.
+- _"The application upgrade is the expensive event and the host reboot is the cheap one."_ **Overturned** (§F3). A reboot stops Piri and honours the drain, so it is a strict superset of a Piri restart: 2–7 minutes plus a consumed PDP window, versus ~1–3 seconds for a container swap.
+- _"Bake the infra tier into the OS image to enforce a slow cadence."_ **Proposed and then withdrawn within the same discussion** (§F3). Correct for the kernel/systemd/podman tier; wrong for Caddy, which is the most exposed component and belongs in the fast tier; unnecessary for Postgres, where an unlabelled digest-pinned unit gives the same deliberateness without reboot coupling.
+- _Implicit assumption that an OS rollback restores a known-good system._ **Overturned** (§F4). It restores `/usr` and `/etc` only; container images, `/var/usrlocal` scripts and app data do not roll back, and the upgrade timer re-converges forward within ten minutes.
+
+**Survive unchanged:**
+
+- Single VM = single point of failure; no tool changes this.
+- Piri/Ingot/Postgres/Vault/Caddy cannot run two concurrent instances → upgrades are in-place restarts; **zero-downtime remains aspirational under every option** (Kamal, Nomad, K3s all included). This is a property of the _workload_, not the deployment tool.
+- Trust boundary → keep the funded delegated wallet key off the box (piri-signing-service), no durable Vault in the partner VM, outbound-only + Tailscale/Headscale break-glass. **The relaxation does not touch this and it remains the dominant design constraint.**
+- Piri's up-to-60-min graceful shutdown and the PDP gate on every restart/reboot.
+- Rebase Piri/Ingot off floating tags onto digest-pinned distroless/static — still correct regardless of OS.
+
+**Need re-verification:**
+
+- Whether openSUSE Leap Micro's auto-rollback (boot-counting/`health-checker`) is as unattended as FCOS greenboot **on the specific hypervisors partners use** — verify on real Proxmox/KVM before committing.
+- Terraform **Stacks** on-prem (Terraform Enterprise) availability if FilOne won't use HCP Terraform — GA was HCP-first.
+- Exact TuxCare/Ubuntu Pro **volume pricing** at 300 (list prices used above; both discount heavily).
+- **`readlink -f /usr/local` on the pinned FCOS release.** The `/var/usrlocal` symlink is the documented rpm-ostree default, but FCOS could set `opt-usrlocal` differently in its treefile. One command settles it, and finding A in §F4 depends on it.
+- **Whether Caddy supports systemd socket activation** (`LISTEN_FDS` inheritance). Determines whether the fast-tier proxy swap can be made connection-preserving.
+- **Which FCOS stream release crosses podman 5.8/6.0**, and whether issue #28216 is fixed by the time you cross it.
+
+### E4. Staged recommendation and bake-off
+
+**Regions 1-5 (now):** Keep it boring. **Quadlet + systemd** on a single chosen mutable distro with native rollback (**openSUSE Leap Micro** preferred, or Ubuntu 24.04 with a ZFS-BE or snapper layer). **Terraform for central resources only.** **ansible-pull** for in-VM convergence. Digest-pinned images + cosign + release manifest carried over unchanged. Minimal-delta path; keeps the option to fall back to bootc.
+
+**Regions 5-30:** Introduce **Terragrunt** for per-region state. Harden the pull loop (Alloy already ships logs/metrics out). Decide the OS-rollback mechanism definitively based on bake-off results. If HashiCorp-stack momentum is real, **pilot Nomad client-only in 2-3 regions** in parallel with the Quadlet baseline. Add **snapshot.ubuntu.com pinning** (if Ubuntu) or a Packer image floor to nail R7.
+
+**Regions 30-300:** This is the declarative-fleet inflection. Commit to **either Nomad (Terraform-submittable, outbound-only, exec/logs via server)** or stay on Quadlet+ansible-pull with a strong central inventory and drift dashboard. Add a **pull-through package mirror/cache** for bandwidth and blast-radius. Evaluate **Terraform Stacks** for the central-resource layer if on HCP Terraform.
+
+**Bake-off, concrete pass/fail for the newly-viable candidates:**
+
+| Candidate                     | PASS criteria                                                                                                                                                                   | FAIL trigger                                                                       |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| openSUSE Leap Micro + snapper | Corrupt a kernel update on a Proxmox VM → box auto-boots previous snapshot with **zero human action**; PDP window honoured                                                      | Requires console/GRUB selection to recover                                         |
+| Ubuntu + ZFS-BE + zfsbootmenu | Same, and remote rollback over SSH works from the break-glass overlay                                                                                                           | ZFS-on-root setup not reproducible via cloud-init/Packer                           |
+| Nomad client-only             | `count=1` in-place restart honours a PDP pre-check gate; `alloc exec`/`logs` work with **no inbound port** on the client; 3 federated servers survive one region's network loss | Any operation needs inbound to the client; server quorum fragile                   |
+| Packer golden image           | One `packer build` emits pinned qcow2 + OVA + Proxmox template, cosign-signed, reproducible; cloud-init time cut materially                                                     | Per-format sprawl unmanageable, or image+ansible-pull double-manage the same files |
+| snapshot.ubuntu.com pinning   | staging and prod install byte-identical package sets from a pinned snapshot ID across a simulated month of archive drift                                                        | Snapshot unavailable for a needed timestamp; retention gap                         |
+| NixOS (stretch)               | Two boxes from the same flake.lock are bit-reproducible; `--rollback` recovers a bad generation unattended; a non-Nix engineer can operate it from a runbook                    | Team cannot operate it without the one Nix expert                                  |
+
+### E5. New open questions and risks introduced by the relaxation
+
+1. **Unattended-rollback parity.** Can any mutable-distro mechanism match FCOS greenboot's _fully automatic_ rollback on partner hardware, or do we accept "partner picks a snapshot at GRUB" as the recovery path for the unbootable case? This is the biggest new risk and must be answered in the bake-off.
+2. **Drift ownership at the seams.** With Terraform (central) + ansible-pull (OS/infra) + Quadlet (app), which layer owns each file? An unowned or double-owned Caddyfile/Quadlet unit is the most likely source of a 3am surprise.
+3. **Package-mirror operational burden at 300.** If snapshot.ubuntu.com is unavailable or you're on a distro without it, running Pulp/aptly/reprepro is new infrastructure with its own CVE surface.
+4. **Tool-sprawl cognitive load.** Every per-layer tool is a bus-factor risk across 300 regions. The relaxation _invites_ sprawl; the discipline of "one OS, one convergence tool, one app runtime, one owner per file" must be enforced deliberately.
+5. **Central control-plane blast radius.** Nomad/K3s servers or HCP Terraform become a new single-point-of-failure for the fleet's _manageability_ (not its data plane). A region keeps serving if the control plane is down, but you lose the ability to push fixes — which collides with requirement 2 (timely fixes).
+6. **Live-patch false comfort.** Buying live patching may create a false sense that reboots are gone; they are not (podman/crun/systemd). Don't let it erode the batched-reboot discipline.
+
+## F. The immutable path, re-examined
+
+_Added after a follow-up discussion on 2026-08-06. The trigger was a narrow question — can Quadlet+systemd run on an immutable distro? — but working the per-layer update mechanics through surfaced findings that partly redirect this review's recommendation, and exposed defects in the RFC's sample units that hold regardless of which OS is chosen._
+
+### F1. Quadlet is native to an immutable OS; placement is the cadence lever
+
+Yes, and it is the intended pairing rather than a workaround. "Immutable" on FCOS/bootc constrains only `/usr`. Quadlet's rootful search paths are `/etc/containers/systemd/` and `/usr/share/containers/systemd/`, plus ephemeral `/run/containers/systemd/`, with `/run` shadowing `/etc` shadowing `/usr`; the documented convention is that the distribution ships packaged units under `/usr` and the administrator puts units under `/etc`. Podman is a core component of the FCOS image, so there is nothing to install.
+
+That yields three placements, and **choosing between them is how each layer gets a different update cadence:**
+
+| Placement                                                  | Mutable at runtime? | Rolls back with the OS?               | A change requires         |
+| ---------------------------------------------------------- | ------------------- | ------------------------------------- | ------------------------- |
+| `/etc/containers/systemd/`                                 | Yes                 | Yes (per-deployment `/etc`)           | `daemon-reload` + restart |
+| `/usr/share/containers/systemd/` (baked via Containerfile) | No                  | Yes                                   | New OS image + reboot     |
+| bootc **bound images**                                     | No                  | Yes, _including the app image itself_ | New OS image + reboot     |
+
+**bootc bound images** are worth knowing because they are a native implementation of the RFC's "signed OCI release manifest pinning OS digest plus every container digest". Each image is declared in a `.image` or `.container` file and selected by symlinking it into `/usr/lib/bootc/bound-images.d`; during `bootc upgrade` or `bootc switch` the bound images are pulled into bootc image storage and consumed via `GlobalArgs=--storage-opt=additionalimagestore=/usr/lib/bootc/storage`. Limitations to note: only the `Image` field is parsed, rootless is unsupported, and the images must be present in `/var/lib/containers` when `bootc install` runs. This is bootc-specific — a mild argument for bootc over FCOS.
+
+**Two ostree behaviours to know before committing units to `/etc`:**
+
+1. _Merge timing._ OSTree does not perform a second `/etc` merge on reboot, so modifications made after a pending deployment is created would otherwise be lost. Staged deployments exist to counter exactly this, delaying the 3-way merge until reboot or shutdown via `ostree-finalize-staged.service`. FCOS stages by default, so this is covered — but verify it in the bake-off, because anything that un-stages the flow makes config changes between staging and reboot vanish silently.
+2. _`/etc` is per-deployment, `/var` is shared._ This is the root of §F4.
+
+**Conclusion for requirement 6's "different approach per layer" question:** you can give each layer a distinct update cadence _without adding a second tool_, purely by choosing where the unit file lives. That is strictly cheaper in mental models than any of the multi-tool combinations in section D, and it is available only on the image-based OS.
+
+### F2. Update flow, layer by layer, on bootc/FCOS
+
+**OS — kernel, libraries, container runtime.** There is no package-level update path and, importantly, **no separate runtime update path**: kernel, systemd, glibc, podman and crun all ship inside one image, so "update Podman" _is_ "update the OS". Flow: zincati or `bootc-fetch-apply-updates.timer` fetches the new release → rpm-ostree/bootc stages it into the inactive slot → **stage but do not auto-reboot** → `pdp-gate` clears → reboot in the scheduled window → greenboot health-checks on boot, and failure boots the previous deployment unattended. Cadence: days, batched — the batched CVE tier unchanged. Rollback: automatic, unattended, and the property the mutable-distro option obliges you to rebuild. Discipline: no layering, no kexec, no live patching.
+
+**Infra services — Postgres, Vault, Caddy.** Mechanically a tag or digest change plus a unit restart, but all three want different handling and treating them as one group was the error corrected in §F3. Auto-update selection is **by label only**: Podman checks only containers carrying `io.containers.autoupdate`, ignores unlabelled ones, and a single run acts on every labelled container. **Label discipline is therefore the tier boundary.** Caddy owns `:443` and the ACME account state; Postgres carries the major-version data-directory trap; Vault should not be durable on the box at all.
+
+**Forge services — Piri, Ingot.** The fast tier, as already corrected in the RFC's Piri review: CI builds `CGO_ENABLED=0`, cosign-signs, pushes; promotion moves the `:prod` channel tag; on-box `filone-upgrade.timer` fires every 15 minutes → `pdp-gate` → `snapshot-piri-db` → `podman auto-update --rollback`, with `podman-auto-update.timer` masked so nothing runs ungated. `Notify=healthy` (no sd_notify in the tree, and it is what makes `--rollback` fire on a bad image), `StopTimeout=300` / `TimeoutStopSec=330`, and acceptance defined as one proof submitted on the new version rather than the unit going active. Signature enforcement via `/etc/containers/policy.json` means a partner-swapped image will not start.
+
+### F3. Do not bake Caddy or Postgres into the OS image
+
+This reverses a suggestion made earlier in the same discussion, and the reversal is the substantive point.
+
+**The cost is understated in the RFC.** See Key Finding 6: patching Caddy through an OS promotion costs 2–7 minutes of regional outage and one PDP-safe window, against ~1–3 seconds for a container restart. That is not a 2× difference.
+
+**Caddy is the worst possible candidate for the slow path.** It is the only publicly listening process, internet-facing, on hardware FilOne does not control — the single highest-exposure component in the stack. Baking it demotes the most exposed component to the slowest patch path, and directly contradicts the RFC's own two-tier table, which lists Caddy in the fast tier. The CVE stream is not hypothetical: Caddy inherits the Go TLS/HTTP2 surface (the Rapid Reset and CONTINUATION-flood class hit Go servers broadly and required rebuilds against a patched toolchain), plus quic-go if HTTP/3 is enabled. Second-order effect: under TLS-ALPN-01 renewal is coupled to Caddy serving correctly and fails silently until expiry, so a Caddy defect that breaks renewal would need an OS promotion to fix — lengthening MTTR on a failure mode the design already flags as hard to see.
+
+**The steelman for baking, and why it loses.** Baking (a) deletes the auto-update footgun by construction, since Caddy would structurally have no independent update path; (b) gives R6/R7 purity, the OS digest fully determining host config; (c) removes an entire unexpected-restart class, so `:443` has exactly one reason to close; (d) resists drift, a unit in `/usr` being read-only where `/etc` is partner-writable. But (a) is the only real motivation and it has a far cheaper fix — **do not label Caddy, and give it its own gated upgrade unit**, which is precisely what change 7 of the Piri review already prescribed. And (d) is weak here: the threat model concedes the partner can modify anything, and cosign policy rather than file permissions is what stops them running an image FilOne did not sign.
+
+**Postgres is a different case and should not have been paired with Caddy.**
+
+|                           | Caddy                                 | Postgres                                              |
+| ------------------------- | ------------------------------------- | ----------------------------------------------------- |
+| Exposure                  | Only internet-facing process          | localhost / container network only                    |
+| CVE relevance             | Pre-auth remote; Go TLS/HTTP2 surface | Mostly authenticated or extension-specific            |
+| Cost of a careless update | Restart, seconds                      | Major-version data-dir change; cluster will not start |
+| Natural cadence           | Reactive, hours                       | Deliberate, rare                                      |
+
+For Postgres, forcing changes through a staged, gated promotion _is_ a genuine safety property, because the failure mode is catastrophic and awkward to reverse and you want the restore rehearsal inside the same change window. But baking is a heavier mechanism than the goal needs: a digest-pinned unit in `/etc`, unlabelled for auto-update, with a hand-invoked upgrade unit achieves the same deliberateness without coupling a Postgres patch to a Piri drain.
+
+**Verdict.** Keep both as containers with units in `/etc`, unlabelled for auto-update, each with its own gated upgrade unit — Caddy's firing reactively on a security bump, Postgres's invoked by hand inside a planned window with a rehearsed restore. Reserve image-baking for components that genuinely have no independent patch story: kernel, systemd, podman/crun — that is, the batched tier exactly as originally scoped. The narrower claim from §F1 stands: placement is a legitimate cadence lever. It was simply applied to the two services where the cadence it enforces is wrong.
+
+**Two things worth chasing that would improve the fast path:**
+
+- _Socket activation for the proxy._ If `:443` is owned by a systemd `.socket` unit rather than by the container, swapping the Caddy image does not close the socket — inbound connections queue in the kernel accept backlog across the swap, turning a Caddy patch from ~1–3s of refused connections into ~1–3s of added latency. That matters specifically for the pre-signed-URL-in-a-browser case, which has no retry. Podman/Quadlet supports socket activation; **whether Caddy consumes inherited descriptors via systemd's `LISTEN_FDS` protocol is unverified** and is the thing to establish before designing around it.
+- _Pre-drain before reboot._ Since every reboot already pays Piri's drain, the OS upgrade unit should drain Piri deliberately _before_ invoking the reboot, inside the gated window, rather than discovering the drain during shutdown. This decouples reboot duration from load and makes the batched-tier window predictable, which the current design assumes but does not ensure.
+
+### F4. Rollback coherence: an OS rollback does not roll back container images
+
+Verified against bootc's documentation, which distinguishes "floating" images (fetched by podman-systemd) from logically bound ones and states the lifecycle difference explicitly. Floating images are managed by the user through `podman auto-update` and `podman image prune`, can be acted on at any time independent of host upgrades or rollbacks, and **host upgrades or rollbacks do not affect the set of images**. Bound images are managed exclusively by bootc during upgrades, and those corresponding to rollback deployments are retained — so bound images are the documented mechanism for coupling app and OS lifecycles.
+
+The filesystem mechanics corroborate it. Upstream ostree documentation notes that `/var` is shared between independent versions (which is why package databases must live in the per-deployment `/usr`); rootful podman's graphroot is `/var/lib/containers/storage`; `/etc` is per-deployment.
+
+| Path                             | Rolls back with the OS?      | Contents                                |
+| -------------------------------- | ---------------------------- | --------------------------------------- |
+| `/usr`                           | Yes                          | kernel, systemd, podman, baked units    |
+| `/etc`                           | Yes (per-deployment merge)   | Quadlet units, Caddyfile, `policy.json` |
+| `/var/lib/containers/storage`    | **No**                       | container images, libpod database       |
+| `/var/usrlocal` (= `/usr/local`) | **No**                       | `pdp-gate`, `snapshot-piri-db`          |
+| `/var/mnt/filone`                | **No** (correct and desired) | SQLite, Postgres, certs, ACME state     |
+
+**Finding A — the gate scripts are in the wrong place, and this is the most serious item in this review.** rpm-ostree's treefile reference documents `opt-usrlocal` defaulting to `var`, meaning `/opt` and `/usr/local` are symlinks into `/var` and are purely machine-local state; the maintainers describe that territory as never rolled forward or backward. The corrected units use `ExecStartPre=/usr/local/bin/pdp-gate` and `/usr/local/bin/snapshot-piri-db`, which are **host** paths and therefore resolve to `/var/usrlocal/bin/`. Three consequences in ascending seriousness: (1) they do not roll back, so a broken gate survives an OS rollback; (2) **they are covered by nothing** — cosign policy protects container images, not a shell script in `/var`, so the control that prevents slashing is a plain file in partner-writable shared state, and a partner wanting to avoid upgrade downtime can `exit 0` the gate undetected; (3) R7 has a hole, since the gate logic's version is pinned neither by the OS digest nor by the release manifest. **Fix:** ship both inside the OS image at `/usr/libexec/filone/` via the Containerfile — read-only, versioned with the OS, rolled back with it, and covered by the OS image signature. (`HealthCmd=/usr/local/bin/piri status` is fine as written; that path is inside the container.)
+
+**Finding B — the upgrade timer actively diverges after a rollback.** `filone-upgrade.timer` carries `OnBootSec=10min`, so roughly ten minutes after a greenboot rollback, `podman auto-update` resolves `:prod` and pulls whatever the channel tag now points at. The box converges to **old OS + newest app images**, unattended, in the middle of the incident the rollback was meant to escape. If the rollback was triggered by an OS-N/app-M interaction, it manufactures an untested combination rather than restoring a tested one; nothing in the design ever restores a known-good _bundle_. This is a new argument for the option change 2 of the Piri review set aside: if the release-manifest ID lives in `/etc` (per-deployment), an OS rollback reverts the pointer and the agent re-converges _backward_ to the app versions tested against that OS. The channel tag is version-agnostic by design, which is exactly why it cannot participate in rollback. Keep the channel tag for regions 1–5, but record this as the property being traded away rather than leaving it implicit.
+
+**Finding C — podman version skew across a rollback is a live hazard.** See Key Finding 8. Note this is a podman property rather than an OS-model property, so it applies on the mutable path too; the only thing the image-based OS changes is that the _deployment_ determines which podman touches the shared `/var` state.
+
+**Finding D — two uncoordinated rollback domains.** greenboot rolls back the OS on failed boot; `podman auto-update --rollback` rolls back an image on failed health check. Neither knows the other exists — the bootc documentation says as much for floating images. Reachable states include OS-rolled-back-only, containers-rolled-back-only, and both at different times, and nothing currently records which combination is running or whether it was ever tested together. **Compensating control:** emit the running triple — booted deployment checksum from `rpm-ostree status`, each container's resolved image digest from `podman inspect`, and the release-manifest ID — and alert when the combination does not match a manifest that passed staging. The Piri review already noted that channel tags stop the unit file recording the running version; this is what turns silent into paged.
+
+**One balance note:** this asymmetry is not a bootc weakness. It is inherent to "roll back the OS but keep the data", and it reappears on openSUSE, where the default layout puts `/var` on a subvolume excluded from root snapshots. Choosing a mutable distro does not avoid §F4 — it just means you rebuild the A/B mechanism _and_ still own the problem.
+
+### F5. Defects to fix regardless of OS choice
+
+These are RFC-level bugs the discussion surfaced. None of them depend on the mutable/immutable decision:
+
+1. **`pdp-gate` and `snapshot-piri-db` must move** out of `/usr/local/bin` (= `/var/usrlocal`: partner-writable, unsigned, never rolled back) and into the OS image at `/usr/libexec/filone/`.
+2. **`Volume=/data/piri` in the corrected `piri.container` is still wrong** — the provisioning review flagged that `/data` is a new top-level directory ostree will not carry into the next deployment. It must be `/var/mnt/filone/piri`.
+3. **"The application upgrade is the expensive event and the host reboot is the cheap one" is inverted.** Restate it, and add pre-drain-before-reboot so the batched window is predictable.
+4. **Add running-combination telemetry** (deployment checksum + image digests + manifest ID) and alert on any mismatch against a staged manifest.
+5. **Serialise Quadlet unit startup** across the podman 5.8 migration boundary, or run a oneshot `podman system migrate --migrate-db` ahead of any container unit.
+
+### F6. Additional bake-off items
+
+| Item                       | PASS criteria                                                                                                                                  | FAIL trigger                                                  |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| Rollback coherence         | Pull a new Piri image, force an OS rollback, wait 15 min: the running combination is one the release manifest recognises, and a mismatch pages | Box silently settles on an untested OS/app pair               |
+| Gate-script integrity      | `pdp-gate` is read-only, versioned with the OS, restored by an OS rollback; tampering fails closed and pages                                   | Gate editable from the partner's shell without detection      |
+| podman migration boundary  | Cross podman 5.8 in staging with all Quadlet units starting concurrently; `podman ps` sees every unit systemd reports active                   | Any container invisible to podman while its service is active |
+| Caddy socket activation    | Swapping the Caddy image adds latency but refuses no connections; a pre-signed URL loaded mid-swap succeeds                                    | Caddy cannot consume inherited `LISTEN_FDS`                   |
+| `/etc` merge under staging | A unit-file edit made between staging and reboot survives the reboot                                                                           | Edit silently lost — staging not in effect                    |
+
+## Recommendations
+
+**Per layer, given "mutable but code-driven, Terraform-preferred":**
+
+- **OS — take the minimal relaxation first.** Section F makes this the default rather than a footnote: **keep bootc/FCOS and relax only the no-layering rule.** You retain unattended A/B rollback, and you keep the placement lever (§F1) that lets each layer have its own cadence with no additional tooling. If you do leave, pick **one** distro with native near-unattended rollback — first choice **openSUSE Leap Micro/MicroOS (btrfs+snapper boot-into-snapshot)**, strong alternative **Ubuntu 24.04 + snapshot.ubuntu.com** (best R7 story) _with_ a ZFS-BE or snapper layer added; do not run Ubuntu without a rollback layer. **Do not adopt live kernel patching as a headline feature** — take Livepatch only because it rides along with Ubuntu Pro, and skip paid TuxCare for this workload.
+- **Infra services (Postgres/secrets/Caddy):** Keep on the same runtime as the app (Quadlet units in `/etc`), Caddy as the long-lived :443 owner via TLS-ALPN-01, secrets rendered short-lived into tmpfs from central Vault/OpenBao. Do **not** run durable Vault in the partner VM. **Do not bake Caddy or Postgres into the OS image** (§F3): leave both unlabelled for auto-update and give each its own gated upgrade unit — Caddy's reactive on a security bump, Postgres's hand-invoked inside a planned window with a rehearsed restore. Chase socket activation for the proxy if Caddy supports `LISTEN_FDS`.
+- **App (Piri/Ingot):** **Podman Quadlet + `podman auto-update`** as the default, driven by the gated `filone-upgrade.timer` with `podman-auto-update.timer` masked. Migrate to **Nomad client-only** at the ~30-region inflection _if_ FilOne wants a declarative, Terraform-submittable fleet control plane and will run the servers. **Reject Kamal.**
+- **Alloy — the one thing worth binding.** bootc's own stated use cases for bound images are log forwarders, monitoring, config-management agents and security agents, which describes Alloy exactly, and binding guarantees it is present at boot without working networking — the property that matters most during the outages you want telemetry for. Bind Alloy; keep Caddy floating. These are consistent positions, not a contradiction: bind what should be slow and must always be present, float what must be patched in hours.
+- **Terraform:** central resources only (DNS, Vault/OpenBao, Grafana Cloud, registry, inventory); Terragrunt for per-region state now, evaluate Stacks at ~30 regions on HCP. Terraform should **not** reach into the partner box; use the Nomad provider (talk to the orchestrator API) if you want Terraform-driven app deploys.
+- **In-VM convergence:** **ansible-pull (outbound-only)**, one owner per file, logs shipped via Alloy. On bootc this shrinks further — much of what ansible-pull would converge is simply part of the image.
+- **Do these five things regardless of the OS decision** (§F5): move the gate scripts into the image, fix the `/data/piri` volume path, restate the reboot-cost inversion and add pre-drain, add running-combination telemetry with alerting, and serialise Quadlet startup across the podman migration boundary.
+
+**The single highest-regret decision in this space:** **abandoning unattended A/B rollback.** Everything else the relaxation unlocks is convenience; the rollback safety net is the one property that, once lost, turns a bad 3am update into a partner-console incident across regions nobody at FilOne can physically reach. Whatever OS you pick, **prove automatic rollback works on the partners' actual hypervisors before you ship region 1** — or keep bootc's A/B and relax only the no-layering rule.
+
+**The cheapest high-value fix in this document** is unrelated to the OS question: `pdp-gate` currently sits in partner-writable, unsigned, never-rolled-back state (§F4, finding A). Slashing protection should not be a file the adversary can edit. Move it into the image before region 1.
+
+## Caveats
+
+- Pricing figures (Ubuntu Pro $500/server/yr, $25/workstation/yr, free ≤5 machines; TuxCare KernelCare ~$50/server/yr + LibCare ~$34.50; RHEL ~$879 Standard; Oracle Premier ~$1,399/CPU-pair) are **list prices** from vendor and vendor-comparison pages; all discount at volume — treat the 300-machine extrapolations as order-of-magnitude.
+- TuxCare comparison figures come substantially from **TuxCare's own** competitive pages and should be read as vendor-favourable; the direction (TuxCare much cheaper, broader distro coverage) is corroborated but exact multipliers are theirs.
+- Kamal's inbound-SSH requirement, no-pull-mode, and single-instance downtime degradation are verified against 37signals' official docs and maintainer discussion; the "no pull mode" is an inference from complete absence in the official docs.
+- Terraform Stacks GA (HashiConf 2025, Sep 25 2025) is HCP-first; on-prem Terraform Enterprise support was still trailing at announcement — verify before assuming Stacks for a self-hosted setup.
+- openSUSE auto-rollback (boot-counting) parity with FCOS greenboot on Proxmox/KVM/vSphere is **asserted from documentation, not tested** — this is the top item to validate in the bake-off.
+- NixOS reproducibility/rollback claims are well-established; the team-adoption-cost judgement is qualitative and depends on FilOne's staffing.
+- **Section F additions.** The floating-vs-bound image lifecycle, the Quadlet search paths, the `/etc` merge and staged-deployment behaviour, the `opt-usrlocal` default, and the podman BoltDB→SQLite timeline are all **verified against upstream documentation** (bootc, podman, ostree, rpm-ostree, Fedora). Three things are **not** verified and are flagged inline: whether Caddy consumes inherited `LISTEN_FDS` for socket activation; whether the pinned FCOS release keeps the `opt-usrlocal: var` default (`readlink -f /usr/local` settles it); and whether podman issue #28216 is still open by the time your stream crosses 5.8.
+- The 2–7 minute reboot figure in §F3 is **derived from the configured timeouts** (`TimeoutStopSec=330`, `HealthStartPeriod=60s`) plus a 30–90s boot, not measured. Piri's real drain duration under load is already a load-bearing open question in the RFC; measure it before treating the range as authoritative.
+- The Go HTTP/2 CVE examples (Rapid Reset, CONTINUATION flood) are cited to illustrate the _class_ of exposure Caddy inherits, not as an exhaustive or current advisory list. Check Caddy's own security advisories when setting the patch SLO.
+- Nomad client↔server port directions and exec/logs-via-server behaviour are from HashiCorp docs; validate the exact firewall rules against your chosen Nomad version before committing.
+
+---
+
+# 2026-08-06 Running a Few Services on One Box in 2026: What to Use Besides Kamal
+
+_Includes a continuous-deployment design for the two recommended runtimes (Docker Compose and Podman + Quadlet), added after the original survey._
+
+## TL;DR
+
+- **For the simplest, most durable single-host setup, use plain Docker Compose (or Podman + Quadlet if you want systemd-native, rootless, daemonless containers) fronted by Caddy or Traefik.** These have essentially zero platform overhead, no control plane, and the largest communities. Kamal is an excellent _deploy_ layer on top of Compose-style workloads but is Rails-optimized and registry-dependent.
+- **If you want a web UI, pick Dokploy or Coolify** (full self-hosted PaaS, Docker + Traefik) or **Komodo** (GPL-3.0, GitOps-friendly, agent-based) or **Portainer CE/Dockge** (lightweight management UIs). Avoid CapRover for new builds — it is tied to Docker Swarm, which is frozen, and its own release cadence has slowed.
+- **Avoid dead ends:** Docker Swarm is stable but in maintenance mode with no active feature development; Watchtower was archived December 17, 2025 (use Diun for notifications or the nickfedor/watchtower fork); several PaaS entrants (Ptah.sh) are archived. Nomad is fine single-node but is BUSL-licensed, now an IBM product, and has no meaningful open-source fork — it's usually more machinery than a handful of services needs.
+- **For continuous deployment, prefer a pull loop over a CI push.** CI builds the image, pushes it, and commits the resulting digest into a central git repo; each node runs a systemd timer (optionally poked by a webhook) that reconciles its own directory. No inbound ports, no long-lived credential in CI that can reach the box, and git becomes the audit log of exactly what ran when.
+- **The highest-value ~20 lines of the whole setup are failure handling:** health-gated apply, automatic revert to the last-good commit, and _quarantining_ the bad SHA so the loop can't flap. Add a staleness ("deadman") alert, because a dead timer looks exactly like a timer with nothing to do.
+
+## Key Findings
+
+**The 2026 consensus for "a few services on one box" is: don't reach for an orchestrator.** Across Hacker News, r/selfhosted, and practitioner blogs, the dominant advice is plain Docker Compose or Podman Quadlet, optionally with a thin deploy tool (Kamal, Dokku) or a management UI (Portainer, Dockge, Komodo). Kubernetes/K3s is repeatedly described as "the Kubernetes tax without the Kubernetes dividend" for teams that fit on one or two servers.
+
+**Container-native, no control plane (best fit for the query):**
+
+- **Docker Compose** — The default. Single YAML, ~36K GitHub stars, universal community support. Single-host oriented. No built-in zero-downtime deploy or secrets vault, but the most documented option on earth. Pair with a reverse proxy for TLS.
+- **Podman + Quadlet** — The rising OS-native alternative. Quadlet (merged into Podman 4.4, Feb 2023) lets you declare containers as systemd units; rootless, daemonless, and integrated with journald/systemctl. Podman 5.4.2 ships in Debian 13 "trixie" (released August 9, 2025 — "After 2 years, 1 month, and 30 days of development, the Debian project is proud to present its new stable version 13"). `podman auto-update` + `podman-auto-update.timer` handles image refreshes. `podman-compose` exists but is a thin, less-maintained translation layer — Quadlet is the recommended path. `podman kube play` can run Kubernetes YAML locally if you want a K8s-compatible manifest without a cluster.
+- **Kamal (2.x)** — 37signals' SSH-based, imperative, zero-server-overhead deploy tool (roughly 11,000+ GitHub stars — meaningful but smaller than Coolify and Dokku). Kamal 2 replaced Traefik with `kamal-proxy`, added multi-app-per-host, automatic Let's Encrypt HTTPS, canary deploys, maintenance mode, and improved secrets (password-manager integration). Battle-tested running HEY. Limitations: requires a Docker registry, installs via Ruby (or a container), no built-in monitoring/log aggregation/DB management, and does not reschedule workloads across nodes or provide cluster self-healing. Best for web apps; awkward for non-web/stateful-only workloads.
+
+**Self-hosted PaaS (web UI, more batteries):**
+
+- **Coolify** — Most popular (over 59,300 GitHub stars as of July 2026, the most-starred self-hosted PaaS on GitHub), Apache-2.0, PHP + Traefik. v4.0.0 went stable on April 27, 2026 after nearly two years of beta; v4.1.0 (May 2026) added Railpack builds, audit logging, MCP; v5 with multi-server is being built. 280+ one-click templates. Costs ~500–700 MB RAM and 5–6% idle CPU before you deploy anything. Multi-server scaling uses Docker Swarm. An independent audit reportedly flagged seven CVEs (see caveat).
+- **Dokploy** — Younger (~24K stars), TypeScript + Traefik. Cleaner UI, stronger built-in monitoring, first-party MCP server, first-class Compose/Swarm support. Smaller template library and community than Coolify.
+- **Komodo** — GPL-3.0, Rust + TypeScript, ~10K stars. Core + Periphery agent architecture; multi-host fleet management, GitOps via TOML resource sync, no node caps or paid tier. v2.0 (early 2026) switched to PKI (Ed25519) auth. You supply your own reverse proxy/TLS. More moving parts (Core + database + per-host agent).
+- **Dokku** — The veteran "mini-Heroku" (since 2013), Go, git-push workflow, Heroku buildpacks or Dockerfiles, excellent docs, minimal resource use. Single-server only (no native multi-host). Still actively maintained and beloved for solo/CLI-first single-box use.
+- **CapRover** — Docker Swarm-based PaaS with UI and one-click apps. GitHub activity has slowed considerably; last release was over a year old at one point; architecturally locked to frozen Swarm; the Captain instance is a single point of failure. Not recommended for new production builds.
+
+**Management UIs (manage Compose/containers, not full PaaS):**
+
+- **Portainer CE** — The most stable, broad web UI (Docker/Swarm/K8s/Podman). Free CE exists, but the free _Business Edition_ is capped at 3 nodes (a hard limit) and gates RBAC/SSO/audit-log behind paid tiers. CE can also back a Compose stack with a git repo (poll or webhook), which makes it a zero-scripting GitOps option — see the CD section.
+- **Dockge** — MIT, single Node service, ~15K stars, tidy Compose-stack UI for one or two hosts, single-maintainer.
+- **Swarmpit / Portainer for Swarm** — Swarm-oriented UIs; only relevant if you commit to Swarm (not advised for new builds).
+
+**Ingress / TLS layer:**
+
+- **Caddy** — Simplest; automatic HTTPS with Let's Encrypt + ZeroSSL failover, two-line config. Strongest ACME implementation of the three. Best for simple single-VPS setups.
+- **Traefik** — Docker-label-driven dynamic discovery; the de facto choice for container-heavy/multi-service setups; steeper learning curve.
+- **Nginx Proxy Manager (NPM)** — GUI over nginx; easiest for beginners, but bundles its own stack and has lagged upstream security fixes (e.g., CVE-2025-50579). Keep it updated and never expose the admin UI.
+- **kamal-proxy** — Kamal's own lightweight proxy; not a Traefik replacement for general use (no middleware/rate-limiting/compression).
+
+**Image updates:**
+
+- **Watchtower is archived (Dec 17, 2025)** — the original containrrr/watchtower repo (24.7K stars at freeze) is read-only, no more security patches; also incompatible with Docker Engine ≥28/29. Migrate to **Diun** (notify-only, safest), or the actively maintained **nickfedor/watchtower** fork (github.com/nicholas-fedor/watchtower — "a drop-in compatible fork with continued active development, and the one we've seen the most adoption of") for drop-in auto-updates. Podman users get `podman auto-update` natively.
+- **Renovate** is the better fit if you pin digests in git: it opens digest-bump PRs for third-party images (Postgres, Caddy, Redis) so you get version discovery with a human gate and no auto-puller on the box. Native support for `docker-compose.yml`; Quadlet files need a `customManagers` regex rule.
+
+**Continuous deployment (added):** the design space has two independent axes — **who initiates the connection** (node pulls vs. CI pushes) and **what is the source of truth for the running version** (git, the registry, or a CI job's ad-hoc decision). Most durable setups are a hybrid: CI writes to git or the registry, the node reconciles from there, and CI never touches the node. See "Continuous deployment for Compose and Quadlet" below.
+
+**Non-container / OS-native options:**
+
+- **systemd units + Podman Quadlet** — see above; the cleanest containerized-but-systemd-native option.
+- **systemd-nspawn / machinectl** — lightweight OS-container/VM-lite via systemd; niche but robust for full-OS-tree isolation.
+- **systemd portable services / systemd-sysext** — Portable services attach a service + its dependencies from a disk image with sandboxing; sysext overlays additional binaries onto /usr atomically. Real production users exist (e.g., a Go+SQLite side project used by the DOE Science Bowl runs on a single Debian 13 VPS via portable services with Litestream S3 replication and Let's Encrypt). Good for non-container, single-artifact, version-controlled deploys.
+- **NixOS + Colmena / deploy-rs / morph** — Fully declarative host config with atomic rollbacks (boot into the previous generation). Colmena (Rust, nix-community) is a stateless, parallel, SSH-push deployer; deploy-rs and morph are peers; NixOps is the older option. Steep learning curve but the strongest rollback and reproducibility story. Colmena deploys only to hosts already running NixOS.
+- **Ansible** — Push-based over SSH, no agent, imperative-but-idempotent. Great for provisioning a single host and laying down Compose files / systemd units; commonly used to sync config across manually-run Dokku or Compose hosts. In **`ansible-pull`** mode it becomes a pull-based CD loop (see CD section).
+- **LXC / Incus** — System containers (VM-like) rather than app containers. **Incus** is the community fork of LXD created after Canonical took LXD in-house in 2023; it's Apache-2.0, CLA-free, maintained by the original LXD team under Linux Containers, and now packaged in Debian stable, Fedora, openSUSE, and NixOS. LXD continues under Canonical but ships primarily via Snap and is best on Ubuntu. For a non-Ubuntu host in 2026, Incus is the recommended choice.
+
+**Nomad (single-node):** Technically easy — one Go binary in combined server+client mode — and has a devoted small-scale following as a lighter-than-K8s orchestrator. But HashiCorp itself flags single-server as non-production; Community Edition is BUSL/BSL-licensed (relicensed Aug 2023); IBM completed its acquisition of HashiCorp on February 27, 2025 (per IBM's FY2025 Form 10-Q, shareholders "received $35 per share in cash, representing a total equity value of approximately $7.2 billion"; the announced enterprise value was ~$6.4B). Nomad is being repackaged as an IBM product, and starting April 2026 it adopts IBM's V.M.F versioning with a Nomad 2.0 coming (current line is 1.10.x LTS, with 1.11.x released). Crucially, **there is no significant open-source fork** analogous to OpenTofu (Terraform) or OpenBao (Vault) — only tiny, low-activity attempts (e.g., OpenNood). For a literal handful of services on one box, Nomad is usually more than you need.
+
+**Newer entrants (2025–2026):** **Haloy** (Go, CLI + lightweight daemon, registry-optional layer-caching deploys), **Uncloud** (Go, WireGuard-mesh multi-host Compose, explicitly not production-ready yet, ~4.8K stars), **Disco** (self-hosted Heroku-style), **Canine** (self-hosted Kubernetes PaaS — skip given the K8s exclusion), **Sliplane** (managed, not self-hosted). **Ptah.sh is archived/discontinued** — its maintainer abandoned it after finding Docker Swarm "very unstable and unreliable" and announcing a pivot to Kubernetes/a hand-crafted orchestrator.
+
+## Details
+
+### Why not Kubernetes/K3s (confirming the user's instinct)
+
+The user has ruled out K8s/K3s, and the 2026 field agrees for this scale. Practitioner writeups like "Kubernetes Was Overkill. We Moved to Docker Compose" describe eight-engineer teams "spending 60 hours a week managing Kubernetes instead of shipping features." The high-profile Gitpod "We're Leaving Kubernetes" piece drew a useful counterpoint on Lobsters: much of the complexity is in your application and "you can make and not make that mess regardless of using or not using Kubernetes." The threshold rule that recurs: if you don't have a distributed-systems problem — if your services fit on one or two boxes — an orchestrator is overhead. The one legitimate exception people cite is _learning_ K8s, or crossing ~25+ containers across 3+ machines where you genuinely need cross-node scheduling (at which point K3s, not full K8s, is the lighter step).
+
+### The two "boring and correct" choices
+
+**Docker Compose** remains the pragmatic default. It's single-host-oriented, universally documented, and everything else in this space is built on it or interoperates with it. Its gaps — no native zero-downtime rollout, no secrets vault, no rollback beyond re-deploying a previous image tag — are real but easily patched with a reverse proxy and disciplined image tagging. A representative homelab view: on a resource-constrained single node, "there is NO BETTER SOLUTION… little, to no overhead."
+
+**Podman + Quadlet** is the choice if you value OS-native integration. Because each container is a real systemd unit, you get lifecycle management, dependency ordering, journald logging, `systemctl status`, and auto-restart for free — with rootless, daemonless operation. Practitioners report the logging and status story is _easier_ than Compose. Two caveats appear repeatedly: (1) rootless services need `loginctl enable-linger` or they won't start until the user logs in; (2) there is no clean automated migration path from Compose to Quadlet — you rewrite units by hand, and Quadlet "is absolutely not a solution for local-dev." `podman generate systemd` is deprecated in favor of Quadlet.
+
+### Kamal's real limits for the user's case
+
+Kamal 2 is genuinely excellent for a _fresh_ web app on a fresh server. But it is a deployment tool, not a platform: it won't self-heal across nodes, requires a Docker registry (an extra moving part if you don't already push images), installs through Ruby, and leaves monitoring, logging, and database operations entirely to you. For non-Rails, non-web, or purely stateful workloads, it fits awkwardly. Its virtue — nothing runs on the server except your app and a small proxy — is also why it does less than a PaaS.
+
+### Zero-downtime, rollback, secrets, and multi-host at a glance
+
+- **Zero-downtime deploys:** Built-in with Kamal (kamal-proxy), Coolify, Dokploy, Haloy, and Uncloud. With plain Compose you script it (start new, health-check, swap proxy, stop old) or accept a brief blip. NixOS does atomic activation but a service restart may blip.
+- **Rollback:** Strongest with **NixOS** (boot previous generation) and image-tag-based tools (Kamal keeps prior containers; Coolify/Dokploy track deployments). Compose rollback = redeploy previous tag. Quadlet + `podman auto-update` supports rollback on failed health check.
+- **Secrets:** Kamal 2 integrates password managers; Coolify/Dokploy have per-app secret stores; Compose relies on `.env`/Docker secrets; Colmena uploads secrets outside the Nix store. For a heavier need, **OpenBao** (the MPL-2.0, Linux-Foundation fork of Vault) is the open-source vault of choice in 2026 since Vault itself went BUSL.
+- **Ingress/TLS:** Caddy (simplest auto-HTTPS), Traefik (dynamic, container-native), NPM (GUI). Kamal, Coolify, Dokploy, Haloy, and Uncloud bundle Let's Encrypt automation.
+- **Persistent volumes/databases:** All Docker-based tools use named volumes/bind mounts. Watch for the classic footgun — never let an auto-updater silently jump a database major version (this is exactly why Diun's notify-only model is safer than Watchtower's auto-pull).
+- **Multi-host growth path:** Compose → Uncloud (WireGuard mesh) or Komodo (agents) or Docker Swarm (if you must, but it's frozen); Kamal deploys to multiple servers over SSH natively; Coolify/Dokploy scale via Swarm. NixOS/Colmena and Ansible scale to fleets naturally over SSH.
+
+---
+
+## Continuous deployment for Compose and Quadlet
+
+Neither Compose nor Quadlet ships a CD mechanism, so this is the part you assemble yourself. Two axes define the space:
+
+1. **Who initiates the connection** — the node pulls, or CI pushes. Mostly a security and network-topology question.
+2. **What is the source of truth for "which version runs"** — git (a digest committed to a file), the registry (a floating tag something watches), or a CI job's ad-hoc decision. Mostly a reproducibility question, and _orthogonal to the first axis_.
+
+### Pull-based family
+
+**Plain systemd timer + git + reconcile script.** The DIY baseline: a timer fires every 1–5 minutes, `git fetch`, and if `origin/main` moved and touched this node's directory, apply and restart. Needs only a read-only deploy key and outbound 443.
+
+An important asymmetry between the two runtimes:
+
+- **Compose mostly doesn't need change detection.** `docker compose up -d --remove-orphans --wait` _is_ a reconciler — it recreates only containers whose image or config hash actually differs, and `--wait` blocks on health checks and exits non-zero on failure. The loop is "pull, then `up -d --wait` per stack." Skip the diffing logic.
+- **Quadlet does need it.** Writing unit files plus `systemctl daemon-reload` restarts nothing, so you need `git diff --name-only HEAD@{1} HEAD` mapped to units (`foo.container` → `foo.service`), and a changed `.volume` or `.network` means restarting dependents too.
+
+_Pros:_ no inbound ports; no credential held by a third party; works behind NAT; keeps working if GitHub is down; trivially auditable; ~50 lines of bash.
+_Cons:_ polling latency; no feedback path (the pusher doesn't learn whether it worked); you own failure handling; **silent stalls are the classic failure mode** — a timer that has been erroring for three weeks looks exactly like a timer with nothing to do.
+
+**Webhook poke instead of polling.** A tiny socket-activated, HMAC-verified receiver (`adnanh/webhook`, or ~30 lines of Go) that only triggers the same reconcile unit. Seconds instead of minutes, while the node still pulls the content — so no CI-side credential can touch the node. _Cost:_ one inbound port, however small. Keep the timer as a fallback for missed hooks.
+
+**`ansible-pull`.** Same shape, but the reconcile logic is a playbook run from the repo on a timer. You get idempotent modules for the rest of the host (users, firewall, packages, unit files, compose files), and **handlers give you "restart only what changed" for free** — precisely the hard part of the Quadlet case. _Cons:_ Python + Ansible on the node, slower runs, weak reporting in pull mode unless you wire up callback plugins.
+
+**Portainer CE GitOps.** Back a Compose stack with a git repo; poll or webhook. Free in CE. _Pros:_ web UI, per-stack, zero scripting. _Cons:_ Compose only (no Quadlet), another daemon, and it invites out-of-band clicking that drifts from git.
+
+**Komodo.** Purpose-built: TOML resource definitions in git, sync via webhook, Core + per-host Periphery agent. _Pros:_ the closest thing to Flux-for-Compose, multi-host ready, GPL-3.0, no node caps. _Cons:_ control plane + database + agent is a lot of machinery for one box, and you still supply the reverse proxy and TLS.
+
+**Harbormaster** is the minimalist niche pick — reads a YAML list of git repos and runs their Compose files. Good if each service lives in its own repo.
+
+### Push-based family
+
+The auth problem is the whole game here. Roughly worst to best:
+
+**Long-lived SSH key in a CI secret.** Common, and the thing to move away from. If you do it, at minimum: a dedicated `deploy` user with no shell, a forced command in `authorized_keys` (`command="/usr/local/bin/deploy",restrict ssh-ed25519 …`) so the key can only invoke one script, and a narrowly scoped sudoers entry for the specific `systemctl` calls. You still have a forever-valid credential held by a third party, guarding an inbound port.
+
+**Same, but over a private network.** The official `tailscale/github-action` joins the runner to your tailnet using an OAuth client and an **ephemeral, tagged** node, so the runner leaves the tailnet when the job ends; your box then needs no public sshd at all, and ACLs restrict that tag to one host and one port. With Tailscale SSH you can drop SSH keys entirely and let tailnet identity plus ACLs be the authorization. Cloudflare Tunnel with a service token is the same shape. _Pros:_ removes the inbound port — worth a lot on bare metal, where you are the one patching sshd. _Cons:_ a dependency on a third-party coordination plane (self-hostable via Headscale, at a cost).
+
+**SSH certificate authority with short-lived certs.** CI authenticates to OpenBao (or step-ca) via OIDC — **no static secret in CI at all** — and receives a 5–15 minute SSH certificate with a fixed principal and forced command. The node's sshd only needs `TrustedUserCAKeys`; it stores no per-client keys, and revocation happens by expiry. _Pros:_ no long-lived credentials anywhere, real identity, automatic expiry, scales cleanly to more nodes and workflows. _Cons:_ the most moving parts, and you now operate a CA.
+
+**Invert it: self-hosted runner on the node.** The runner polls CI outbound over 443 — no inbound port, no credential for CI to hold, and you get a local build cache. _Cons:_ a runner is an arbitrary-code-execution surface by design. Run it as an unprivileged user with narrow sudo, and **never on a public repository** — fork PRs can execute code on self-hosted runners, which GitHub explicitly warns about.
+
+### Registry-as-trigger family
+
+**`podman auto-update` + `podman-auto-update.timer`** is the Quadlet-native answer and genuinely good: label a unit `AutoUpdate=registry`, the timer checks the registry, pulls on digest change, restarts the unit, and — uniquely, for free — **rolls back automatically if the new container fails its health check**.
+
+The catch is structural: it only works on a _floating_ tag, so the registry, not your repo, decides what runs. That is fine if CI owns a tag like `prod` and moving that tag _is_ the deploy action — but then a `versions.conf` in git is decorative. Pick one source of truth deliberately.
+
+**Watchtower's original repo is archived (Dec 2025)** and incompatible with Docker Engine ≥28 — use `nickfedor/watchtower` for the drop-in, or **Diun** for notify-only. Never point an auto-updater at a database container; a silent major-version jump is the canonical way to lose an afternoon or a dataset.
+
+### The recommended hybrid: CI writes git, the node pulls
+
+Combine both families so **CI never touches the node**:
+
+1. CI builds and pushes `ghcr.io/org/app@sha256:…`.
+2. CI commits that digest into the node's file in git (directly, or as an auto-merged PR).
+3. The node's pull loop sees the change and reconciles.
+
+You get CI's build power, git as the auditable record of exactly what ran when, no inbound ports, and no CI credential that can reach the box. The only loss is a tight feedback loop, bought back by having the reconcile script report status (a `deploy-status` file scraped by node_exporter's textfile collector, or a `systemd OnFailure=` unit that pings you). Add **Renovate** for third-party image bumps so you get discovery with a human gate.
+
+**One note on repo layout.** A single `{node}/versions.conf` is nice for auditability but works against path-based change detection: every bump touches one file, so the diff can't tell you which service moved. Two ways out — put the digest inline in each component's own compose/quadlet file so path diffing just works, or keep `versions.conf` as the human-facing source and have CI render final files into a separate `deploy` branch that the node pulls. The second is the Argo/Flux pattern and earns its indirection once you have more than a couple of nodes.
+
+### CD approach comparison
+
+| Approach                   | Inbound port | Latency      | Feedback to pusher | Complexity  | Quadlet support        |
+| -------------------------- | ------------ | ------------ | ------------------ | ----------- | ---------------------- |
+| Timer + git pull           | none         | 1–5 min      | you build it       | very low    | yes (needs diff logic) |
+| Webhook + git pull         | one, HMAC    | seconds      | weak               | low         | yes                    |
+| `ansible-pull`             | none         | 1–5 min      | weak               | low-medium  | yes (handlers help)    |
+| Portainer GitOps           | UI port      | poll or hook | in UI              | low         | no                     |
+| Komodo                     | agent + Core | seconds      | good UI            | medium-high | no                     |
+| CI → SSH (static key)      | 22           | seconds      | full CI logs       | low         | yes                    |
+| CI → SSH over Tailscale    | none         | seconds      | full CI logs       | medium      | yes                    |
+| CI → SSH cert via OIDC     | 22           | seconds      | full CI logs       | high        | yes                    |
+| Self-hosted runner on node | none         | seconds      | full CI logs       | medium      | yes                    |
+| `podman auto-update`       | none         | daily timer  | none               | very low    | native                 |
+
+### Runtime mechanics that differ between Compose and Quadlet
+
+- **Zero-downtime.** Compose has no native story; `up -d` stops the old container before starting the new one for the same service name. Options: the `docker rollout` CLI plugin (start new → health check → swap proxy → stop old), or two replicas behind Traefik/Caddy. Quadlet needs manual blue/green with templated units and a proxy swap. Honest read for a handful of services: a 1–3 second blip behind a retrying proxy is cheaper than the machinery. Reach for `docker rollout` when you find yourself caring.
+- **Rollback.** Both reduce to `git revert` plus re-apply, which is only meaningful if you pinned digests. Two things make it real: don't prune images aggressively, so a revert doesn't depend on the registry still having the old digest; and script the auto-revert (below). Quadlet gets health-gated rollback for free, but only via the `podman auto-update` path.
+- **Secrets.** Never plaintext in git. For Compose, **SOPS + age** is the sweet spot: encrypted files live in the repo, the age key sits in `/etc/sops/age/keys.txt` mode 600, and the reconcile script decrypts into tmpfs or a `docker secret`. For Quadlet, `podman secret` via `Secret=` works, but **`systemd-creds` with `LoadCredentialEncrypted=`** fits better — the blob is host-bound (optionally TPM-sealed), so it is safe to commit and only decryptable on that machine.
+- **Rootless Quadlet.** Everything becomes `systemctl --user`, units live in `~/.config/containers/systemd/`, and `loginctl enable-linger` is mandatory or nothing starts until the user logs in.
+
+## Handling a deployment that fails to start
+
+Failure handling is where the pull model earns or loses its keep, because no human is watching a CI log. Five things to get right.
+
+### 1. Fail before you touch anything running
+
+Order the work so cheap checks run first and nothing stops until everything is ready:
+
+```bash
+docker compose config -q                 # syntax/interpolation
+docker compose pull                      # missing digest, registry down, auth → abort here
+# only now:
+docker compose up -d --wait
+```
+
+The Quadlet equivalent is `/usr/lib/systemd/system-generators/podman-system-generator --dryrun` to validate unit syntax, plus an explicit `podman pull` of every digest before any `systemctl restart`. This alone converts a large class of outages into "the deploy didn't happen," which is a much better failure.
+
+### 2. Detect properly — health checks are the linchpin
+
+Without health checks, "started" means "the process hasn't exited yet," which catches almost nothing.
+
+**Compose:** `up -d --wait --wait-timeout 120` exits non-zero if a container is unhealthy or exits non-zero — but only if a `healthcheck:` is actually defined. Set `--wait-timeout` above your slowest `start_period`, or slow starts will trigger rollbacks.
+
+**Quadlet:** use `Notify=healthy` (Podman 5.0+, so fine on Debian 13's 5.4.2):
+
+```ini
+[Container]
+Image=ghcr.io/org/app@sha256:...
+HealthCmd=/app/healthcheck
+HealthStartPeriod=10s
+Notify=healthy
+
+[Service]
+TimeoutStartSec=120
+```
+
+The unit is not considered started until the container reports healthy, so `systemctl restart foo` blocks and exits non-zero on failure — the same semantics as Compose's `--wait`. Also add `Restart=on-failure` with `StartLimitBurst=3` so a crash-looping container lands in `failed` state instead of restarting forever unnoticed.
+
+### 3. Revert — and quarantine the bad commit
+
+This is the part that bites people. If the node reverts locally but `origin/main` still points at the bad commit, the next timer tick sees a mismatch and re-applies it: **a flapping deploy loop every 60 seconds**, which — because it keeps "recovering" — looks intermittent rather than broken.
+
+So the node needs two pieces of persistent state: what is currently applied, and what is known bad.
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+exec 9>/var/lock/deploy.lock; flock -n 9 || exit 0   # no overlapping runs
+
+REPO=/var/lib/deploy/repo; STATE=/var/lib/deploy/state; NODE=$(hostname -s)
+cd "$REPO"; git fetch -q origin main
+TARGET=$(git rev-parse origin/main)
+APPLIED=$(cat "$STATE/applied" 2>/dev/null || true)
+
+[[ "$TARGET" == "$APPLIED" ]] && { touch "$STATE/heartbeat"; exit 0; }
+grep -qxF "$TARGET" "$STATE/quarantine" 2>/dev/null && exit 0
+
+git checkout -q "$TARGET"
+docker compose -f "$NODE/compose.yaml" config -q
+docker compose -f "$NODE/compose.yaml" pull -q
+
+if docker compose -f "$NODE/compose.yaml" up -d --wait --wait-timeout 120 --remove-orphans; then
+  echo "$TARGET" > "$STATE/applied"; touch "$STATE/heartbeat"
+else
+  echo "$TARGET" >> "$STATE/quarantine"
+  if [[ -n "$APPLIED" ]]; then
+    git checkout -q "$APPLIED"
+    docker compose -f "$NODE/compose.yaml" up -d --wait --wait-timeout 120 \
+      || { echo "ROLLBACK FAILED" > "$STATE/fatal"; exit 2; }
+  fi
+  exit 1
+fi
+```
+
+Three details worth noting:
+
+- **Quarantine clears itself implicitly.** A _new_ commit has a different SHA, so pushing a fix resumes deploys with no manual intervention.
+- **The working tree is left matching what is actually running**, so a reboot resurrects the good version rather than the bad one.
+- **Exit code 2 (rollback itself failed) is a distinct, page-a-human state.** Do not retry it.
+
+Rollback also depends on the old image still existing. Never run `docker image prune -a` from cron; keep the last few tags, and make sure your registry's retention policy won't delete digests you might revert to.
+
+### 4. The cases revert doesn't fix
+
+- **Database migrations.** If the new version migrated the schema, reverting the container leaves old code against a new schema. No deployment tool solves this — it is a discipline: every migration must be backward-compatible with the previous release (expand/contract, two-phase). At this scale you can also snapshot before migrating (`pg_dump` in a pre-deploy step), which works fine for small datasets and stops working somewhere in the tens of GB.
+- **Partial failure.** Service A healthy, B unhealthy. Reverting the whole commit is the right default — it is the only combination you actually tested — even though it rolls back A's good change too. Per-service revert produces combinations that have never existed anywhere.
+- **Healthy but wrong.** Passes the health check, serves errors. Automation cannot catch this; the mitigation is health checks that verify real dependencies (can it reach Postgres, can it read its config) plus a fast manual revert path. Make sure `git revert && push` is a complete, documented recovery action, because that is what someone will reach for at 3am.
+
+### 5. Alerting — and specifically the deadman
+
+With no CI log to watch, **absence of signal is the most dangerous state**. Alert on staleness, not just on errors.
+
+```ini
+# deploy.service
+[Unit]
+OnFailure=deploy-alert@%n.service
+```
+
+Plus a metric via node_exporter's textfile collector:
+
+```
+deploy_last_success_timestamp_seconds 1754...
+deploy_quarantined_total 0
+deploy_applied_info{sha="a1b2c3d"} 1
+```
+
+Then two alerts: `deploy_quarantined_total > 0` (a deploy failed and was rolled back), and `time() - deploy_last_success_timestamp_seconds > 900` (the loop itself is broken). The second one is the one that saves you.
+
+If you want the pusher to learn the outcome without opening Grafana, the least-bad option is a fine-grained token scoped to _commit statuses: write_ on the single repo, used by the node to post a status on the deployed SHA. It reintroduces a credential, but a nearly powerless one; store it outside the repo (e.g. `systemd-creds` or mode-600 under `/etc`) and never in a committed file. Routing Alertmanager to Slack is simpler and usually enough.
+
+**The cheapest improvement of all** is a staging target that applies the same commit first, with CI only writing the prod digest once staging goes green. That turns most of the above into a safety net you rarely exercise — which is what you want, since untested rollback paths tend not to work.
+
+---
+
+### Maintenance status scorecard (2026)
+
+- **Actively developed:** Docker Compose, Podman/Quadlet, Kamal, Coolify, Dokploy, Komodo, Dokku, Incus, Caddy, Traefik, Diun, NixOS/Colmena, Renovate.
+- **Stable but frozen / maintenance-only:** Docker Swarm (no active feature development; "peaked around 2019," running today "in most meaningful ways the same product it was in 2022"), podman-compose (thin, slow), NPM (spurty releases, security lag).
+- **Slowed / at-risk:** CapRover (activity slowed, Swarm-bound).
+- **Dead / archived:** Watchtower (archived Dec 17, 2025), Ptah.sh (archived 2024), NixOps (largely superseded by Colmena/deploy-rs).
+- **Fine but heavyweight for this scale:** Nomad (BUSL, IBM-owned, no OSS fork), LXD (Canonical/Snap-centric).
+
+## Recommendations
+
+**Staged decision guide, mapped to what you optimize for:**
+
+1. **Simplest possible thing that will still be here in five years → Docker Compose + Caddy.** Add Diun for update notifications. This is the lowest-overhead, best-documented, most future-proof baseline. Choose this unless you have a specific reason not to.
+
+2. **You want OS-native, rootless, no daemon, tight systemd integration → Podman + Quadlet + Caddy/Traefik.** Use `podman auto-update` + timer. Best if you're on Fedora/RHEL/Debian 13+ and already comfortable with systemd. Enable linger for rootless services.
+
+3. **You want a web UI / dashboard → Dokploy (cleaner UI, Docker-native) or Coolify (most features/templates, biggest community).** For pure container _management_ rather than a PaaS, use **Portainer CE** or **Dockge**. If you'll manage more than one host and want GitOps, use **Komodo**.
+
+4. **You want declarative / GitOps-style config with the best rollback → NixOS + Colmena** (whole-host declarative, atomic rollback), or **Komodo** (TOML resource sync + Git webhooks) if you prefer containers with a GitOps layer. Ansible is the pragmatic middle ground if you want push-based config management without adopting Nix.
+
+5. **You may grow to a few hosts → Kamal (SSH multi-server), Komodo (agent fleet), or Uncloud (mesh) — in that order of maturity.** Coolify/Dokploy can also scale via Swarm, with the caveat that Swarm is frozen. Do not architect on Swarm for a _new_ build expecting long-term investment.
+
+6. **Maximum stability, minimal moving parts, non-web or stateful services → plain systemd units, systemd portable services, or Podman Quadlet.** No platform to maintain, no control plane, no daemon churn. This is also the right answer if "container-based" turns out to be optional for you.
+
+7. **Git-push Heroku nostalgia on one box → Dokku.** Still the cleanest single-server git-push experience.
+
+8. **Continuous deployment on one box → timer-based git pull, with a webhook poke for speed.** Concretely: digests pinned in git; CI builds, pushes, and commits its own digest; Renovate PRs for third-party images; SOPS+age (Compose) or `systemd-creds` (Quadlet) for secrets; **auto-revert on health-check failure with the bad SHA quarantined**; and an `OnFailure=` alert plus a staleness alert so a stalled loop can't hide. Add Tailscale later if you want a push path for interactive operations. Choose `podman auto-update` instead only if you accept the registry — not git — as the source of truth.
+
+**Benchmarks that should change your choice:**
+
+- If you cross **~25 containers and/or add a genuine second+ node needing cross-node scheduling**, revisit — that's the point where Komodo/Uncloud (or, reluctantly, K3s for learning) start earning their complexity.
+- If you find yourself **hand-scripting zero-downtime swaps repeatedly**, adopt Kamal or a PaaS.
+- If **update discipline is slipping**, move from manual pulls to Diun notifications (never blind auto-pull on databases).
+- If **secrets sprawl into `.env` files**, stand up OpenBao.
+- If the **reconcile script grows past ~150 lines** or you add a third node, move to `ansible-pull` (handlers, whole-host coverage) or Komodo rather than continuing to extend bash.
+- If you find yourself **holding a static SSH key in CI**, replace it with an ephemeral Tailscale runner, an OIDC-issued short-lived SSH cert, or a self-hosted runner on the node.
+
+## Caveats
+
+- **Fast-moving space; verify at install time.** GitHub star counts, version numbers (Coolify v4/v5, Komodo v2, Nomad 2.0, Podman releases), and licensing tiers change quickly. Confirm current status before committing.
+- **Several sources are vendor/advocacy blogs.** Much "moved off Kubernetes" writing and several comparison posts come from tools' own marketing sites (Haloy, Sliplane, deploy-tool vendors) or opinion pieces; directional sentiment is consistent with Hacker News/Lobsters, but treat specific claims as the authors' own rather than independent fact. The Coolify "seven CVEs" figure comes from a comparison blog citing an unnamed audit and is not independently confirmed here.
+- **Docker Swarm's status is genuinely contested.** Mirantis markets continued maintenance and some bloggers insist it "still works," but the weight of evidence (including Portainer's own writeup and the official Docker roadmap barely mentioning it) is that it is frozen with no active feature investment. Treat it as legacy for _new_ builds.
+- **Nomad licensing nuance:** BUSL source files auto-convert to an open license four years after publication, and internal single-host use is unaffected by BUSL's competitive-service restriction — so BUSL is more a governance/philosophy concern than a practical blocker for a homelab. The real reason to skip it here is fit, not license.
+- **"Not production-ready" labels are the authors' own** — Uncloud explicitly warns of breaking changes; heed those before relying on newer entrants.
+- **IBM/HashiCorp deal value figures differ by definition:** the ~$6.4B figure is the announced enterprise value; IBM's own 10-Q reports a total equity value of approximately $7.2 billion. Both refer to the same transaction, closed February 27, 2025.
+- **The reconcile script above is an illustrative skeleton, not tested production code.** Treat it as a starting point; in particular, deliberately exercise the rollback path (deploy a knowingly broken image) before you rely on it, because untested rollback paths tend not to work.
+- **`podman auto-update` and digest-pinning-in-git are mutually exclusive by design.** Auto-update requires a floating tag, so the registry becomes the source of truth. Pick one model per service and document which.
+- **Self-hosted CI runners are an arbitrary-code-execution surface.** GitHub explicitly recommends against them on public repositories because fork pull requests can run code on them. Unprivileged user, narrow sudo, private repos only.
+- **Migration reversibility is a discipline, not a feature.** Nothing in this document makes a schema change safe to roll back; expand/contract migrations are the actual mechanism, and pre-migration snapshots stop scaling in the tens of GB.
+- **Health-check quality bounds everything.** Auto-revert can only catch what the health check detects; a container that starts and serves errors will be treated as a successful deploy under every option here.
