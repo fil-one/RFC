@@ -17,7 +17,7 @@ customers.
 
 This document proposes how to deploy and operate the appliance.
 
-## Requirements
+## Requirements & Constraints
 
 1. Setting up a new region must not require any engineering or advanced system administration on the
    side of the region provider/operator.
@@ -26,29 +26,68 @@ This document proposes how to deploy and operate the appliance.
 4. Upgrades must cause as short downtime as possible. We should aim for zero-downtime upgrades.
 5. Upgrades must honours timing constraints, e.g. we cannot upgrade in the window where the Piri
    node is required to submit a PDP proof.
-6. The deployment must be realised as immutable infrastructure fully driven by code
+6. The deployment should be realised as immutable infrastructure fully driven by code
    (infrastructure-as-code).
 7. We must pin versions of all services and dependencies, so that we always deploy a combination of
    versions that was tested in staging and is known to work together correctly.
 
+The following services does not support more than one instance running concurrently, therefore upgrades must be implemented as in-place restarts:
+
+- Ingot
+- Piri
+- Postgres
+- Vault
+- Caddy
+
+Zero-downtime upgrades are not possible now, this remains an aspirational future goal.
+
 ## Components & Dependencies
 
-Operated by us:
+There are four layers in our stack:
+
+1. Hardware
+1. Operating System
+1. Infra Services
+1. Forge Services
+1. External Dependencies
+
+It is not yet clear who will operate which layer - FilOne or the region operator.
+
+### Hardware
+
+This is the bedrock on which we build the rest of the stack.
+
+1. The machine: virtual or bare-metal
+2. Network connectivity: a public IP under a stable domain name, and open port 443
+3. Storage - control plane: a persisted volume mounted as local FS in the machine
+4. Storage - data plane: an S3-compatible object storage, in the same datacenter, accessible via S3 (HTTPS)
+
+### Operating System
+
+A Linux-based OS with a container runtime (Docker or Podman).
+
+Updated infrequently, mostly to apply bugfixes and security patches.
+
+Easy to recreate, disposable.
+
+### Infra Services
+
+- A Postgres-compatible database, with point-in-time backup & recovery
+- A secure secret manager (Vault)
+- Caddy (TLS termination, cert management)
+
+Updated infrequently, mostly to apply bugfixes and security patches.
+
+Backed up to an external location (not the control-plane volume).
+
+### Forge Services
 
 - Piri
 - Ingot
-- Postgres-compatible database
-- Secure secret manager (Vault)
-- Caddy (TLS termination, cert management)
-- Grafana Alloy (ships logs & telemetry to our Grafana)
 
-Provided by operator:
+Updated frequently to ship new features.
 
-- A virtual machine we can run our stack on, with a public IP and open 443
-- A persisted volume mounted to the VM for storing control-plane data
-- An S3-compatible object storage for storing user data
-
-External dependencies:
+### External Dependencies
 
 - Filecoin JSON RPC API like chain.love
 
@@ -65,6 +104,21 @@ TBD
 TBD
 
 ## Open Questions
+
+### RPC API provider
+
+Do we want to run a Filecoin node ourselves (in every region? one central instance?) or rely on a 3rd-party RPC API provider like chain.love?
+
+On one hand, running a node is not trivial:
+
+- HW requirements: ChainSafe's baseline is "16 GiB, 4 cores" vs Lotus's 32 GiB / 8 cores. Forest requires ~250 GiB storage, Lotus 300-400 GiB.
+- We must deal with network upgrades
+- Provisioning wall-clock: Forest - well under an hour, Lotus - tens of minutes.
+- The recommended pattern is N+1 redundancy — two independent nodes behind a reverse proxy/load balancer.
+
+On the other hand, 3rd-party providers have occasional downtimes (Chain.love reports 99.95%+ uptime) and can be quite expensive.
+
+- Chain.love [pricing](https://chain-love.gitbook.io/chain-love-docs/blockchains/filecoin): 10M free CU per month, then $1/1M CU; dedicated mainnet node is $300/month.
 
 ### How much we can trust the region operator?
 
@@ -114,24 +168,78 @@ This has an additional benefit: the appliance does not need to operate a secure 
 The single VM is an unmitigated single point of failure. VM loss = regional outage. The fix would
 require us to drop the "just give us a VM" pitch.
 
-### Can we give up on zero-downtime service upgrades?
+## Prior art
 
-Podman auto-update restarts a unit in place — that is a stop-start, not a cutover. Getting true
-zero-downtime service upgrades under Quadlet needs a proxy unit plus a blue/green unit pair plus a flip
-script: modest custom work.
+### Impossible Cloud
 
-The real SLO is "outage shorter than client retry tolerance." S3 SDK clients retry with backoff,
-PUTs are idempotent, multipart uploads are resumable. A sub-minute reboot is largely invisible to
-well-behaved clients.
+Impossible Cloud's requirements for node operators ([link](https://docs.icn.global/network-architecture/scalernode-network#scalernode)):
 
-However, the above is not true for pre-signed URLs loaded by browsers, they don't implement any
-retry.
+1. Physical host maintenance
+2. Boot configuration
+3. Internal network configuration and management
+4. External network connectivity to the Internet
+
+They mention Daemon in the docs, but it's not clear whether that's a single binary or a set of services. And everything is closed-source :disappointed:
+
+### StorJ
+
+Storj Node is single Docker image
+([docs](https://storj.dev/node/get-started/install-node-software/cli/storage-node)), using
+watchtower for auto-updates. They also offer MSI installer for Windows and QNAP Storage Node App.
+
+Storj Commercial Node ([docs](https://storj.dev/node/commercial-node)) is for datacentre-based
+nodes; they recommend running one node per hard drive. It's the same Docker image, plus the
+documentation shows a sample Ansible script.
+
+## References
+
+- https://www.thelinuxvault.net/blog/how-to-run-podman-containers-under-systemd-with-quadlet/
 
 ---
 
+**THE TEXT BELOW CONTAINS RAW NOTES AND CLAUDE OUTPUT. PROBABLY NOT WORTH READING, BUT A USEFUL CONTEXT FOR CLAUDE.**
+
 ---
 
-# Claude Research Report
+# 2026-08-05 notes from chatting with Forrest
+
+Unresolved question: who operates the appliance? Us or the partner? Maybe we can support both.
+
+We can have three ways:
+
+1. Docker-based (raw docker compose, K8 cluster)
+2. Run a binary as a systems service file (or nohup in tmux?!)
+3. Golden Images (ISOs) - people must have hypervisors and know how to run an ISO image. People who
+   have the HW to run this typically have Intel Xeon chips from 2014 era, which don't have SHA256
+   extensions, and everything becomes super slow.
+
+We cannot have zero-downtime setup by end of September.
+
+- Piri does not support two instances at the same time reading from the same DB. This needs more testing.
+- Ingot - does not allow horizontal scaling either, we cannot have two Ingot instances running at the same time (behaviour is undefined).
+
+The RFC should outline how we go from what we have in Staging right now, to CI/CD, to the future described in this doc.
+How we meet the stability requirements (things don't break when we have two versions). How a commit landed on Piri's main ends up in the staging environment.
+
+If want Golden Images, we can produce them using Terraform, the purpose of TF is to deploy infra, not apps. Hashicorp produces some tool that's designed to produce Golden Images - "[packer](https://developer.hashicorp.com/packer)".
+
+Piri attempts a graceful shutdown, it will (by default, configurable) take up to 60 minutes to shut
+down. (Finish existing connections, wait until the task queue is drained & finished.) See
+https://github.com/filecoin-project/curio/pull/1302
+
+Ingot does not have graceful shutdown, but it is written in a way that it's expecting to be killed
+anytime and will restart gracefully. We need to implement graceful shutdown to wait until
+in-progress requests are handled. There is a go library for that -
+https://github.com/facebookarchive/grace but we need to support Fiber HTTP server used by VersityGW.
+
+We need to export Piri on a stable domain name, so that `~/.well_known/did.json` are public -> double check with Alan.
+
+No need to run Grafana Alloy on the Appliance to ship logs & telemetry to our Grafana. Piri is exporting OTEL logs to collector operated by
+Forge, the collector forwards them to our Grafana. Caddy supports OTEL out of the box too, see https://caddyserver.com/docs/metrics.
+
+---
+
+# 2026-08-05 Claude Research Report
 
 **FilOne Appliance: Deployment Platform Comparison and Recommendation**
 
@@ -675,3 +783,599 @@ Three throwaway VMs with **public IPs and inbound 443**, comparing **(A) Quadlet
 - **"Zero-downtime" applies only to application upgrades, and only if graceful shutdown and backward-compatible migrations hold.** OS reboots (30–90s), Postgres major upgrades, and VM failure are all unavoidable downtime on a single VM. The defensible claim is: zero-downtime app upgrades, sub-minute reboots absorbed by client retries, regional outage on VM loss.
 - **ACME rate limits and CA policy are moving targets.** The 50-per-registered-domain-per-7-days figure is current as of mid-2025 documentation; re-verify before a 300-region rollout and file the override early. Two dated changes affect the TLS design specifically: **MPIC quorum tightens through December 2026** (to 5 remote perspectives with ≥4 matching), progressively reducing tolerance for partner network misconfiguration under TLS-ALPN-01; and the **CA/B Forum is moving RFC 8657 processing from optional to mandatory** around September 2026. Also being discussed at the Forum is `http-validation-over-tls` — HTTP-01-style validation over port 443 with certificate verification — which if it lands would be a closer fit for this topology than either current option. Re-check before committing to a long-lived design.
 - FOC/PDP is fast-moving (PDP on mainnet since May 2025, FOC mainnet January 2026). Re-check protocol claims before long-lived commitments.
+
+---
+
+# 2026-08-06 Claude review: the Piri upgrade path
+
+Walking a Piri upgrade end to end through the Quadlet proposal turns up a set of concrete defects in
+the sample units above. Under the constraint now stated in Requirements & Constraints, a Piri upgrade
+is a stop-start of one container whose duration is set by Piri's own drain budget rather than by the
+deployment platform. The units in "Recommended architecture" will not perform that stop-start
+correctly as written.
+
+## Verified against the Piri source
+
+Checked at `storacha/piri@b94c811`:
+
+- **`piri status upgrade-check` exists** in `cmd/cli/status/upgrade.go` with the documented exit codes
+  0/1/2. It calls `client.GetNodeStatus(ctx)` against the running node and reads `UpgradeSafe`,
+  derived from `IsProving`, `InChallengeWindow`, and `HasProven`. It is a point-in-time question with
+  no duration argument. It is also smarter than epoch math would be: once the node has proven for the
+  current window it reports safe even inside that window, which widens the usable time.
+- **Piri does not implement sd_notify.** There is no `NOTIFY_SOCKET` handling and no systemd notify
+  library anywhere in the tree.
+- **Piri ships its own systemd installer** under `cmd/cli/setup/`. It writes units into a versioned
+  directory and symlinks `/etc/systemd/system` entries at a `current` symlink. `piri update` downloads
+  a new binary and explicitly does not restart the service. That answers the open question about
+  `piri update` semantics, and it means the binary-plus-systemd path is upstream's supported operator
+  path while the container path is ours to own and maintain.
+
+## What one upgrade does
+
+1. **Build and sign.** Piri main merges, CI builds `CGO_ENABLED=0`, pushes to the FilOne registry,
+   cosign-signs the digest. The box enforces the signature through `/etc/containers/policy.json`, so a
+   partner who swaps the image on disk gets a container that will not start.
+2. **Staging.** The staging channel moves to the new digest and the staging box runs the same
+   gate-and-restart path prod will run. This is the only place the upgrade mechanism itself gets
+   exercised before it touches a partner.
+3. **Promotion.** After soak, the pipeline moves the prod channel and publishes the signed release
+   manifest. The soak duration and who may shorten it for a security fix are undefined; requirement 2's
+   "hours" is soak plus gate wait, and soak is the part we control.
+4. **The box learns.** See change 2 below. As written, it never will.
+5. **The gate.** `pdp-gate` blocks until `upgrade-check` returns 0. At a 2880-epoch period with a
+   60-epoch window the unsafe duty cycle is around 2%, so the gate usually returns immediately.
+6. **The swap.** systemd stops the unit, podman sends SIGTERM, Piri drains, the new image starts,
+   migrations run, the healthcheck goes green.
+7. **Acceptance.** The unit being active is not acceptance. The region is upgraded when it has
+   submitted one proof on the new version.
+
+Downtime is drain plus start plus migrations plus health. With a bounded drain that is one to five
+minutes. With Piri's default drain it can approach an hour. Both are longer than the 30–90s OS reboot
+the research report treats as the unavoidable downtime, so for Piri the framing is inverted: the
+application upgrade is the expensive event and the host reboot is the cheap one.
+
+## Changes to make
+
+1. **Move the gate off `piri.container`.** `ExecStartPre` runs in the start phase, which is after the
+   stop. Under `podman auto-update` Piri is already stopped when the gate begins to block, so a
+   two-hour wait becomes two hours of downtime inside the window the gate exists to protect. It also
+   exceeds the default `TimeoutStartSec=90s`, so systemd kills the gate before it can ever return 0.
+   The Requirement 5 section already says the right thing ("on the upgrade unit, driven by a
+   `.timer`"); the code sample contradicts it. Mask `podman-auto-update.timer` so nothing runs ungated.
+
+2. **`AutoUpdate=registry` and a digest-pinned `Image=` cancel each other out.** Auto-update resolves a
+   tag against the registry; a digest reference has nothing to resolve. Pick one:
+   - _Channel tag_ (`registry.filone.io/piri:prod`) moved deliberately by the promotion pipeline.
+     Auto-update then works off the shelf. Requirement 7 still holds because the tag resolves to a
+     digest at pull time and cosign binds it, but the unit file stops recording the running version, so
+     report it from `podman inspect` through Piri's OTEL export.
+   - _Digest in the unit_, no auto-update, plus an agent that fetches the release manifest, writes a
+     Quadlet drop-in, reloads, and restarts. Purer IaC, more code we own.
+
+   Channel tag for the first regions.
+
+3. **Replace `Notify=true` with `Notify=healthy`.** Piri never sends `READY=1`, so the unit hangs until
+   start timeout and then fails. `Notify=healthy` (podman 5.0+) ties systemd readiness to the container
+   healthcheck, which is also what makes `podman auto-update --rollback` fire on a bad image. With
+   `Notify=true` and a broken binary that nevertheless starts, rollback never triggers.
+
+4. **Set both stop timeouts explicitly.** Podman defaults to 10s and systemd to 90s. Against the drain
+   described in the Forrest notes, the default configuration SIGKILLs Piri mid-drain on every single
+   upgrade.
+
+5. **Bound the drain below the gap between challenge windows.** `upgrade-check` answers "safe now". A
+   long drain begun shortly before the next window opens passes the gate and leaves Piri mid-shutdown
+   when it should be proving. Cap the drain on our side, and ask Storacha for
+   `piri status upgrade-check --duration 15m` so the gate can ask the question it actually needs
+   answered.
+
+6. **Define break-glass for exit code 2.** Exit 2 is what a wedged Piri returns, because the check
+   queries the node itself. Fail-closed therefore means a broken node can never be upgraded to the
+   version that fixes it. Give the override a named holder, most likely the same person as the
+   slashing-policy owner in Open Questions.
+
+7. **Do not label the proxy for auto-update.** `podman auto-update` has no per-container selector, so
+   one run restarts everything labelled, Caddy included, which closes :443 and undoes the separate-proxy
+   design. Upgrade the proxy as a rarer, separately gated event.
+
+8. **Test rollback compatibility.** With in-place restarts two versions never run at
+   once, so expand/contract is no longer the binding constraint. What binds is `--rollback`: it restores
+   the previous image and starts the old binary against a database the new binary already migrated.
+   Bake-off item 6 should test N-1 tolerance of version N's schema. Snapshot SQLite in the upgrade unit
+   before the swap.
+
+9. **Alert on the failed upgrade unit.** The `pdp-gate` sketch escalates by writing to the journal,
+   which pages nobody. Add `OnFailure=` and an alert on the unit's failed state.
+
+10. **Restate the sections that assume cutover.** Recommended architecture
+    item 5 still reads "start new version alongside old → health-check → proxy cutover → drain old →
+    stop", and the R4 column of the comparison matrix scores options on cutover. Both now conflict with
+    Requirements & Constraints.
+
+## Corrected units
+
+```ini
+# /etc/containers/systemd/piri.container
+[Unit]
+Description=Piri storage node
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+Image=registry.filone.io/piri:prod
+ContainerName=piri
+AutoUpdate=registry
+PublishPort=127.0.0.1:3000:3000
+Volume=/data/piri:/data/piri:Z
+# Piri does not implement sd_notify. Tie readiness to the healthcheck.
+Notify=healthy
+HealthCmd=/usr/local/bin/piri status
+HealthInterval=30s
+HealthStartPeriod=60s
+# Bound the graceful drain so it cannot run into the next challenge window.
+StopTimeout=300
+
+[Service]
+Restart=always
+RestartSec=5
+TimeoutStopSec=330
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```ini
+# /etc/systemd/system/filone-upgrade.service
+[Unit]
+Description=PDP-gated container upgrade
+OnFailure=filone-upgrade-alert.service
+
+[Service]
+Type=oneshot
+TimeoutStartSec=8000
+ExecStartPre=/usr/local/bin/pdp-gate
+ExecStartPre=/usr/local/bin/snapshot-piri-db
+ExecStart=/usr/bin/podman auto-update --rollback
+```
+
+```ini
+# /etc/systemd/system/filone-upgrade.timer
+[Timer]
+OnBootSec=10min
+OnUnitInactiveSec=15min
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target
+```
+
+Requires `systemctl mask podman-auto-update.timer`, otherwise the stock daily timer runs the same
+upgrade without the gate.
+
+## Still open
+
+- What is Piri's configuration key for the shutdown drain timeout, and what value fits inside the gap
+  between challenge windows?
+- What is the soak duration between staging and prod, and who may shorten it for a security fix?
+- Does Piri run SQLite migrations at startup, and does version N-1 tolerate version N's schema?
+- Do we publish our own Piri image, or does Storacha publish one we can consume? The upstream operator
+  path is binary plus systemd, so this is a maintenance commitment either way.
+
+---
+
+# 2026-08-06 Running a Non-Archival, Live-Tip Filecoin RPC Node: Lotus vs Forest
+
+## TL;DR
+
+- **Both Lotus and Forest can do exactly what you want** — bootstrap from a snapshot, then follow the live tip and serve a Lotus-compatible JSON-RPC + Eth JSON-RPC API with only 1–2 days of chain retention — and for a _read-only, chain-following RPC node_, **Forest is the better default**: it needs far less RAM/CPU (ChainSafe's baseline is "16 GiB, 4 cores" vs Lotus's 32 GiB / 8 cores), imports/starts faster, auto-downloads snapshots, and per the 2026 conformance reports it passes Lotus-parity tests on essentially all read and `eth_*` methods you'd use.
+- **Snapshot syncing does NOT leave you behind the tip.** A snapshot is only the _initial bootstrap_; snapshots are regenerated hourly and store the last 2000 tipsets, so a freshly loaded one is only ~1–2 hours old. After loading, the node validates forward and then tracks head, sitting effectively 0–1 tipsets behind in steady state. Your "must be within 1 epoch of the tipset" requirement is met in normal operation by both nodes.
+- **Recommended build:** an 8-core modern x86-64 box, 32 GiB RAM, and a 512 GiB–1 TB NVMe SSD, running **Forest** as the primary node with **Lotus (or a hosted Glif endpoint) as fallback**, behind a health-checking reverse proxy that compares `ChainHead` height to wall-clock-expected height. Read the F3-finalized tipset (or 1–5 epochs back from head) for anything reorg-sensitive.
+
+## Key Findings
+
+- **Retention/pruning is a first-class feature in both.** Lotus uses SplitStore (default since v1.21.0) with a `discard` cold-store mode explicitly recommended for "small nodes that are simply watching the chain." Forest runs an automatic garbage collector and sizes disk as **"200 GiB + 5 GiB per day of retention"** (per ChainSafe's hardware docs; ~2 GiB/day and half the disk if GC is disabled). Its minimal-retention RPC profile fits in 256 GiB.
+- **Forest is dramatically lighter.** ChainSafe's July 17 2026 head-to-head (same live RPC traffic, ~45 req/s) shows Forest at ~10–15% CPU and ~8–10% memory vs Lotus ~45–55% CPU and ~25–30% memory, with lower tail latency (P99 ~200–350 ms for Forest vs ~240–600 ms for Lotus). Forest's snapshot _generation_ benchmark ran ~28 min at ~11 GiB RAM.
+- **No GPU is needed** for a chain-following/RPC node in either implementation. GPUs and Intel SHA extensions matter only for storage-provider sealing/proving (PreCommit2/Commit2/WindowPoSt), which neither your use case nor Forest does at all — Forest has no SP/sealing functionality.
+- **RPC coverage is high but not 100% identical.** Forest supports `/rpc/v0` (legacy), `/rpc/v1` (production), and an experimental `/rpc/v2`; its Eth (`eth_*`) surface is essentially fully conformance-tested against Lotus. Some `Wallet*`, `Mpool*Push`, and `Net*` methods are functional but "not conformance-tested," and a handful are Forest-specific (`Forest.*`). The interoperability standard is **FRC-0104 (OpenRPC "Common Node API")**, co-driven by ChainSafe with a public conformance test suite.
+- **Network-upgrade readiness is the real recurring operational risk, and both handle it well.** The current network is **nv28 "Fire Horse" (丙午)**, which went live on mainnet at **Epoch 6052800 on 2026-05-27T14:00:00Z** (Lotus v1.36.0). All implementations, including Forest, shipped nv28 releases for Calibration ahead of the upgrade, and Forest has shipped mandatory releases for each recent nv (nv24 Tuk Tuk, nv25 Teep, …). A node not upgraded before the upgrade epoch forks off the network — this is your #1 maintenance duty regardless of implementation.
+
+## Details
+
+### A. Hardware / system requirements
+
+**Forest (recommended for this use case)** — from ChainSafe's official hardware page:
+
+- **RPC node, low-traffic minimal retention:** 4-core (min) / 6-core (rec) CPU; **8 GiB (min) / 16 GiB (rec) RAM**; **256 GiB SSD, high-IOPS/NVMe recommended.** (Filecoin Docs summarize Forest's baseline as "low hardware requirements (16 GiB, 4 cores)… does not support storage, retrieval or mining.")
+- **RPC node, 2 months retention, up to high traffic:** 6–8 core CPU; 16–32 GiB RAM; 500 GiB SSD.
+- Disk-sizing rule (verbatim): **"an RPC node would require 200 GiB + 5 GiB per day of retention of disk space… if you disable GC, you can cut the disk space requirements in half… (it's growing by ~2 GiB per day)."** For your 12–36h retention target, the 256 GiB "minimal retention" profile is ample.
+- "Network upgrades can require more memory" — migration spikes are the RAM high-water mark, so size RAM for the migration, not the steady state.
+
+**Lotus** — from Lotus docs and operator reports:
+
+- **Minimum:** 8-core CPU, **32 GiB RAM**, SSD. Models with Intel SHA extensions (AMD Zen+, Intel Ice Lake+) "significantly speed things up" but are not mandatory for a non-SP node.
+- Historically RAM-hungry; operators commonly provision 32+ GiB and add swap. Per the Lotus v1.36.0 (NV28) release notes, the network-upgrade migration is light: **"The migration on the upgrade epoch is expected to take approximately 1 minute on a node with a NVMe drive and a newer CPU… RAM usage is expected to be under 20GiB RAM for both the pre-migration and migration."**
+- **Disk:** raw chain grows ~38 GiB/day per Lotus docs (higher than Forest's ~2–5 GiB/day figure because of datastore amplification), so pruning/SplitStore is essential. A fully GC'd SplitStore hotstore is ~295 GiB; the working set is documented as 60–275 GiB. A `discard` cold store avoids a large cold store entirely — the appropriate choice for you.
+
+**Both:** CPU is 64-bit x86-64 (or ARM64); **no GPU**; a public IP with the libp2p port open (default TCP 1347 Lotus / configurable Forest) improves peering but is not strictly required with good outbound connectivity. Bind the RPC/API port (Lotus 1234) to localhost or behind a protected proxy.
+
+**OS / Docker:** Both are Linux-first (Ubuntu/Debian widely used) and build on macOS. Forest ships official multi-arch Docker images at `ghcr.io/chainsafe/forest:latest` and treats Docker as the primary path (Linux/macOS/Windows). Lotus provides Docker images but emphasizes released binaries / build-from-source.
+
+### B. Provisioning and sync time
+
+**Snapshot sizes (live figures from ChainSafe's Forest Archive, Aug 6 2026):**
+
+- Lightweight/bootstrap snapshot (v2, per FRC-0108, ~last 2000 tipsets): **~79–80 GB compressed** `.forest.car.zst` (e.g. height 6,256,320 = 79.42 GB). The old "~100 GB lightweight / ~600 GB full" numbers are now stale — the compressed lightweight snapshot is ~80 GB even though the chain is now ~6.25M epochs.
+- Uncompressed is roughly ~150–160 GB (inferred at ~2× zstd ratio; not an official 2026 figure).
+- Hosted on **ChainSafe Forest Archive (`forest-archive.chainsafe.dev`), backed by Cloudflare R2 with no egress fees**, regenerated ~hourly; a legacy filops S3 endpoint (`snapshots.mainnet.filops.net`) also exists. Both Lotus and Forest can read `.zst`/`.forest.car.zst`.
+
+**Provisioning wall-clock (modern 8-core NVMe box):**
+
+- **Forest:** `forest` with default/`--auto-download-snapshot` downloads the snapshot automatically and can even serve blocks in-place from the indexed CAR without a separate DB import. End-to-end from `docker run` to serving RPC at head is typically well under an hour, dominated by the ~80 GB download. Import itself is "a few minutes."
+- **Lotus:** you manually `aria2c -x5` the snapshot, then `lotus daemon --import-snapshot`. Import historically ran ~4 min at ~200 MiB/s when snapshots were far smaller; at ~80 GB expect tens of minutes, plus a one-time proof-parameters download (a few GB) and datastore expansion (the CAR data is duplicated into the DB).
+- **Catch-up after import:** the snapshot is only ~1–2 hours behind head (hourly regeneration; stores the last 2000 tipsets ≈ up to ~16h). The node fetches headers to head, then validates forward. Lotus docs state ~4 seconds/tipset; catching up a few hundred-to-few-thousand tipsets is minutes on NVMe. Steady-state lag afterward is 0–1 tipsets.
+- **Full sync from genesis** is "generally infeasible" — Lotus docs note it takes ~4s/tipset (≈1 month for 700k tipsets), and the chain is now ~6.25M epochs. Nobody does this for a non-archival node; snapshot bootstrap is the only practical path.
+
+### C. Restart time and crash recovery
+
+- **Clean process restart:** Both reopen their embedded DB (Lotus = Badger; Forest = ParityDB) and resume from the persisted head. Catch-up is roughly one tipset (~30s of chain) per 30s of downtime — a 1-minute restart is back at head in seconds; a 1-hour outage means ~120 tipsets (a few minutes at 4s/tipset, faster on NVMe).
+- **DB open time:** ParityDB and Badger both open in seconds-to-tens-of-seconds. Lotus additionally "warms up" the SplitStore hotstore on first start after enabling it (loading current-head headers and state roots).
+- **Unclean shutdown / corruption:** Lotus's Badger has a documented history of pain — snapshot-import crashes, "another process is using this Badger database," and content-integrity mismatches appear in Lotus GitHub issues (mostly 2020–2021 vintage; Lotus has hardened since). ParityDB is purpose-built for blockchain workloads and is generally robust. The universal remedy for either node when the store is corrupt or suspect: clear the datastore and re-import a fresh snapshot.
+- **Re-import vs catch-up threshold:** because a fresh snapshot only covers ~2000 tipsets (~16h) and regenerates hourly, treat **> ~12–24h of downtime** (or any DB corruption) as "re-bootstrap from snapshot" — it's faster and safer than syncing a large gap.
+- **HA / zero-downtime:** the recommended pattern is **N+1 redundancy** — two independent nodes behind a reverse proxy/load balancer that health-checks each backend by polling `Filecoin.ChainHead` and comparing tipset height to wall-clock-expected height, evicting any stale backend. Lotus additionally offers `lotus-gateway`, a hardened, rate-limited read/`MpoolPush` fronting layer (this is what Glif runs). There is no in-process hot-restart; achieve zero downtime via rolling restarts across the pool.
+
+### D. Operational pros and cons for this use case
+
+**Maturity / track record:** Lotus is the Go reference implementation by the Filecoin Core Devs (originally Protocol Labs); protocol features land there first, and it's run by most SPs and infra providers (Glif/Protofire's public RPC runs Lotus + lotus-gateway). Forest (ChainSafe, Rust) is production-grade for chain-following and RPC, hosts the network's canonical snapshot service, and is used as a lighter alternative — but it deliberately has **no storage-provider/sealing stack**, and its block-production path is untested.
+
+**Resource efficiency:** Forest wins clearly (see Key Findings — ~3–5× less CPU/RAM, faster snapshot ops, lower tail latency in ChainSafe's July 2026 benchmark). These exact multipliers are ChainSafe-reported, but they align with the published hardware minimums (Forest 8–16 GiB vs Lotus 32 GiB RAM) and Forest's Rust/ParityDB design.
+
+**RPC completeness / stability:** Both expose Lotus-compatible JSON-RPC v0/v1 and the `eth_*` FEVM API (Lotus needs `LOTUS_FEVM_ENABLEETHRPC=1`). Forest's Jan–Aug 2026 API parity reports show the full `Filecoin.Eth*` set and the vast majority of `Filecoin.State*`/`Chain*` methods as conformance-tested-and-passing; some `Wallet*`, `Mpool*Push`, and `Net*` methods are functional but untested, plus Forest-specific `Forest.*` methods. Risk: subtle behavioral differences on less-common methods — mitigate by testing your client's exact method set against Forest before cutover.
+
+**Network-upgrade readiness:** critical. Both ship mandatory releases ahead of each nv upgrade epoch; missing it forks your node off. Historically both have been timely (Forest shipped nv24/nv25/…/nv28; Lotus is the reference and sets the epochs). Subscribe to `#fil-forest-announcements` / Lotus release notifications and the `filecoin-project/community` "Network Updates" discussion.
+
+**Observability:** Lotus exposes Prometheus metrics at `/debug/metrics`, commonly paired with Grafana. Forest supports Prometheus metrics, structured logging, optional Grafana Loki telemetry (`--loki`), and built-in health-check endpoints; ChainSafe publishes a public RPC-performance Grafana dashboard. Both provide sync CLIs (`lotus sync wait`, `forest-cli sync status`).
+
+**Licensing:** Both are permissively dual-licensed **Apache-2.0 / MIT**.
+
+**Does Forest still need Lotus?** No — for chain sync, validation, snapshot generation, and RPC serving, Forest is standalone and does not depend on a Lotus node; it hosts its own snapshots and is "an operational consensus node." You only need Lotus for SP/sealing features.
+
+### E. Alternatives to self-hosting
+
+- **Glif public RPC** (`api.node.glif.io` with `/rpc/v0` and `/rpc/v1`, plus `wss://wss.node.glif.io`): load-balanced hosted Lotus behind lotus-gateway; read-only + `MpoolPush`/`EthSendRawTransaction`; all Filecoin + Eth methods. Operated by Protofire/Infinite Scroll — Filecoin is "a network now handling 4+ billion node requests a month," and Protofire reports "99.95%+ RPC uptime," with the public endpoint serving "10M+ requests a day." **The public endpoint "guarantees only 2000 of the latest blocks"** — the same lightweight-snapshot limitation you have, so it _does_ expose live-tip data. Dedicated (archival) nodes are available via request form.
+- Other providers exist (Ankr, Chainstack, Tatum, etc.) with their own rate limits/tiers.
+- **When to self-host:** guaranteed rate limits/latency, private methods, custom retention, or control over which epoch you read. **Best-practice hybrid:** run your own Forest/Lotus node AND wire a hosted endpoint (e.g., Glif) as automatic fallback in the client, so a restart/resync doesn't take your app down. Both serve live-tip data, so read failover is seamless.
+
+### F. Gotchas for "closely following the tip"
+
+- **Monitoring staleness:** poll `Filecoin.ChainHead`, take the tipset `Height`, and compare to expected epoch = `(now − genesis_timestamp) / 30`. Filecoin genesis is 2020-08-24 22:00 UTC; epoch duration is 30s. If head is more than a few epochs below expected, you're lagging. Forest exposes `Forest.SyncStatus`; Lotus has `lotus sync wait`.
+- **Null tipsets / null rounds:** some epochs legitimately produce no block. Your node can look "1 behind" when it's at the true head, because the expected-height formula assumes a block every epoch. Don't alarm on a 1–2 epoch gap; alarm on a sustained/growing gap.
+- **`ChainNotify` vs polling:** `ChainNotify` returns a subscription channel of head changes (first message is the current head, then apply/revert events) — the correct way for a client to _follow_ the tip and _see reorgs_ (revert then apply). Use `ChainNotify` for live following; use `ChainHead` for health checks.
+- **Reorgs and finality:** Filecoin's classic Expected Consensus fork-choice tolerates reorgs up to the finality threshold (900 epochs). In practice tip reorgs are shallow (a few epochs), but **the immediate head is not final**. **F3 (Fast Finality, FIP-0086)** is now live on mainnet: per FIP-0086, "F3 is expected to finalize tipsets within tens of seconds during regular network operation, compared to the current 900-epoch finalization delay," and per FilOz "in the vast majority of cases, it finalises tipsets within 2 epochs" — a 450× speedup from the old ~7.5-hour (900-epoch) EC finality. For a client reading live data: reading the exact head is fine for "latest-ish" views but is reorg-exposed; for correctness read the **F3-finalized tipset** (`Filecoin.ChainGetFinalizedTipSet` / F3 certificate methods) or stay a few epochs back. A common safe compromise is 1–5 epochs behind head, or the finalized tipset for anything money-related.
+- **Peering:** both auto-connect to bootstrap peers (ChainSafe publishes Forest mainnet bootstrap nodes; status at probelab.io). Insufficient peering is the most common cause of a node silently falling behind — target a healthy peer count (Forest's default target is 75 peers) and prefer a public IP / open libp2p port for inbound peering.
+
+## Recommendations
+
+**Primary recommendation: run Forest as the chain-following RPC node, with a fallback.** For a non-archival, live-tip, read-only RPC server it is the more resource-efficient and operationally simpler choice (auto-snapshot download, single binary + Docker, low RAM/CPU, GC on by default, passes Lotus Eth/read conformance). Keep a Lotus node OR a Glif endpoint as fallback, because Lotus is the reference and a few uncommon methods are only conformance-hardened there.
+
+**Staged plan:**
+
+1. **Validate method coverage first.** Enumerate the exact RPC methods your clients call and cross-check them against the current Forest API parity report. If every method is "✅ tested" (or you verify the "➖ untested-but-functional" ones behave correctly for you), proceed with Forest. If you depend on a method Forest lacks or that differs, make Lotus the primary.
+2. **Provision one node.** 8-core x86-64, 32 GiB RAM, 512 GiB–1 TB NVMe, Ubuntu LTS. For Forest: `docker run ghcr.io/chainsafe/forest:latest --auto-download-snapshot`; enable Prometheus/Loki/health endpoints. For Lotus: enable SplitStore with `ColdStoreType="discard"`, set `LOTUS_FEVM_ENABLEETHRPC=1` for `eth_*`, `aria2c -x5` the snapshot, then `--import-snapshot`.
+3. **Configure retention to your 12–36h target.** Forest: rely on default GC (256 GiB is plenty). Lotus: `discard` SplitStore + periodic `lotus chain prune hot` keeps the footprint minimal.
+4. **Add HA before production.** Two nodes behind a reverse proxy that health-checks on `ChainHead` height vs wall-clock-expected height (allow a 1–2 epoch null-round tolerance); optionally front with `lotus-gateway`. Wire a hosted endpoint (Glif) as last-resort fallback in the client.
+5. **Set client read semantics.** Use `ChainNotify` to follow the tip; read the F3-finalized tipset (or 1–5 epochs back) for anything that must not be reverted.
+6. **Operate the upgrade calendar.** Track the `filecoin-project/community` network-update discussion and the implementation announcement channels; upgrade both nodes before each nv upgrade epoch. This is the single most important recurring task.
+
+**Thresholds that change the recommendation:**
+
+- Need any storage-provider / sealing / block-production feature → **Lotus** (Forest doesn't do these).
+- Need deep historical state (archival) later → different sizing entirely (multi-TB, SplitStore `universal` or a dedicated archival node); not this build.
+- Clients need a method Forest doesn't conformance-test and you can't verify it → **Lotus primary**.
+- Ops burden not justified by your traffic/latency/privacy needs → use **Glif/hosted** and skip self-hosting (both expose live-tip data, limited to ~2000 recent blocks, which matches your retention need anyway).
+
+## Caveats
+
+- The headline efficiency figures (Forest ~3–5× lighter; the P50/P95/P99 latencies; ~28 min Forest vs longer Lotus snapshot generation) come from **ChainSafe's own benchmarks** (July 17 2026 RPC comparison; snapshot comparison). They are internally consistent and align with published hardware minimums, but they are vendor-reported; independent third-party benchmarks are scarce. Validate on your own hardware and traffic.
+- Sources conflict on Lotus's peak RAM during snapshot _generation_: ChainSafe's snapshot-comparison page implies a very high peak, while **official Lotus docs state creating a CAR snapshot "will take over an hour… and use around 100GB of RAM."** Either way it is far heavier than Forest's ~11 GiB — but treat the exact Lotus peak as uncertain.
+- Several Lotus numbers are **long-standing doc figures that may be stale**: "~4 s/tipset," "~38 GiB/day chain growth," "~295 GiB GC'd hotstore," and the "~4 min snapshot import" (from a 2022–23 PR, before snapshots reached ~80 GB). Treat them as order-of-magnitude, not freshly benchmarked.
+- Uncompressed snapshot size (~150–160 GB) is **inferred** from the ~2× zstd ratio, not an official 2026 figure.
+- The current network version is **nv28 "Fire Horse"** (mainnet Epoch 6052800, 2026-05-27); upgrades happen periodically and can shift memory requirements and add methods. Re-check hardware and RPC parity at each upgrade.
+- Forest's `/rpc/v2` is explicitly **experimental**; use `/rpc/v1` in production.
+- Badger-corruption anecdotes cited are from older Lotus versions (2020–2021); Lotus has hardened since, but the re-import-from-snapshot recovery playbook remains the reliable mitigation for both nodes.
+
+---
+
+# 2026-08-06 Claude review: provisioning and persistent storage
+
+The persisted volume listed under Components & Dependencies interacts with the immutable-OS choice in
+exactly one place, and the sample units above get that place wrong. This section covers where
+operator-supplied storage mounts on an image-based OS, and how a fresh VM gets from "here is an image"
+to a running appliance.
+
+## What immutability covers
+
+On Fedora CoreOS and bootc, only `/usr` is read-only, and it is a per-deployment ostree bind mount.
+Two directories are writable and shared across every deployment, so they survive both an A/B update
+and a rollback:
+
+- `/etc` — writable, three-way merged on update
+- `/var` — writable, persistent, not part of the OS image at all
+
+Block-device mounts sit outside the image model. The OS image is a filesystem tree; a mount is a
+kernel operation on a directory. Nothing about atomic updates constrains it, so the persisted volume
+requirement costs nothing in immutability.
+
+**`Volume=/data/piri:/data/piri:Z` will not survive an OS update.** It appears in both the original and
+the corrected `piri.container` above. `/data` is a new top-level directory in the deployment root, so
+ostree does not carry it into the next deployment, and on images with composefs the root is read-only
+and creating it fails outright. Every persistent path must be under `/var`. FCOS documents `/var/mnt/`
+as the location for additional filesystems. The Caddy unit is already correct at
+`/var/lib/filone/caddy`.
+
+## Where state lives
+
+Mount the operator volume at `/var/mnt/filone` and point every stateful container at a subdirectory:
+
+| Path                       | Contents                                              |
+| -------------------------- | ----------------------------------------------------- |
+| `/var/mnt/filone/piri`     | SQLite databases, `service.pem`                       |
+| `/var/mnt/filone/postgres` | Ingot's data directory, if forge mode forces Postgres |
+| `/var/mnt/filone/caddy`    | Certificates, ACME account key, ARI state             |
+| `/var/mnt/filone/alloy`    | Telemetry WAL                                         |
+
+The certificate-persistence control in Required controls ("persist certificates across rebuilds on a
+data volume") and the operator volume requirement are the same requirement, stated in two places.
+
+## First-boot disk setup
+
+Ignition runs in the initramfs on first boot, before the real root is mounted, and handles
+partitioning, filesystem creation, LUKS, and mount units. Butane source:
+
+```yaml
+variant: fcos
+version: 1.5.0
+storage:
+  filesystems:
+    - device: /dev/disk/by-id/virtio-filone-data
+      format: xfs
+      label: FILONE-DATA
+      # Never reformat. A rebuilt VM must adopt the existing volume.
+      wipe_filesystem: false
+systemd:
+  units:
+    - name: var-mnt-filone.mount
+      enabled: true
+      contents: |
+        [Unit]
+        Description=FilOne control-plane data volume
+        [Mount]
+        # Format by device path once; mount by label forever.
+        What=/dev/disk/by-label/FILONE-DATA
+        Where=/var/mnt/filone
+        Type=xfs
+        Options=x-systemd.growfs,x-systemd.device-timeout=30s
+```
+
+Three details carry weight:
+
+**`wipe_filesystem: false` is load-bearing.** A VM rebuilt from a fresh image re-runs Ignition against
+a volume that already holds Postgres, the Caddy ACME account key, and Piri's SQLite. With this set,
+Ignition adopts a matching existing filesystem and refuses to boot if it finds one it does not
+recognise. The operator hardware spec therefore has to say **raw, unformatted volume**, because an
+operator-preformatted ext4 volume fails provisioning rather than being silently adopted.
+
+**Format by device, mount by label.** Operator volumes surface under names nobody can predict
+(`/dev/vdb` on one hypervisor, `/dev/sdb` on another, and ordering shifts when a disk is added). The
+label removes the problem after the volume is first prepared; see Disk identity below for how the
+first preparation finds the device.
+
+**The mount is deliberately not wanted by `local-fs.target`.** Each stateful unit's
+`RequiresMountsFor=` creates Requires plus After on the mount unit and pulls it in on demand, which
+keeps the whole thing out of early boot and avoids ordering cycles with the preparation step.
+
+## The failure mode to guard against
+
+If the mount is missing or late, Podman creates the host directory itself, Postgres runs `initdb` onto
+the boot disk, and the next successful boot mounts the volume over the top. Two half-populated data
+directories, no error anywhere. Guard it in every stateful unit; Quadlet passes `[Unit]` through
+unchanged, so this goes directly into `piri.container`:
+
+```ini
+[Unit]
+RequiresMountsFor=/var/mnt/filone
+# RequiresMountsFor falls back to the nearest parent mount, so assert the real
+# thing. Assert rather than Condition: a missing volume must fail loudly, not
+# silently skip the unit.
+AssertPathIsMountPoint=/var/mnt/filone
+```
+
+Mounting by a label we assigned ourselves is what makes the assert sufficient. No sentinel file is
+needed, because nothing but our own volume can satisfy `What=/dev/disk/by-label/FILONE-DATA`.
+
+## Layout: the volume carries only unrecoverable state
+
+FCOS supports putting all of `/var` on a separate device, which would give persistence to everything
+stateful for free, container image store included.
+
+Mount only `/var/mnt/filone` instead. The reason is the recovery story: a box with `/var` on the
+operator volume does not boot when that volume fails to attach, on hardware FilOne cannot touch. A box
+missing only the data volume boots, fails its asserts, and pages with a diagnosable host. Container
+images are re-pullable and belong on the boot disk; the volume carries the state that cannot be
+regenerated.
+
+## SELinux, growth, encryption at rest
+
+**SELinux.** `:Z` relabels the bind-mounted host directory to a private container label, and labels
+persist in xattrs on xfs and ext4. Use `:Z` only for single-consumer directories. Two containers
+sharing one directory need `:z`, because `:Z` will relabel it out from under the other.
+
+**Growth.** `x-systemd.growfs` in the mount options covers the operator enlarging the volume later.
+
+**Encryption.** The volume sits on partner-controlled storage, and Ignition supports LUKS with Clevis
+network binding. Binding to a FilOne-operated Tang server means the volume unlocks only when the box
+can reach FilOne, so a disk pulled from the rack is inert. The limit is worth stating: it does nothing
+against a hypervisor reading the unlocked volume or process memory, which is the threat Trust boundary
+and secrets already names. It closes disk theft and decommissioning hygiene.
+
+**Other image-based OSes.** bootc has no Ignition, so the mount unit ships inside the image and the
+one-time preparation needs its own first-boot oneshot. Flatcar uses Ignition but its writable-path set
+differs, so the mountpoint needs re-checking if it stays in the bake-off.
+
+## Provisioning a fresh VM
+
+### The operator never authors an Ignition config
+
+Ignition is a build artifact produced by FilOne CI and opaque to the operator. One enrollment token
+varies between regions. Disk identity is resolved on the box, so it never appears in the config.
+
+| Artifact        | Platforms                         | How Ignition arrives                                             | Operator action                          |
+| --------------- | --------------------------------- | ---------------------------------------------------------------- | ---------------------------------------- |
+| **qcow2 / raw** | Proxmox, libvirt/KVM, OpenStack   | QEMU `fw_cfg` (`opt/com.coreos/config`), config drive, user data | Upload our disk image, attach our `.ign` |
+| **OVA**         | VMware                            | `guestinfo.ignition.config.data` (base64)                        | Import the OVA, paste one property       |
+| **Live ISO**    | Anything that can only boot media | Embedded in the ISO by us                                        | Boot it, paste nothing                   |
+
+The disk-image artifacts are the better default. They have no install step, so the boot disk is the
+image itself and the destructive "which device do we install to" question disappears. The ISO is for
+operators who can only hand a VM a boot medium.
+
+### What FilOne publishes
+
+Per release, not per region:
+
+```bash
+butane --pretty --strict appliance.bu > appliance.ign
+
+# ISO variant, for operators who can only boot media.
+coreos-installer iso customize \
+  --dest-device /dev/vda \
+  --dest-ignition appliance.ign \
+  --pre-install  ./guard-install-target.sh \
+  --post-install ./prepare-data-volume.sh \
+  -o filone-appliance-1.4.0-virtio.iso \
+  fedora-coreos-live.x86_64.iso
+```
+
+`--dest-device` has to be a name we can predict, and `coreos-installer install` has no auto-detect. Cut
+two ISOs: `virtio` for KVM, Proxmox, OpenStack and libvirt, and `sd` for VMware, Hyper-V and bare
+metal. Both stay generic across regions.
+
+### The per-region stub
+
+Keep the embedded config a stub that fetches the substantive one. The stub carries the only per-region
+byte:
+
+```yaml
+variant: fcos
+version: 1.5.0
+ignition:
+  config:
+    replace:
+      source: https://provision.fil.one/v1/appliance.ign
+      httpHeaders:
+        - name: Authorization
+          value: Bearer ONE_TIME_ENROLLMENT_TOKEN
+```
+
+Producing a per-region artifact is then a second of CI work (`coreos-installer iso customize
+--dest-ignition stub-us-east-1.ign` over the generic ISO), and the substantive config lives in one
+place that changes without recutting images.
+
+The operator can read that token off the ISO, and the threat model already concedes they can read
+anything on the box. So: one-time use, short TTL, scoped to enrollment only, and no registry
+credentials or wallet material anywhere in the fetched config. That is the same constraint Trust
+boundary and secrets already imposes.
+
+### Operator runbook
+
+1. Create a VM with the specified vCPU and RAM, including the cutover headroom, and one boot disk at
+   or above the stated minimum.
+2. Attach the data volume as a second disk, raw and unformatted.
+3. Boot the artifact FilOne sent, with the supplied `.ign` attached by whatever mechanism the platform
+   uses.
+4. Wait for the install and reboot. Detach the installer medium.
+5. Report the public IP. FilOne creates `{region}.s3.fil.one`.
+
+Nothing in that list requires knowing what Ignition is, which is what requirement 1 asks for.
+
+### Disk identity
+
+Two problems with different answers.
+
+**The install target** is the dangerous one, because writing FCOS to the data volume destroys it. It is
+decided at build time by `--dest-device`, which is why there are two ISO variants. The guard against
+the destructive case, reinstalling over a live region, is a refusal:
+
+```bash
+#!/bin/bash
+# --pre-install
+set -euo pipefail
+if blkid -L FILONE-DATA | grep -q .; then
+  echo "a FILONE-DATA volume is attached; detach it before reinstalling" >&2
+  exit 1
+fi
+```
+
+The disk-image artifacts do not have this problem at all.
+
+**The data volume** is identified by exclusion in the live installer, where both disks are visible and
+there is a shell. After `coreos-installer install` runs, the OS disk is the one carrying the `root`
+filesystem label, so the exclusion is exact:
+
+```bash
+#!/bin/bash
+# --post-install: runs in the live environment after the OS is written, before reboot.
+set -euo pipefail
+
+if blkid -L FILONE-DATA | grep -q .; then
+  echo "existing FILONE-DATA volume, adopting"; exit 0
+fi
+
+os_disk=$(lsblk -no PKNAME "$(blkid -L root)")
+mapfile -t candidates < <(
+  lsblk -dn -o NAME,TYPE,RM | awk '$2=="disk" && $3=="0" {print $1}' | grep -v "^${os_disk}$"
+)
+
+if [ "${#candidates[@]}" -ne 1 ]; then
+  echo "expected one data disk besides ${os_disk}, found ${#candidates[@]}: ${candidates[*]-none}" >&2
+  exit 1
+fi
+
+dev=/dev/${candidates[0]}
+if blkid -p "$dev" >/dev/null 2>&1; then
+  echo "$dev carries a filesystem or partition table; refusing to format" >&2
+  exit 1
+fi
+
+mkfs.xfs -L FILONE-DATA "$dev"
+```
+
+Discovery belongs in the installer because Ignition's config is static and cannot enumerate devices,
+while the live environment can. The installed system then only ever mounts
+`/dev/disk/by-label/FILONE-DATA`, with identical configuration in every region.
+
+The disk-image path has no installer phase, so the same logic runs as a first-boot oneshot ordered
+`Before=var-mnt-filone.mount`.
+
+## Additions to the operator hardware spec
+
+Beyond disks, a public IP, inbound 443, and the 2× application headroom already listed:
+
+- One boot disk at or above a stated minimum size.
+- Exactly one additional volume, raw and unformatted. Two extra disks fails provisioning by design
+  rather than picking one.
+- A preformatted volume also fails, loudly, during provisioning.
+- Which disk bus the platform presents, which selects the ISO variant, or which disk-image format the
+  platform can import.
+
+## Still open
+
+- Whether `blkid -L root` is the right discriminator on the FCOS release we pin. Verify during the
+  bake-off; the partition labels are stable but worth confirming rather than trusting.
+- Hosters that cannot attach a raw unformatted volume, or that expose it only through their own agent.
+  Survey the target hosters before writing "raw and unformatted" into the spec.
+- Whether the enrollment endpoint is worth building for the first five regions, or whether a fully
+  baked per-region config is simpler until config churn starts to hurt.
+- Volume loss is a regional data-loss event, and the volume is the operator's storage with unknown
+  redundancy. Backup targets for Postgres and Piri's SQLite belong in the same conversation as
+  wal-g/pgBackRest to partner S3.
