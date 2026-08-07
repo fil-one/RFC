@@ -2127,3 +2127,739 @@ If you want the pusher to learn the outcome without opening Grafana, the least-b
 - **Self-hosted CI runners are an arbitrary-code-execution surface.** GitHub explicitly recommends against them on public repositories because fork pull requests can run code on them. Unprivileged user, narrow sudo, private repos only.
 - **Migration reversibility is a discipline, not a feature.** Nothing in this document makes a schema change safe to roll back; expand/contract migrations are the actual mechanism, and pre-migration snapshots stop scaling in the tens of GB.
 - **Health-check quality bounds everything.** Auto-revert can only catch what the health check detects; a container that starts and serves errors will be treated as a successful deploy under every option here.
+
+---
+
+# Container Runtime & Continuous-Deployment Decision Report
+
+**Revision 2 — 2026-08-07.** Supersedes the initial report and its OpenBao/config-changes addendum; both are folded in here.
+
+> **What changed since rev 1**
+>
+> 1. **OpenBao joins the bundle as a fifth service** and is the most availability-critical thing on the box — it sits on the hot read path (a transit call per part, per GET) _and_ gates boot. It gets its own cadence tier alongside Postgres, not Caddy's. Rev 1's secrets section is superseded (§2.6, §8.2).
+> 2. **Config-file changes were a genuine gap.** Neither runtime notices that the _contents_ of a mounted file changed, so rev 1's reconcile logic would have silently ignored config-only commits. Fixed with a config-hash-in-unit pattern (§6).
+> 3. **Piri and Ingot have no SIGHUP reload** (confirmed). Config edits therefore cost exactly what version bumps cost, which makes change batching a requirement and **inverts rev 1's webhook recommendation** (§5.3, §7.2).
+> 4. **Rev 1's deadman alert threshold was wrong** — 15 minutes fires on every Piri deploy, given a drain of up to 60 minutes (§7.2).
+> 5. The ranked top 3 combos are **unchanged**; the OpenBao findings strengthen the Quadlet case rather than altering it.
+
+---
+
+## TL;DR
+
+- **Runtime: Podman + Quadlet.** Per-service systemd-unit granularity fits the mixed-cadence requirement (Piri+Ingot lock-step / Caddy independent / Postgres and OpenBao manual) better than Compose's project-level reconcile. It is native on bootc/FCOS where Docker requires rpm-ostree layering, rootless-capable on a partner-controlled box, and — newly decisive — it makes "never casually restart OpenBao" a structural property rather than a discipline. The OpenBao host-hardening checklist also turns out to be four systemd directives.
+- **Top 3 combos, ranked:** **(1) Quadlet + git-pull systemd-timer reconciler, fed by a CI "commit-the-digest" hybrid**; **(2) Quadlet + `ansible-pull` on a timer**; **(3) Compose + Portainer CE GitOps polling** (only if you standardise on a mutable OS and want a UI). Avoid `podman auto-update` as the CD engine — it requires a floating tag and so contradicts digest-pinning-in-git.
+- **One deploy mechanism covers images _and_ config.** Render a content hash of each service's config subtree into its unit file, so a config edit becomes a unit-file change and the existing digest-diff detection covers both. No second mechanism, no file watchers.
+- **Reload where it exists, restart where it doesn't.** Caddy, Postgres and OpenBao can take config changes without a restart. Piri and Ingot cannot — for them a one-line config edit costs a `pdp-gate` wait plus a full restart, identical to a version bump.
+- **Security shape:** CI commits digest bumps to an unprotected `deploy` branch using a short-lived **GitHub App installation token**; nodes pull **outbound-only** with a per-node read-only credential, or — better, given the trust boundary — ship config as an **OCI artifact** so the box needs only the registry credential it already has and no git client at all. **Critically, the deploy loop's own credentials must live outside OpenBao** or a sealed OpenBao becomes an unrecoverable brick.
+
+---
+
+## 1. What runs on the box, and how each service updates
+
+Five services, four distinct update policies. Getting this table right is most of the design.
+
+| Service      | Role                          | Pin                              | Discovery → merge                     | Image change         | Config change                                      |
+| ------------ | ----------------------------- | -------------------------------- | ------------------------------------- | -------------------- | -------------------------------------------------- |
+| **Piri**     | PDP proving, Filecoin storage | digest, **lock-step with Ingot** | CI commits both digests in one commit | `pdp-gate` → restart | `pdp-gate` → restart (no reload)                   |
+| **Ingot**    | customer-facing S3 gateway    | digest, **lock-step with Piri**  | as above                              | restart              | restart (no reload)                                |
+| **Caddy**    | TLS termination, owns :443    | digest via Renovate              | Renovate PR, **auto-merge**           | restart              | **`systemctl reload`**                             |
+| **Postgres** | Ingot object/part metadata    | digest, human-gated              | Renovate PR, `automerge: false`       | **manual**           | reload + `pending_restart` alert                   |
+| **OpenBao**  | regional secrets + Region KEK | digest, human-gated              | Renovate PR, `automerge: false`       | **manual**           | SIGHUP-reload where supported; else manual restart |
+
+### 1.1 Why OpenBao is in the manual tier despite being "infra"
+
+Per the regional key-management RFC, the local OpenBao runs on a unix socket with raft storage on the appliance disk, is sealed by a transit key held at a central OpenBao, and is the single home for the Region KEK, provider wallet key, TLS leaf keys, Postgres credentials, service identity PEMs and S3 credentials. Two properties make it unlike Caddy:
+
+1. **It is on the hot read path.** The region wrap is a transit `encrypt`/`decrypt` call (`aes256-gcm96`, `derived=true`, context-bound to space + blob digest) per part, per GET. Ingot cannot serve a single read without it. OpenBao sealed or down is a **total regional read outage**, not degraded service. (Throughput is not the concern — the RFC measures ~0.1 ms per op and ~19,000 ops/s even constrained to two cores.)
+2. **It gates boot.** The RFC records as verified behaviour that with central unreachable or the seal credential revoked, OpenBao 2.6.1 **refuses to start at all**. That is intentional (the Principle 1 "startup kill" lever), but it means central availability gates regional recovery.
+
+Consequences that ripple through the rest of this report:
+
+- **Restarting OpenBao is a read outage, not a blip.** The barrier key is in memory; a restart seals it until the unseal round-trip to central completes. Same treatment as a Postgres major upgrade: rare, announced, human-gated.
+- **OS reboot windows acquire an external dependency.** The reboot-batching plan needs a second gate beyond `pdp-gate`: never batch reboots against a central-OpenBao maintenance window, and alert on _unseal failure_ distinctly from "OpenBao unhealthy."
+- **Regional recovery time is longer than the 30–90 s FCOS reboot figure**, because the real sequence is boot → network → unseal round trip → OpenBao healthy → Ingot/Piri start.
+
+### 1.2 Lock-step, concretely
+
+A single `versions.conf` (or a rendered unit pair) bumped in **one commit** is what makes Piri+Ingot lock-step atomic by construction. Whatever the repo layout, the reconcile step must apply both from the same commit and never partially. Renovate can group the two into a single PR via `packageRules`, and `docker:pinDigests` handles digest pinning; a Postgres rule with `automerge: false` plus `dependencyDashboardApproval: true` gives the explicit human tick, while a Caddy rule sets `automerge: true`. This implements the whole table above declaratively.
+
+---
+
+## 2. Runtime decision: Docker Compose vs Podman + Quadlet
+
+### 2.1 Operational simplicity
+
+Quadlet has fewer long-running parts: no daemon, containers are ordinary systemd services driven by `systemctl`/`journalctl`. Compose's "one YAML, `docker compose up -d`" is arguably friendlier to newcomers, but Quadlet composes better with everything else systemd already does on this box — ordering, health-gating, `OnFailure=` alerting, and cgroup resource control, all of which this design now needs.
+
+### 2.2 Robust upgrades: per-service isolation
+
+Quadlet gives each service its own unit, so you restart exactly one and leave the rest untouched — directly serving "Postgres and OpenBao must never be auto-touched." Compose reconciles at _project_ level: per Docker's docs, `up` stops and recreates containers whose configuration or image changed, and while you can scope it (`docker compose up -d piri ingot`), the safe-by-default posture is weaker. There are documented cases (docker/compose #9357, #10259) of Compose recreating a container — including Postgres — that the operator did not intend to touch.
+
+With OpenBao in the bundle this stops being a preference. The single most important operational rule on the box is now "never casually restart OpenBao," and under Quadlet that rule is enforceable by simply keeping the unit out of the auto-restart set.
+
+### 2.3 Dependency ordering and health-gating
+
+`Requires=`/`After=` plus `Notify=healthy` expresses "Ingot does not start until OpenBao reports unsealed and healthy," enforced by systemd, with a failed unseal surfacing as a **failed unit** that `OnFailure=` can alert on. Compose's `depends_on: condition: service_healthy` handles start ordering but ties it to project-level reconcile and gives no equivalent of a unit landing in `failed` state for the alerting path.
+
+- **Quadlet:** `Notify=healthy` arrived in Podman **5.0.0** — the release notes describe it as sdnotify-ing that a container has started only once its health check begins passing. `.container` units default to `Type=notify`, so `systemctl restart` blocks and exits non-zero on failure. **Known bug (containers/podman #27290, open as of late 2025):** systemd sees the service as _starting_ until the startup health check succeeds, and if that exceeds systemd's own start timeout it stops the service and marks it failed. The fix per the issue is to set `TimeoutStartSec=` — to `infinity`, or to `HealthStartPeriod` plus margin. **Given Piri's up-to-60-minute graceful shutdown, set `TimeoutStartSec=` and `TimeoutStopSec=` explicitly.**
+- **Compose:** `up -d --wait --wait-timeout <n>` blocks on health and returns non-zero — a good equivalent, but one project-wide gate rather than per-unit.
+
+**Health-check quality now has a specific failure mode to defend against.** Ingot can start cleanly and 500 every GET because it cannot reach or authenticate to OpenBao. Ingot's health check must therefore exercise a real transit unwrap against a known context, not a TCP or `/healthz` liveness ping. Without that, health-gated deploys give false confidence on the failure most likely to occur.
+
+### 2.4 Change detection and restart semantics (the mechanic that shapes the CD design)
+
+**Editing a `.container` file and running `systemctl daemon-reload` regenerates the unit but does NOT restart the running container.** Per podman-systemd.unit(5), Quadlet files are read at boot and on `daemon-reload` and generate corresponding service units; systemd does not restart already-running services on reload. You must explicitly `systemctl restart <name>.service`.
+
+For this design that is a _feature_: the reconcile script decides what restarts, so Postgres and OpenBao are excluded trivially. (Beware the common claim that Quadlets are "automatically updated on daemon-reload" — that refers to regenerating unit files, not restarting containers.)
+
+Validation: `/usr/libexec/podman/quadlet -dryrun` (rootless: add `-user`), or `systemd-analyze --generators=true verify <unit>`. Podman **5.6.0** also added a `podman quadlet` command suite (`install`, `list`, `print`, `rm`) for lifecycle management — not a dry-run replacement, and not available with the remote client.
+
+### 2.5 Host hardening maps onto unit directives
+
+The key-management RFC's host checklist — following OpenBao's own post-mlock guidance after it removed the inherited mlock implementation as too subtle to get right (openbao #354, #363) — is not documentation; it is systemd directives:
+
+| RFC requirement                                          | Directive                       |
+| -------------------------------------------------------- | ------------------------------- |
+| swap disabled (`memory.swap.max=0` in the unit's cgroup) | `MemorySwapMax=0`               |
+| core dumps off                                           | `LimitCORE=0`                   |
+| seeded entropy at first boot                             | Ignition/cloud-init, host image |
+| no snapshot/clone reuse of a running appliance           | operational policy              |
+
+Apply the first two to **both OpenBao and Ingot** — the RFC notes one checklist protects both processes. Per-service cgroup and rlimit control in the same reviewable file as the image pin is a real, if modest, Quadlet advantage. Compose's `mem_swappiness`/`ulimits` cover some of this but map less directly onto the RFC's cgroup-level language.
+
+### 2.6 Secrets
+
+**OpenBao owns application secrets.** This supersedes rev 1's SOPS-vs-`systemd-creds` comparison and simplifies the design in one important way: because configs in git now hold _references_ to OpenBao paths rather than values, **the config files are safe to commit in plaintext and SOPS + age largely disappears.**
+
+What remains host-bound is a small, deliberate set — see §8.2 for why this set must not live in OpenBao:
+
+- git read credential for the `deploy` branch (or the registry credential, on the OCI-artifact path)
+- registry pull credential
+- the OpenBao unseal/boot credential itself
+
+`systemd-creds` / `LoadCredentialEncrypted=` is the right mechanism for exactly these, and the RFC's open item to "TPM-seal the boot credential" when the host-image work lands applies to precisely this set.
+
+**Wiring the bootstrap credential into a container has a real rough edge.** Quadlet passes `[Service]` through untouched so `LoadCredentialEncrypted=` works at unit level, but `$CREDENTIALS_DIRECTORY` is a host path that Quadlet does not project into the container. The stock-pieces solution is a separate oneshot that materialises it as a `podman secret`:
+
+```ini
+# filone-bao-bootstrap.service  (plain systemd unit, not a Quadlet file)
+[Unit]
+Description=Materialise OpenBao seal credential as a podman secret
+Before=openbao.service
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+LoadCredentialEncrypted=bao-seal:/etc/filone/bao-seal.cred
+ExecStart=/usr/local/bin/filone-bao-bootstrap   # reads $CREDENTIALS_DIRECTORY/bao-seal → podman secret
+LimitCORE=0
+```
+
+The credential never enters git, a log, or unencrypted disk. **Verify the exact transit-seal token config key / env var against the OpenBao transit seal docs** — a placeholder is used below rather than a guess.
+
+### 2.7 Immutable vs mutable OS — often the deciding factor
+
+- **On bootc / FCOS (the current lean): Quadlet is native, Docker is not.** These images ship Podman and no Docker Engine; Docker requires rpm-ostree layering, a reboot to apply, and ongoing maintenance against a read-only `/usr`. This materially penalises Compose.
+- **Unit files** live in `/etc/containers/systemd/` (writable) or baked into `/usr/share/containers/systemd/`. **All persistent state must be under `/var`** — mount the operator volume at `/var/mnt/filone` and point Postgres, OpenBao raft storage, Piri's SQLite and Caddy's cert store at subdirectories.
+- **bootc bound images** (symlink a `.image`/`.container` into `/usr/lib/bootc/bound-images.d`, images referenced by digest or immutable tag, accessed via an additional image store) pre-pull app images at OS-upgrade time. Quadlet-only, no Compose equivalent — but it ties app cadence to OS cadence, so it suits a pinned baseline rather than the independent-Caddy / lock-step-Piri policy.
+- **Debian 13 "trixie" ships Podman 5.4.2** — new enough for `Notify=healthy` (needs ≥5.0), too old for `ReloadCmd=` and `podman quadlet` (5.6.0). Both gaps have clean workarounds (§6.3).
+- **Ubuntu LTS is the problem case: 24.04 ships Podman 4.9.3**, 22.04 the 3.4.x series — too old for `Notify=healthy`. On Ubuntu you need a backport or the OpenSUSE build repo. Compose is trivially available there via Docker's apt repo.
+
+### 2.8 Runtime verdict
+
+**Podman + Quadlet.** It wins on per-service isolation, dependency ordering and failure surfacing, host-hardening expressiveness, rootless operation on partner hardware, and the immutable-OS path. Compose's edges are newcomer familiarity and the `up -d --wait` one-liner — real but outweighed. The one budget item: if the OS decision lands on **Ubuntu LTS specifically**, plan for getting a modern Podman onto the box.
+
+---
+
+## 3. CD mechanism catalogue
+
+### Pull-based
+
+**A. systemd timer + `git fetch` + reconcile script.** _(Both runtimes.)_ A `.timer` fires a oneshot that fetches the deploy ref and, if it moved, reconciles. Compose: `up -d --wait` is itself the reconciler. Quadlet: copy changed units, `daemon-reload`, then selectively restart (§2.4). Most transparent option, slots `pdp-gate` in naturally, latency = poll interval. Git-as-truth: perfect. No conflict with git-revert.
+
+**B. `ansible-pull` on a timer.** _(Both.)_ Handlers give idempotent "restart only what changed"; excellent fit for the manual tier (simply no restart handler). Costs Ansible on every box — awkward on immutable `/usr`, so install layered or run from a container. **Watch:** `ansible.builtin.systemd_service` daemon-reload is not idempotent (issue #86495 — a reload should always be assumed to have changed something), so gate restarts on file-change facts, never on the reload task.
+
+**C. `podman auto-update` + timer.** _(Quadlet-native.)_ **Confirmed still incompatible with digest-pinning-in-git.** The podman-auto-update man page is explicit: `AutoUpdate=registry` compares the local digest against the remote image _for a tag_, and a digest-pinned `Image=...@sha256:...` will never trigger an update. So the registry, not git, becomes the source of truth and the git-pinned digest is decorative. `AutoUpdate=local` only helps when another process builds/pulls on the host. Its automatic rollback (re-tag to previous on restart failure) also actively fights the git-revert model. **Not the CD engine.** Cosign verification can be layered independently via `policy.json` `sigstoreSigned` + `use-sigstore-attachments`.
+
+**D. Flux / Argo CD.** _(N/A.)_ Kubernetes controllers with no supported non-K8s mode. Steal the rendered-manifests/deploy-branch _pattern_, not the tools.
+
+**E. Komodo.** _(Compose-only.)_ v2.0.0 (March 2026) moved to auto-generated key-pair PKI auth with rotation and — importantly for this trust model — added outbound Periphery, so the agent can initiate the connection to Core (default inbound port 8120 otherwise). Deploys Compose stacks from git with auto-deploy on push; uses Docker as the engine and **does not manage Quadlet.** Good dashboard.
+
+**F. Portainer CE GitOps.** _(Compose-only.)_ Backs a stack with a git repo, polling (outbound-only) or webhook, comparing deployed commit SHA against the configured ref. **Verify CE vs BE:** "force redeployment / git-wins" is documented as Business-Edition-only in at least the 2.27 LTS docs.
+
+**G. Harbormaster.** _(Compose-only.)_ Minimal git→Compose syncer. Niche; verify maintenance status.
+
+**H. bootc bound images.** _(Quadlet-only.)_ See §2.7 — baseline pinning, not per-service cadence.
+
+**I. Diun.** _(Both, notify-only.)_ Useful complement for watching Caddy/Postgres/OpenBao upstreams.
+
+**J. Renovate.** _(Both.)_ The discovery layer. Native `docker-compose` manager and a **native `quadlet` manager** for `.container`/`.image`/`.volume` files (updates where an `Image` option is present), so no custom regex is needed for the basic case; a `customManagers` regex remains available for nonstandard layouts. Handles the grouping/auto-merge policy in §1.2.
+
+### Push-based
+
+**K. Actions → SSH, long-lived key in a CI secret.** Requires an inbound port and gives GitHub a forever-credential that reaches every box. Harden with a forced command, no-shell deploy user, narrow sudoers — but **not recommended** here.
+
+**L. Actions → SSH over an ephemeral Tailscale node.** `tailscale/github-action` with an **OAuth client** (Tailscale recommends this over auth keys for automatic cleanup and better isolation), tagged ephemeral node, ACLs restricting `tag:ci` → the appliance tag, Tailscale SSH instead of static keys; federated-identity variant needs `id-token: write`. **No inbound port.** The cleanest push option for this trust model. Residual: the OAuth client secret lives in GitHub and the box joins a central tailnet. Headscale and Cloudflare Tunnel are alternatives.
+
+**M. Actions → short-lived SSH cert via OIDC** from OpenBao/step-ca. No static secret in CI at all; most secure, most moving parts (you run a CA). Combine with L for outbound-only.
+
+**N. Self-hosted runner on the node.** Outbound-only and no inbound port, but an arbitrary-code-execution surface and a trust inversion — your CI identity executing on the partner's box. GitHub's own docs warn that self-hosted runners should almost never be used with public repositories because fork PRs can compromise the runner environment including secrets and `GITHUB_TOKEN`, and that even on private repos anyone who can fork and open a PR is a risk. Private repos, `--ephemeral`, outside-collaborator approval, runner groups — or skip.
+
+**O. Webhook receiver on the node (HMAC-verified) → triggers the pull.** Push the notification, pull the content. **Rev 2 caveat: debounce it.** See §5.3 — firing per push is now a liability, not a speed win. Needs an inbound port (tunnel it).
+
+**P. Ansible push over SSH from Actions.** Same inbound concerns as K/L; prefer `ansible-pull`.
+
+### The hybrid spine: CI commits the digest, the node pulls
+
+CI builds, resolves digests, and commits the bump into git; nodes pull. Repo-layout options:
+
+- **`versions.conf` per fleet/node** — simplest lock-step story, trivial path-based change detection, Postgres/OpenBao lines edited only by human PR. **Recommended.**
+- **Digests inline per unit file** — idiomatic for Renovate's native managers; lock-step then spans two files (Renovate grouping handles the PR, the reconciler must still apply atomically).
+- **Rendered `deploy` branch** (the Argo/Flux pattern) — `main` keeps readable sources under full branch protection; CI renders digests **and config hashes** into an unprotected `deploy` branch that nodes read. Slightly more machinery, and §6.2 gives it a second independent justification, which promotes it from optional to preferred.
+
+---
+
+## 4. Comparison matrices
+
+### Runtime × mechanism applicability
+
+| Mechanism                       | Compose | Quadlet                   |
+| ------------------------------- | ------- | ------------------------- |
+| A. Timer + git pull + reconcile | ✅      | ✅                        |
+| B. ansible-pull                 | ✅      | ✅                        |
+| C. podman auto-update           | ❌      | ✅ but breaks git-pinning |
+| D. Flux/Argo                    | ❌      | ❌                        |
+| E. Komodo                       | ✅      | ❌                        |
+| F. Portainer GitOps             | ✅      | ❌                        |
+| G. Harbormaster                 | ✅      | ❌                        |
+| I. Diun / J. Renovate           | ✅      | ✅                        |
+| K–P. push family                | ✅      | ✅                        |
+
+### Scoring the realistic candidates
+
+| Mechanism (runtime)                     | Git = truth    | Mixed cadence     | Config changes         | Merge→running                 | GH privilege          | Inbound ports        | Visibility                                      | Parts    | Fights git-revert? |
+| --------------------------------------- | -------------- | ----------------- | ---------------------- | ----------------------------- | --------------------- | -------------------- | ----------------------------------------------- | -------- | ------------------ |
+| **A. Timer pull + CI digest (Quadlet)** | ✅ full        | ✅ excellent      | ✅ via §6.2 hash       | poll interval, **coalescing** | commit-only App token | none                 | `OnFailure=` + textfile metrics + journald→Loki | low      | No                 |
+| **B. ansible-pull (Quadlet)**           | ✅ full        | ✅ excellent      | ✅ handlers native     | poll interval                 | same                  | none                 | Ansible recap + `OnFailure=`                    | medium   | No                 |
+| **F. Portainer GitOps (Compose)**       | ✅ SHA compare | ⚠️ project-level  | ⚠️ needs hash in label | poll interval                 | node read token       | none (poll)          | UI; weak alerting                               | medium   | No                 |
+| **E. Komodo v2 (Compose)**              | ✅             | ⚠️ project-level  | ⚠️ as above            | webhook, per-push             | webhook               | none (outbound mode) | good UI                                         | med-high | No                 |
+| **L. Tailscale SSH push**               | ⚠️ push        | ✅ script decides | ✅                     | seconds, **no coalescing**    | OAuth client          | none                 | Actions UI                                      | medium   | Neutral            |
+| **C. podman auto-update**               | ❌ registry    | ⚠️ tag-driven     | ❌ ignores config      | timer                         | none                  | none                 | journald only                                   | low      | **Yes**            |
+| **N. Self-hosted runner**               | ⚠️             | ✅                | ✅                     | seconds                       | **high (ACE)**        | none                 | Actions UI                                      | medium   | Neutral            |
+
+---
+
+## 5. Applying changes: images, config, and the cost of a restart
+
+### 5.1 The gap: mounted config is invisible to both runtimes
+
+**Neither runtime notices that the contents of a mounted config file changed.** Symmetrically:
+
+- **Quadlet:** the `.container` file is unchanged, so `daemon-reload` regenerates an identical unit and nothing restarts. The new config sits unread until an unrelated restart — the worst case, because it then applies at a random later time nobody connects to the commit.
+- **Compose:** `up -d` compares the _service definition_, not the contents of bind-mounted files. An edited Caddyfile with an unchanged `compose.yaml` yields "up-to-date."
+
+### 5.2 The fix: hash the config into the unit file
+
+Adapt the Kubernetes config-checksum-annotation convention. Render a content hash of each service's config subtree into that service's unit, so **a config change becomes a unit-file change** and one detection mechanism covers images and config:
+
+```ini
+# units/caddy.container  (rendered by CI)
+[Container]
+Image=docker.io/library/caddy@sha256:PINNED_DIGEST
+Annotation=filone.config-hash=3f9a1c7e2b8d4056
+Volume=/var/mnt/filone/config/caddy:/etc/caddy:ro,z
+```
+
+Use `Annotation=` rather than `Environment=` so you are not injecting values into the application's environment where they could change behaviour. The hash covers only that service's subtree, so a Caddyfile edit does not restart Ingot.
+
+**Have CI render the hash on merge into the `deploy` branch** — humans edit readable config on protected `main`, CI renders digests and hashes into `deploy`, nodes read only `deploy`. This is the second independent reason to adopt the rendered-branch layout. A local-hash alternative works (the reconciler computes hashes and keeps per-service state) but puts more state and logic on 30+ boxes.
+
+Pair it with an **apply-policy manifest in git**, keeping the reconciler generic and the policy reviewable:
+
+```yaml
+# services.yaml
+services:
+  openbao: { apply: reload, restart: manual, validate: bao-validate }
+  postgres: { apply: reload, restart: manual }
+  caddy: { apply: reload, validate: caddy-validate }
+  ingot: { apply: restart }
+  piri: { apply: restart, pre: pdp-gate }
+```
+
+### 5.3 Apply verbs, and why Piri/Ingot dominate the cost
+
+**Confirmed 2026-08: Piri and Ingot do not support SIGHUP config reload.** The reload path therefore covers exactly the three services whose config rarely changes, while the two that change most often are restart-only.
+
+| Service      | Config change                                                                                                           | Image change   |
+| ------------ | ----------------------------------------------------------------------------------------------------------------------- | -------------- |
+| **Caddy**    | `systemctl reload` → `caddy reload`, **zero-downtime**, config validated as part of the load                            | restart        |
+| **Postgres** | `pg_ctl reload` (SIGHUP) — always safe; params needing restart simply don't take effect                                 | **manual**     |
+| **OpenBao**  | SIGHUP reloads listener TLS, log level, declarative audit devices. **Seal and storage stanzas need a restart** → manual | **manual**     |
+| **Piri**     | **restart, `pdp-gate`d, up to 60 min drain**                                                                            | identical cost |
+| **Ingot**    | **restart, drops in-flight requests** (no graceful shutdown)                                                            | identical cost |
+
+**For Piri and Ingot, a one-line config edit costs exactly what a version bump costs.** That simplifies their apply logic (`apply: restart`, unconditional) but makes change batching an operational requirement:
+
+**Coalesce; do not deploy per-commit.** Deploying a config edit and an image bump separately pays the restart cost twice. The reconciler in §9.1 diffs `APPLIED..TARGET`, so N commits landing between two ticks collapse into **one** restart at the latest state — preserve that property in any refactor.
+
+**This inverts rev 1's webhook recommendation.** Rev 1 treated the webhook (mechanism O) as a straight upgrade for cutting latency to seconds. For Piri/Ingot that is a liability: three commits merged in ten minutes become three `pdp-gate` waits and three drains. **Polling's coalescing window is a feature.** Keep the poll loop; if you add a webhook, debounce it rather than firing per push.
+
+**The Postgres nuance turns a judgement call into an automatable one.** `pg_ctl reload` is unconditionally safe — parameters whose `context` is `postmaster` simply don't take effect, and Postgres sets `pending_restart`. So always reload, then alert on the leftovers:
+
+```sql
+SELECT count(*) FROM pg_settings WHERE pending_restart;
+```
+
+No allowlist of reloadable parameters to maintain, and nothing silently un-applied.
+
+### 5.4 Quadlet's native reload support
+
+`ReloadCmd=` / `ReloadSignal=` generate `ExecReload=` in the service unit, with Podman auto-prepending `podman exec <container>`:
+
+```ini
+# units/caddy.container
+[Container]
+ReloadCmd=caddy reload --config /etc/caddy/Caddyfile
+```
+
+`systemctl reload caddy` then performs a zero-downtime Caddy config reload. **Both keys arrived in Podman 5.6.0 and are mutually exclusive** (setting both is a generation error). Debian 13's 5.4.2 predates them, but the hand-written form works because Quadlet passes `[Service]` through untouched:
+
+```ini
+[Service]
+ExecReload=/usr/bin/podman exec caddy caddy reload --config /etc/caddy/Caddyfile
+```
+
+### 5.5 The bind-mount inode footgun
+
+**Never bind-mount a single config file from a git working tree.** A file bind-mount resolves to an inode; `git checkout` replaces the file, so the container reads the _old_ file forever — and `systemctl reload` dutifully reloads stale config while reporting success. Silent, confusing, and it survives reloads.
+
+```ini
+Volume=/var/mnt/filone/config/caddy/Caddyfile:/etc/caddy/Caddyfile:ro   # WRONG
+Volume=/var/mnt/filone/config/caddy:/etc/caddy:ro,z                     # correct — mount the directory
+```
+
+Use `:z` (shared relabel) rather than `:Z` (private) for any config directory read by more than one container. Corollary: don't mount the git worktree; sync rendered config into a stable directory the containers mount, keeping the checkout as staging.
+
+### 5.6 Validate before touching anything running
+
+Order the work so cheap checks run first and nothing stops until everything is ready. Run these against _staged_ config, before syncing into the live mount path:
+
+```bash
+/usr/libexec/podman/quadlet -dryrun >/dev/null            # unit syntax
+podman exec caddy caddy validate --config /etc/caddy/Caddyfile
+podman exec openbao bao operator diagnose                 # verify availability/flags
+# then pre-pull every digest; only then apply
+```
+
+This converts a large class of outages into "the deploy didn't happen," which is a much better failure than a half-applied one.
+
+### 5.7 Secret-bearing config: hash the template, never the render
+
+If any config is rendered from OpenBao (via `openbao-template` or an agent), keep two things strictly separate:
+
+- **the template** — in git, hashed into the unit, changes only when a human changes it
+- **the rendered output** — never in git, **never hashed**, on tmpfs
+
+Hashing rendered output creates a restart loop on every credential rotation: new lease → render changes → hash changes → restart → repeat on the rotation period. With Postgres credentials rotating daily that is a daily unexplained Ingot restart and `pdp-gate`d Piri restarts fighting the proving schedule. Let the renderer own restart-on-secret-change (`openbao-template` has an exec/supervisor mode with a configurable `reload_signal`, default SIGHUP) and the git loop own restart-on-config-change. Disjoint triggers, no overlap.
+
+### 5.8 Why not systemd path units
+
+`.path` units with `PathChanged=` look obvious and are the wrong tool, for three documented reasons:
+
+1. **They start, not restart.** `PathChanged=` activates the configured unit, so an already-running service needs a separate restarter helper.
+2. **They don't see atomic replacement.** Neither `PathChanged=` nor `PathModified=` detects atomic symlink replacement (systemd #17727) — exactly the shape of a git-driven atomic deploy. (Hidden files are ignored too.)
+3. **No gating.** A path unit fires whenever the file closes — a Piri restart at an arbitrary moment, outside `pdp-gate`, possibly mid-proof. The reconcile loop must be the only thing that restarts Piri.
+
+---
+
+## 6. The Caddy TLS-key gap — flag it, don't build it
+
+The key-management RFC lists TLS leaf keys among the secrets moving into OpenBao. **Caddy does not natively store certificates in Vault/OpenBao** — CertMagic defaults to filesystem storage, and the Vault path needs a third-party module (`caddy.storage.vault`) plus a custom `xcaddy` build, using KV-v2 and AppRole. That module is lightly maintained.
+
+**Don't spend a custom Caddy build on it.** Better:
+
+1. **LUKS + Clevis/Tang volume binding**, which the RFC itself lists as complementary — it extends dead-disk coverage to Caddy's cert store, Postgres's data directory and the spool in one mechanism, no custom builds, no plugin risk.
+2. **Accept certs on a bound volume** and state it in the threat model.
+
+The value case is weak on the RFC's own reasoning: it establishes that a hostile partner can obtain a valid certificate for their own hostname by intercepting traffic to their own IP, without touching the VM at all. A leaf key in OpenBao does not close that route. The Region KEK warrants real machinery; the leaf key does not.
+
+---
+
+## 7. Observability & alerting
+
+- **Deploy lifecycle:** wrap the reconciler in a systemd oneshot with `OnFailure=deploy-alert@%n.service`; write node_exporter **textfile collector** metrics on each run (`filone_deploy_last_success_timestamp`, `filone_deploy_last_status`, `filone_deploy_active_sha`).
+- **The deadman — and the rev 1 correction.** Rev 1 recommended alerting on `time() - last_success > 900`. **With Piri's drain running up to 60 minutes, that fires on every Piri deploy** — the fastest way to train the team to ignore an alert. Options, best first:
+  - **Heartbeat during the apply, not just after it.** Touch the heartbeat before each restart and keep a background `while sleep 60; do touch $STATE/heartbeat; done` for its duration, so "the loop is alive" and "the loop last succeeded" are separate signals. Alert tightly on the heartbeat; track last-success without paging.
+  - **Emit an explicit in-progress state** (`filone_deploy_in_progress{service="piri"} 1`) and suppress the staleness alert while set, with a second alert for in-progress held beyond worst-case drain plus margin — which catches a genuinely wedged restart.
+  - Raise the threshold above worst-case drain (simplest, blinds you for an hour).
+
+  Also set `TimeoutStartSec=` on the reconcile unit **above** Piri's `TimeoutStopSec`, or systemd kills the reconciler mid-drain. Keep the `flock` so overlapping ticks exit cleanly.
+
+- **Drift on the manual tier.** A manual-tier change must be visible, or "Postgres is manual" degrades into "Postgres is forgotten." Emit `filone_deploy_pending_manual{service="postgres"} 1` and alert if held more than N days.
+- **Unseal failure as its own alert**, distinct from "OpenBao unhealthy" (§1.1).
+- **Service health:** node_exporter `--collector.systemd` exposes `node_systemd_unit_state`; alert on any of the five landing in `failed`.
+- **Logs:** journald → Loki via Alloy. Reconciler stdout and podman events land in the journal automatically — a real Quadlet advantage, no separate plumbing.
+- **Pusher feedback:** to reflect status into the GitHub commit/PR UI, post to the commit status API with a token scoped to `statuses: write` (a GitHub App with the Commit statuses permission is least-privilege). Push mechanisms give this free in the Actions run UI.
+
+---
+
+## 8. Security: least-privilege specifics
+
+### 8.1 CI committing a digest bump
+
+Ranked by blast radius, best first:
+
+1. **GitHub App installation token** — short-lived (1 h), repo-scoped, `contents: write` only, decoupled from any human, revocable. The App private key is the crown jewel; store it well and never on the box. **Recommended.**
+2. **Fine-grained PAT** — repo-scoped, expiring, tied to a user account.
+3. **Deploy key (write)** — per-repo, no expiry.
+4. **`GITHUB_TOKEN` with `contents: write`** — simplest, but branch protection and required reviews block a bot pushing to `main`.
+
+**Branch protection interaction:** rather than granting a bypass, have CI **push to an unprotected `deploy` branch** that is the only thing nodes read, keeping `main` fully reviewed. This is the same layout §5.2 wants for config hashes — one decision serving two purposes. (A PR with auto-merge is the alternative.)
+
+### 8.2 The circular dependency you must design out
+
+**Do not put the deploy loop's own credentials in OpenBao.** If the git read credential or registry pull secret lives there, then a sealed or broken OpenBao means you cannot pull the image that fixes OpenBao — a region that can brick itself with one bad commit and no remote recovery path. Keep the §2.6 bootstrap set host-bound in `systemd-creds`.
+
+### 8.3 Node-side read credential across 30+ semi-trusted boxes
+
+Best first:
+
+- **OCI artifact (ORAS / bootc bound images) instead of git-on-the-node.** The box already needs a registry credential for images; shipping compose/quadlet config as an OCI artifact removes the git client and git credential entirely. **Lowest-privilege and the best fit for a partner-operated box** — worth prototyping. Scope with a per-node registry robot account.
+- **Per-node read-only deploy keys or fine-grained tokens** — revocable per box.
+- **A single shared read-only deploy key across 30 partner boxes — avoid.** One compromised partner leaks read access for the whole fleet, and rotation means touching every box.
+- **A central artifact mirror** the nodes pull from — reduces GitHub exposure, adds an audit choke point.
+
+### 8.4 Push transport
+
+Ephemeral Tailscale node or short-lived OIDC SSH certs beat a long-lived SSH key in a CI secret; both keep the box free of inbound ports. Self-hosted runners on partner boxes invert trust and are an ACE surface (§3, mechanism N).
+
+---
+
+## 9. The 3 recommended combos, ranked
+
+### 🥇 #1 — Quadlet + git-pull systemd-timer reconciler, fed by a CI "commit-the-digest" hybrid
+
+**Concretely.** A private repo holds unit files and config on `main`. On merge, GitHub Actions builds/resolves Piri+Ingot digests and renders units — digests **and config hashes** — into an unprotected `deploy` branch using a GitHub App installation token. Each node runs a timer that fetches `deploy` outbound (read-only deploy key, or the OCI-artifact path), and on change: validates, pre-pulls, syncs config to a stable path, `daemon-reload`s, then applies per-service verbs from `services.yaml` — reload for Caddy/Postgres/OpenBao, `pdp-gate`+restart for Piri/Ingot, and _nothing_ for the manual tier beyond a drift metric.
+
+**Why #1.** Maximum operational simplicity (git + systemd + one script; no daemon, no controller, no UI to run); best mixed-cadence story since per-unit restart is native; outbound-only; git as single source of truth with no revert conflict; strongest failure detection via systemd; and it handles config changes through the same path as image bumps. Best fit for the bootc lean.
+
+**Cost.** A ~120-line reconcile script and the observability wiring. No dashboard — visibility is journald/Grafana.
+
+**Failure modes to watch.** (1) `Notify=healthy` + `TimeoutStartSec` (#27290) — set timeouts explicitly given Piri's 60-minute drain. (2) The deadman threshold vs that same drain (§7). (3) The bind-mount inode trap (§5.5). (4) Deploy-key sprawl across 30 partner boxes — per-node keys or OCI artifacts. (5) A sealed OpenBao blocking its own fix (§8.2).
+
+#### Reconcile script
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+exec 9>/var/lock/filone-reconcile.lock; flock -n 9 || exit 0
+
+REPO=/var/lib/filone/config; STATE=/var/lib/filone/state
+cd "$REPO"
+APPLIED=$(cat "$STATE/applied" 2>/dev/null || echo "")
+git fetch --quiet origin deploy
+TARGET=$(git rev-parse origin/deploy)
+[ "$APPLIED" = "$TARGET" ] && { touch "$STATE/heartbeat"; exit 0; }
+
+git checkout --quiet --force "$TARGET"           # staging only; nothing live yet
+
+# 1. Validate, then pre-pull. Failure here = "the deploy didn't happen".
+/usr/local/bin/filone-validate
+awk -F= '/^Image=/{print $2}' units/*.container | xargs -rn1 podman pull --quiet
+
+# 2. Which services changed? Unit files encode config hashes, so this single
+#    diff covers image bumps AND config edits. Multiple commits coalesce here.
+CHANGED=$(git diff --name-only "${APPLIED:-$TARGET}" "$TARGET" -- units/ \
+          | xargs -rn1 basename | sed 's/\.container$//' | sort -u)
+
+# 3. Apply: config to a stable path (never mount the worktree), then units.
+rsync -a --delete config/ /var/mnt/filone/config/
+install -m0644 units/*.container /etc/containers/systemd/
+systemctl daemon-reload
+
+for svc in $CHANGED; do
+  policy=$(yq -r ".services.\"$svc\".restart // \"auto\"" services.yaml)
+  verb=$(yq   -r ".services.\"$svc\".apply   // \"restart\"" services.yaml)
+  pre=$(yq    -r ".services.\"$svc\".pre     // \"\""       services.yaml)
+
+  if [ "$policy" = "manual" ]; then
+    echo "$svc" >> "$STATE/pending-manual"       # git moved; the box deliberately did not
+    logger -t filone-deploy -p warning "$svc changed in git; manual apply required"
+    continue
+  fi
+  [ -n "$pre" ] && "/usr/local/bin/$pre" wait    # pdp-gate for piri
+  systemctl "$verb" "$svc.service"               # reload | restart
+done
+
+echo "$TARGET" > "$STATE/applied"; touch "$STATE/heartbeat"
+/usr/local/bin/filone-write-metrics
+```
+
+#### Representative units
+
+```ini
+# /etc/containers/systemd/openbao.container
+[Unit]
+Description=OpenBao (regional secrets, Region KEK)
+Requires=filone-bao-bootstrap.service var-mnt-filone.mount
+After=filone-bao-bootstrap.service var-mnt-filone.mount network-online.target
+[Container]
+Image=ghcr.io/openbao/openbao@sha256:PINNED_DIGEST
+Annotation=filone.config-hash=CONFIG_HASH_PLACEHOLDER
+Secret=bao-seal,type=env,target=SEAL_TRANSIT_TOKEN_PLACEHOLDER
+Volume=/var/mnt/filone/openbao:/openbao/data:Z
+Volume=/var/mnt/filone/config/openbao:/openbao/config:ro,z
+Volume=/run/filone:/run/filone:z          # unix socket, shared with ingot/piri
+Notify=healthy
+HealthCmd=bao status -address unix:///run/filone/bao.sock
+HealthStartPeriod=30s
+[Service]
+MemorySwapMax=0        # RFC host hardening: no swap for this cgroup
+LimitCORE=0            # RFC host hardening: no core dumps
+TimeoutStartSec=180    # unseal round-trip to central
+Restart=on-failure
+StartLimitBurst=3
+```
+
+```ini
+# /etc/containers/systemd/piri.container
+[Unit]
+Description=Piri PDP node
+Requires=openbao.service
+After=openbao.service network-online.target
+[Container]
+Image=ghcr.io/filoz/piri@sha256:PINNED_DIGEST
+Annotation=filone.config-hash=CONFIG_HASH_PLACEHOLDER
+Volume=/var/mnt/filone/config/piri:/etc/piri:ro,z
+Volume=/var/mnt/filone/piri:/var/lib/piri:Z
+Volume=/run/filone:/run/filone:z
+Notify=healthy
+HealthCmd=piri status
+HealthInterval=30s
+HealthStartPeriod=60s
+[Service]
+TimeoutStartSec=infinity   # required per #27290
+TimeoutStopSec=3900        # graceful shutdown up to 60 min
+Restart=on-failure
+StartLimitBurst=3
+ExecStartPre=/usr/local/bin/pdp-gate wait
+[Install]
+WantedBy=multi-user.target
+```
+
+Caddy stays a **separate** unit owning :443, so restarting Piri or Ingot never closes the public listening socket.
+
+#### CI workflow shape
+
+```yaml
+permissions:
+  contents: write
+  id-token: write
+steps:
+  - uses: actions/create-github-app-token@v2
+    id: app-token
+    with: { app-id: ${{ vars.APP_ID }}, private-key: ${{ secrets.APP_KEY }} }
+  - run: |
+      # resolve digests, compute per-service config hashes, render units
+      # commit to the unprotected deploy branch
+      git push https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/org/filone-deploy deploy
+```
+
+### 🥈 #2 — Quadlet + `ansible-pull` on a timer
+
+Same repo/CI/digest spine; the node's reconcile is a playbook run locally on a timer. Handlers give idempotent restart-only-what-changed, plus templating and health-check tasks — less bespoke shell than #1, and the manual tier is expressed by simply having no restart handler.
+
+**Costs:** Ansible on every box (awkward on immutable `/usr` — layer it or run from a container), version drift across a 30-box fleet, and the non-idempotent `daemon-reload` trap (gate restarts on file-change facts, not the reload task). Ensure the playbook is re-entrant so a half-succeeded run doesn't double-restart.
+
+### 🥉 #3 — Docker Compose + Portainer CE GitOps (polling)
+
+Choose **only if** you standardise on a mutable OS _and_ want a management UI for a small operator team. Good visibility with little custom code; Renovate still drives Caddy/Postgres/OpenBao PRs and CI still commits lock-step digests.
+
+**Costs and failure modes:** Docker daemon (root) plus Portainer as persistent parts; a real penalty on bootc (layered Docker). Mixed cadence is project-level, so protecting Postgres _and now OpenBao_ from an unintended recreate takes care — pin digests, avoid `--remove-orphans`, name services explicitly, never a bare project-wide `up -d`. Config changes need the hash in a **label** rather than an annotation. You lose the `OnFailure=` alerting path and per-unit cgroup directives from §2.5, and must rebuild both in the script and in compose-level `ulimits`/`mem_swappiness`. "Force redeployment / git-wins" may be BE-only — verify on CE.
+
+---
+
+## 10. What would change the ranking
+
+- **OS lands on Ubuntu LTS specifically:** Quadlet needs a Podman the archive doesn't ship (24.04 = 4.9.3, no `Notify=healthy`). If you won't add a backport, Compose (#3) rises.
+- **Operators want a GUI:** Portainer or Komodo v2 rises, accepting Compose lock-in, the root daemon, and the loss of §2.5.
+- **Piri's drain gets shortened** (see §11, first item): the coalescing argument weakens, and a debounced webhook or a Tailscale push becomes attractive again for faster feedback.
+- **You want zero git credential on partner boxes:** the OCI-artifact config path becomes the default node-read mechanism, further favouring #1.
+- **Central control with agent-initiated connections becomes acceptable:** Komodo v2 (PKI auth, outbound Periphery) gets competitive for fleet visibility — but stays Compose-only.
+- **A first-class non-K8s GitOps agent that manages Quadlet natively appears:** would leapfrog the bespoke reconciler. Nothing qualifies today.
+- **OpenBao moves off-box** (if a design change removed it from the read path): Compose's project-level reconcile becomes materially less risky and the gap narrows.
+
+---
+
+## 11. Open questions to verify at implementation time
+
+1. **Can Piri's graceful-shutdown window be shortened for deploys?** It is configurable and defaults to up to 60 minutes. That figure currently sets your deploy cadence _and_ forces the alerting complexity in §7. If 5–10 minutes is safe — with `pdp-gate` handling the proof-window concern independently, which is its whole job — deploys get an order of magnitude cheaper at no cost to correctness. **Highest-value question here.** Needs the Piri team's view on what the long drain protects.
+2. **Which Piri/Ingot settings genuinely need to be boot-time config?** Restart-only config hurts in proportion to churn. Log levels, rate limits, feature flags and tunables should not live in a file read at boot; moving them to a runtime-queryable store (Postgres or OpenBao KV, both already present) turns a restart into a no-op. An application change, but the actual fix.
+3. **Is Ingot's graceful shutdown worth prioritising?** It is the customer-facing S3 endpoint with no graceful shutdown and no reload, so every deploy drops in-flight requests. SDK retries absorb most of it; pre-signed URLs in browsers do not retry at all. This buys more availability than any deployment machinery, and nothing in the deployment layer substitutes for it. Blue/green is foreclosed — two concurrent Ingot instances are documented as undefined behaviour.
+4. **Exact transit-seal token config key / env var** for OpenBao, and whether it can be supplied as a `podman secret` env without appearing in `podman inspect`.
+5. **Central OpenBao availability target and operator** — now the region's boot-time dependency, and the bound on regional recovery time. The key-management RFC leaves this open.
+6. **Does OpenBao's SIGHUP path interact badly with the transit seal?** openbao #2915 reports SIGHUP with a declarative file audit stanza wedging the _gcpckms_ seal client until a full restart. Different seal type, same reload-vs-seal-client interaction class — and the RFC leaves the audit device an open question. If you enable file audit, test SIGHUP against the transit seal explicitly before relying on reload.
+7. **Ingot health check must exercise a real transit unwrap** (§2.3). Confirm Ingot exposes something suitable, or request it.
+8. **Measure the real boot sequence** — boot → network → unseal → OpenBao healthy → Ingot/Piri start — on partner hardware.
+9. **Exact Podman version on the chosen OS**, and thus whether `Notify=healthy` (≥5.0), `ReloadCmd=` (≥5.6), `podman quadlet` (≥5.6) and bootc bound-image GC are all available.
+10. **Portainer CE vs BE** for git-wins force redeployment, if #3 is in play.
+11. **Renovate `packageRules`** for the Piri+Ingot group and the Postgres/OpenBao no-auto-merge policy — validate with a dry run.
+12. **Prototype the OCI-artifact config path** (`oras push`/`pull` with a per-node robot account) and confirm the reconciler can diff and apply from it as cleanly as from git.
+13. **Deadman thresholds** tuned to the real poll interval and worst-case drain; confirm textfile metrics survive reboots under immutable-`/var` semantics.
+
+---
+
+## 12. Caveats
+
+- **Both RFCs are Status: Design**, and the appliance strategy RFC is an unmerged draft (PR #19). The region-wrap amendment is recent (2026-08) and the algorithm already moved once, from A256KW to transit AES-GCM. Re-check before building.
+- **The "OpenBao refuses to start when central is unreachable" behaviour pins to 2.6.1.** Re-verify on your deployed version — a future change from hard-fail to degraded-start would silently remove the startup-kill property this design depends on.
+- **Fast-moving Podman surface.** Podman reached 5.x in 2024 and the 6.0 series in mid-2026 (billed with a major Quadlet overhaul); the last 5-series is 5.8.x. Verify features against the version on your image, and prefer podman-systemd.unit(5) and release notes over any blog post.
+- **The config-hash-in-unit pattern is an adaptation** of the Kubernetes checksum-annotation convention, not a documented Podman or Compose feature. It relies only on documented behaviour (unit files are text; `Annotation=` is a supported key) but exercise it end to end.
+- **The `Notify=healthy` timeout bug (#27290)** was open as of late 2025. Check whether it's fixed on your version, but set `TimeoutStartSec` explicitly regardless.
+- **`podman auto-update` vs digest-pinning are mutually exclusive by design.** Verified against current docs, but re-check the man page in case a digest-aware mode appears.
+- **Ubuntu Podman versions** come from archive packages and can be bypassed with backports; confirm for your exact image.
+- **`caddy.storage.vault` maturity** is a read of a third-party module's activity, not a maintenance commitment — check it yourself if you reject the LUKS/Clevis alternative in §6.
+- **Vendor sources:** Portainer's git-as-source-of-truth framing and the CE/BE split are vendor docs; Komodo capability claims are partly vendor and community; Tailscale's zero-inbound framing is accurate but is their marketing.
+- **Rollback:** the `git revert` model is sound for every recommended pull-based combo, since the node converges to origin. It breaks with `podman auto-update`'s auto-rollback and with any mechanism where local state can diverge from the deploy ref — which is why those are downranked. Nothing here makes a **schema change** safe to roll back; expand/contract migrations are the actual mechanism, and pre-migration snapshots stop scaling in the tens of GB.
+- **Health-check quality bounds everything.** Auto-detection catches only what the health check detects; a container that starts and serves errors reads as a successful deploy under every option here — see §2.3 for the specific instance that now matters.
+- **The reconcile script is an illustrative skeleton.** Deliberately exercise the config-only path, the manual-tier path, and a knowingly-broken image before relying on any of them.
+
+---
+
+# Adopting Komodo v2 for the FilOne Appliance: Concrete Mechanics and an Honest Comparison to the Quadlet + git-timer Baseline
+
+## TL;DR
+
+- **Keep the Podman Quadlet + git-pull systemd-timer + commit-the-digest baseline as the primary CD mechanism for the partner fleet.** Komodo v2's outbound Periphery genuinely satisfies the "no inbound ports" constraint, but adopting it means putting Docker on the box (fighting bootc/FCOS, which ship Podman), running a central Core+MongoDB that can execute arbitrary commands on all 300 nodes, and giving up systemd's ordering, `Notify=healthy`, `ExecStartPre` fail-closed semantics, and journald — for a dashboard and webhook-speed deploys you can approximate more cheaply.
+- **If you want Komodo's benefits, adopt "Alternative 1" (Komodo manages only Piri+Ingot) but understand it is a genuine two-control-plane split**, not a free win: two runtimes (Docker+Podman) on one box with documented iptables/netavark conflicts, two config-delivery paths, and no shared transaction for cross-tier changes. "Alternative 2" (Komodo manages everything) is the cleaner single-runtime story but forces Postgres/OpenBao into a Compose model that loses systemd's guarantees and risks bouncing the database.
+- **Komodo is a fast-moving, effectively single-maintainer project (Maxwell Becker / `mbecker20`).** Several of the exact behaviors you depend on — `pre_deploy` non-zero-exit abort semantics (your `pdp-gate`), config-file-only redeploy via TOML sync (issue #1381), and any automatic rollback — are either unverified in source or known-buggy/absent. Re-verify against the running version at implementation time.
+
+---
+
+## Key Findings
+
+1. **Outbound Periphery is real and production-usable, but Core must be internet-reachable.** In v2 the Periphery agent dials Core over a WebSocket (`wss://<core>/ws/periphery?server=<name>`), authenticated with a Noise-protocol handshake over auto-generated Ed25519 keypairs. All operations — deploys, log streaming, terminal/exec, file access — relay back through that single outbound connection, so the partner VM needs **zero inbound ports** beyond :443 for customer traffic. This is the one hard constraint Komodo clearly satisfies that disqualified Kamal and Ansible-push.
+
+2. **Komodo is Docker-only in practice.** It "uses Docker as the container engine"; Podman is "supported via the podman → docker alias," which in reality means aliasing binaries and bind-mounting `podman.sock` to `docker.sock`. There are open issues about rootless permission failures, SELinux relabeling, and stacks not auto-starting after reboot under Podman. It does **not** manage Quadlet units. This matters enormously on bootc/FCOS, which ship Podman and not Docker.
+
+3. **"Git as source of truth" in Komodo is git → Core's MongoDB → nodes, not git → nodes.** Resource Sync ingests TOML from git into Core's database; the database remains the live control state. This is a _shadow source of truth_ competing with git, unlike the baseline where the git commit that the node pulled _is_ the truth.
+
+4. **The `pdp-gate` fits as a Stack `pre_deploy` SystemCommand — but its fail-closed behavior is unverified.** I could not confirm from source whether a non-zero `pre_deploy` exit actually aborts `docker compose up`. This is the single most important open item and must be tested before relying on it. Compare to `ExecStartPre=` in a Quadlet unit, where non-zero exit reliably fails the unit start (documented systemd behavior).
+
+5. **Komodo has no automatic rollback and does not gate deploy success on health.** `DeployStack` runs `docker compose up -d` (detached) and reports success when containers are _created/started_, not _healthy_. Health is evaluated asynchronously and only produces alerts. There is no revert-to-previous-digest on failure — you get a red status. This is weaker than the baseline's `Notify=healthy` + `TimeoutStartSec` + `OnFailure=`.
+
+6. **Blast radius is the central security objection.** A compromised Komodo Core (or an admin account on it) can execute arbitrary commands on every connected node — 300 boxes. The baseline node holds only a read-only registry robot account and a read-only git pull; worst case is a bad commit that the whole fleet is at least equally exposed to. Komodo's PKI authenticates the channel but does not reduce Core's authority; RBAC/user-groups limit _operator_ accounts but not a Core compromise.
+
+---
+
+## Details
+
+### A. Komodo v2 current state (verified against primary sources)
+
+**Version / cadence / maintainer.** The canonical repo is `moghtech/komodo` (formerly `mbecker20/monitor`), Rust + TypeScript, GPL-3.0, 11.2k stars per the moghtech/komodo GitHub repo (Fork 318, Star 11.2k as shown on the v2.1.x release pages). Komodo v2.0.0 was released by mbecker20 on 24 Mar 2026, per komo.do/docs/releases/v2.0.0 ("v2.0.0 – March 2026"), introducing "Outbound periphery" and "PKI authentication: Core and Periphery now authenticate with auto-generated key pairs and automatic rotation." v2.1.0 was released by mbecker20 on 01 Apr 2026 (23:27), per the GitHub release page; v2.1.1 on 02 Apr, v2.1.2 on 10 Apr; the latest is v2.3.1, released 31 Jul 2026. v2.1.0 added Docker Swarm node management and Swarm stack env-file support; the v2.2.0 GitHub changelog reads "Stack: Allow excluding specific services from Global Auto Update by @mateuszziolkowski" — notably the feature was contributed by an outside contributor, not the maintainer. Development velocity is very high. The project is **effectively single-maintainer** — Maxwell Becker (`mbecker20`), operating as Mogh Technologies Inc. A handful of outside contributors appear in changelogs (`@mvanhorn`, `@mateuszziolkowski`, `@ChanningHe`, `@Dougley`), and a community member describes it as "great software, one maintainer, lot's of work." For a component in the trust path of a 300-node fleet, treat the **bus factor as ~1**.
+
+**Outbound Periphery mechanics.** Periphery is a small, stateless binary receiving commands from Core over a bidirectional WebSocket. In outbound mode it is configured with `core_address` (e.g. `ws://…:9120` or `https://…` fronted by a reverse proxy), `connect_as` (the Server name/hostname), and a one-time `onboarding_key` generated in Core's Settings → Onboarding. On connect, a Noise handshake establishes mutual PKI trust; the private keys live in `/config/keys` (container) or `<root_directory>/keys` (systemd, default `/etc/komodo/keys`) and must be persisted. Everything — deploy, `docker compose logs`, browser terminals (`execute_server_terminal`, `execute_container_terminal`), file browsing — relays over that connection, analogous to K3s's reverse tunnel or `nomad alloc exec`. **No inbound access is required for any operator function.** On network partition, community operators report Periphery entering exponential backoff and sometimes needing `systemctl restart periphery` to reconnect (a known reconnection weakness); crucially, **the containers keep running during a partition — only Komodo visibility/control is lost.** Core **must be internet-reachable** by every Periphery, so hardening Core (2FA/TOTP, OIDC, IP allowlisting on the `/ws/periphery` path via the reverse proxy) is essential.
+
+**Podman support.** Officially "supported via the podman → docker alias." Practically: run Periphery as a container and bind the host's `/run/podman/podman.sock` to `/var/run/docker.sock` (systemd Periphery has no config to change the socket path, per issue #544), alias `podman-compose`→`docker-compose`, and expect to add `security_opt: [label=disable]` to get past SELinux denials on the socket (Discussion #293). Known gaps: stacks don't auto-start on reboot under Podman even with `restart: unless-stopped` (issue #315); rootless is only partially working (issue #974). Issue #448 ("Does Komodo Support Podman Really?") captures the community's uncertainty. **Verdict: Podman works as a tech demo, not as a production substrate you'd bet 300 nodes on.** If you adopt Komodo, plan on Docker.
+
+**Resource Sync / TOML.** Komodo can serialize and reconcile Servers, Stacks, Deployments, Builds, Repos, Procedures, Actions, Alerters, Builders, and ResourceSyncs themselves to/from TOML, sourced from UI, "files on host," or a git repo. Reconciliation (`RunSync`) fetches remote TOML, diffs against Core's database (Create/Update/Delete deltas), orders by dependency, and — by default — surfaces pending changes for **manual confirmation** in the UI. **Managed mode** grants Core full authority: resources matching the sync's filters but absent from TOML are _deleted_. Deployment ordering across servers is expressible via an `after` array (like a cross-server `depends_on`). **This gives real drift detection and a "git wins" force-redeploy semantic — but note the flow is git → Core DB, not git → node.** Core's database remains the live source of truth; TOML is imported into it. A "server with a region label converges automatically" pattern is _achievable_ (declare the Server + its Stacks in TOML, match by tag), but the node still has to be enrolled into Core first (see provisioning below), and auto-execution of syncs has rough edges — in moghtech/komodo issue #1120 a reporter set `deploy = true ... auto_update = true poll_for_updates = true` and noted "When I push changes to GitHub, the webhook triggers correctly" yet the stack did not redeploy.
+
+**Digest pinning & signature verification.** Compose stacks can pin `image: repo@sha256:…` digests natively — that's just Compose, and it works. **There is no built-in cosign/sigstore verification.** You would implement signature verification as a `pre_deploy` SystemCommand (`cosign verify … && exit 0 || exit 1`) — which lands you back on the unverified question of whether a non-zero `pre_deploy` aborts the deploy. In the baseline, cosign verification is a natural `ExecStartPre=` step with well-defined fail-closed behavior.
+
+**Procedures / Actions / hooks.** Procedures compose executions (RunBuild, DeployStack, BatchDeployStackIfChanged, etc.) into sequential stages of parallel steps. Actions are TypeScript scripts against a pre-initialized Komodo API client, schedulable via CRON. Per-stack `pre_deploy`/`post_deploy` are `SystemCommand` fields. **This is where `pdp-gate` lives** (a `pre_deploy` command that shells out to the PDP-window checker). The gap: (a) whether non-zero exit aborts is unverified in source; (b) Discussion #673 confirms hooks currently receive little resource metadata (no stack name in env), so the gate script must be self-sufficient; (c) there is no native "defer and retry later" — you'd emulate it by failing the deploy and relying on the next poll/webhook to re-attempt, which only works if fail-closed abort actually holds.
+
+**Secrets.** Komodo Variables/Secrets are key-value pairs **stored in Core's database**; marking one "secret" hides it from non-admin users and logs but it is still in the DB. Alternatively, `[secrets]` blocks in Core's `config.toml` are queryable-by-key but values are never exposed via API; `[secrets]` in a _Periphery's_ config file are local to that one server and **never traverse the network** — the closest fit to your "node holds minimal, non-exportable" requirement, but it means seeding each node's Periphery config with material, which competes with the OpenBao model. Interpolation (`[[VAR]]`) happens **Core-side before dispatch to Periphery**, meaning secrets transit Core. **Komodo has no OpenBao/Vault integration**; the documented pattern is "use Vault alongside Komodo," typically by having a `pre_deploy`/pre-pull step render secrets (Infisical is shown in issue #324). For your semi-trusted-partner threat model, the cleanest arrangement keeps OpenBao-agent-to-tmpfs exactly as today and does _not_ route regional secrets through Core's DB.
+
+**Per-service selective restart.** `DeployStack` with an explicit service list runs `docker compose up -d <svc1> <svc2>` — so selective restart is possible. Auto-update by default only redeploys services with a new image digest; `auto_update_all_services=true` redeploys the whole project. Services can be excluded from the auto-update set (v2.2.0 feature) or tagged `komodo.skip`. `destroy_before_deploy` runs `docker compose down` first (dangerous for stateful services). **This is the mechanism that would keep Postgres from being bounced under Alternative 2 — but it is opt-in configuration you must get exactly right, versus the baseline where Postgres is simply a different systemd unit that nothing touches.**
+
+**Core footprint / DB / HA.** Per Salt Data Blog's "Managing Docker Across Multiple Servers with Komodo" (updated April 5, 2026): "Resource usage: Low — Core + MongoDB typically under 256 MB RAM combined." Database options, per komo.do/docs/setup: "MongoDB is the recommended database for Komodo. It stores all resource configuration, user accounts, audit logs, and system state ... If you setup Komodo using Postgres or Sqlite options prior to Komodo v1.18.0, you are using FerretDB v1." FerretDB v2 is a MongoDB-compatible shim over Postgres + DocumentDB extension; SQLite and FerretDB v1 were dropped in v1.18.0. **There is no HA story** — Core is a singleton. When Core is down or upgrading, **the fleet's containers keep running**, but you lose deploys, log/terminal access, and drift reconciliation until it returns. Core upgrades touch a database schema (with a documented `km database v1-downgrade` path for the v1→v2 jump).
+
+**CVEs / security surface.** I found **no published CVEs or GitHub security advisories for `moghtech/komodo`** (the "Komodo" CVEs in databases are for an unrelated Komodo CMS and for "Comodo"). Absence of CVEs in a young, single-maintainer project is _not_ evidence of security maturity. The material fact is architectural: **Core can run arbitrary commands (including browser terminals) on every connected node.** Auth to the web UI supports local username/password with TOTP/passkey 2FA, plus OIDC/GitHub/Google. RBAC exists (below) but does not constrain a Core compromise.
+
+**RBAC / scoping.** Permissions are assigned to Users or (preferably) User Groups at four levels — None / Read / Execute / Write — per resource, with additional feature gates (Logs, Terminal, Inspect, Processes). `KOMODO_TRANSPARENT_MODE` flips the default to Read. User Groups can be declared in Resource Syncs for scale. **This meaningfully bounds a compromised _operator_ account** (e.g. an operator with Execute-but-not-Write on only the app-tier stacks on their region's server). **It does not bound a compromised Core**, which is the higher-consequence event.
+
+### B. Komodo on immutable (bootc / Fedora CoreOS) vs mutable (Debian 13 "trixie")
+
+**Periphery install.** Periphery ships as (a) a single static-ish binary installed by `setup-periphery.py` as a systemd unit (default root `/etc/komodo`), or (b) an official container image (`ghcr.io/moghtech/komodo-periphery:2`). Komodo's own docs and the community strongly recommend the **systemd/host binary**, because running Periphery in a container while it must drive the container socket and read/write stack files on the host creates volume-mount and path-translation headaches (Discussions #180, #251). v2 binaries are built against OpenSSL 3 (Debian Bookworm base), so they run on **Debian 13 trixie** fine; they will _not_ run on OpenSSL-1 systems (Bullseye/Ubuntu 20.04) without the container or a self-compile.
+
+- **On Debian 13 (mutable):** straightforward. Install `docker-ce` (Docker's repo) or Debian's `docker.io`, drop the Periphery binary in `/usr/local/bin` via the installer, done. This is the well-trodden path.
+- **On bootc / FCOS (immutable):** two frictions. First, **Periphery-as-host-binary is not image-managed** — putting a binary in `/usr/local/bin` on an ostree system is writable but outside the image, defeating the immutability guarantee; the "correct" bootc approach is to layer it into the image (a `Containerfile` build for bootc, or `rpm-ostree`/Ignition for FCOS) or run containerized Periphery as a Quadlet unit. Second, and larger:
+
+**Docker on bootc/FCOS.** FCOS and Fedora/CentOS bootc images ship **Podman, not Docker**. Getting Docker Engine on requires layering `docker-ce` (or the poorly-maintained `moby-engine`) — on FCOS via an Ignition systemd unit that runs `rpm-ostree override remove docker containerd runc` (or `podman-docker`) then `rpm-ostree install docker-ce docker-ce-cli containerd.io …` and reboots; on bootc via `RUN` steps in the image `Containerfile`. Per the Fedora moby-engine maintenance note (HackMD, @travier): "we will have to recommend to its users on Fedora CoreOS that they either switch to the official Docker packages ... or move to containerd or podman"; see also coreos/fedora-coreos-tracker issue #1723 "Consider dropping moby-engine from the base image." **This is fighting the platform.** It works, and community write-ups exist, but you are permanently swimming upstream on the OS you chose specifically to be boring and image-managed.
+
+**The mixed-runtime problem (Docker + Podman on one box).** This is a documented minefield, not a clean coexistence:
+
+- **Networking:** Docker inserts a `FORWARD` policy DROP plus `DOCKER-USER`/`DOCKER-ISOLATION` chains; Podman's netavark inserts `NETAVARK_FORWARD`/`NETAVARK_INPUT` chains. Verbatim from the Fedora Project Wiki, Changes/NetavarkNftablesDefault: "When using both rootful podman and docker together the podman containers will not have external network connectivity. This is because docker adds a iptables rule to block all forwarding." (Confirmed in podman issue #24486: Docker sets "a policy of DROP on the iptables FORWARD chain.") Fixing it means hand-writing iptables rules or forcing driver alignment. Podman 6.0 is moving off iptables to nftables entirely, adding another moving target.
+- **Storage:** Docker uses `overlay2`; Podman uses `containers/storage`. The same image layers get stored twice — real disk cost on a single-VM appliance.
+- **Cross-boundary service networking:** Caddy under Podman proxying to Ingot under Docker cannot use a shared Compose/pod network; you'd publish Ingot on `127.0.0.1:<port>` and have Caddy reverse-proxy to loopback, or use host networking. Workable, but it's a hand-managed seam exactly where you least want ambiguity (the :443 owner).
+
+**Debian 13 specifics.** Podman 5.4.2 is in trixie (`Notify=healthy` support present; no `podman quadlet` _subcommand_ — Quadlet is driven by generators, not that subcommand, so this is fine). Docker via `docker-ce` or `docker.io`. Komodo-on-Debian is the reference environment in most community guides.
+
+### C. The two alternatives, walked end-to-end
+
+Throughout: the **baseline** for comparison is a pre-baked image (bootc/qcow2) that boots with Quadlet units + a git-pull systemd timer + read-only registry robot + OpenBao agent, converging **unattended** with zero human clicks per node.
+
+#### Alternative 1 — Komodo manages Piri + Ingot only; Quadlet keeps Postgres, Caddy, OpenBao, Alloy
+
+**1. Provisioning a new node.** Partner hands over a VM. FilOne boots it from a pre-baked image whose Ignition/cloud-init (a) lays down the Quadlet units for Caddy/OpenBao/Postgres/Alloy exactly as today, and (b) installs Docker + Periphery. Periphery starts, reads `core_address` + `connect_as` + a **one-time onboarding key**, dials Core, completes the Noise handshake, and appears as a Server. _Which stacks it runs_ can be declared in a Resource Sync keyed by a region tag so the Piri+Ingot stack attaches automatically — but the onboarding key must be seeded per node (via Ignition secret), and privileged onboarding keys can rewrite an existing Server's expected key, so key handling is security-sensitive. **Bootstrap ordering across the boundary is on you:** Compose `depends_on` cannot see the Quadlet-managed OpenBao/Postgres, so Piri/Ingot's Compose services need their own wait-for-readiness (healthcheck-gated entrypoint probing OpenBao's unseal status and Postgres). OpenBao unseal + initial secret material flow through the **existing** OpenBao-agent path — Komodo is not involved, which is good. **Time-to-serving:** comparable to baseline for the infra tier; the app tier adds the Core round-trip and (if not fully sync-automated) a human attaching the stack. **Net: more moving parts than baseline, and at least one security-sensitive per-node secret (onboarding key).**
+
+**2. Image-version bump.** CI builds Piri/Ingot, pushes digests, and commits the pinned digest — but now to **two destinations**: the git repo (infra tier, consumed by the timer) and Komodo (app tier). For the app tier, either CI calls Komodo's API/webhook, or Komodo polls the registry. With outbound Periphery **there is no inbound webhook to the node** — the webhook hits _Core_, and Core pushes `DeployStack` down the existing outbound tunnel. Webhook path: seconds. Poll path: bounded by `KOMODO_RESOURCE_POLL_INTERVAL`. Only the changed service is recreated (`docker compose up -d ingot`). `pdp-gate` runs as `pre_deploy` **if** non-zero-exit abort holds (unverified). **The split-brain risk is real:** a change that must be atomic across tiers — e.g. a Caddyfile route change (Quadlet tier) plus an Ingot bump (Komodo tier) that depend on each other — has **no shared transaction**. Two independent controllers apply two halves on two schedules; you can land in a state where new Ingot is live but Caddy hasn't reloaded, or vice versa. The baseline applies both in one git commit under one reconciler.
+
+**3. Config-file change.** For Caddy/Postgres/OpenBao configs, nothing changes — they flow through the **git-timer path** exactly as today (`git → copy into place → daemon-reload → selective systemctl reload/restart`). So **Komodo buys you nothing for the infra-tier config case.** For Piri/Ingot config: Periphery clones the whole git repo to `repo_dir` on the host and relative bind-mounts work (with systemd Periphery). But **detecting a config-only change is fragile** — Komodo's `DeployStackIfChanged` keys on the compose file / git hash and on `config_files` entries with `requires="Redeploy"`; moghtech/komodo issue #1381 (opened by D-N-Corre, 23 Apr 2026) documents: "config_files entries synced from TOML don't trigger auto-redeploy on git push — even with explicit requires: Redeploy ... The exact same entries added manually via the UI ... DO trigger auto-redeploy." It is now marked Closed but the v2.2.x fix status is unconfirmed. There is no reload-not-restart primitive; a config change recreates the container (or you script `caddy reload`/`pg_ctl reload` as an Action). **Under Alternative 1 the app tier gains little for config changes and inherits a known change-detection footgun.**
+
+#### Alternative 2 — Komodo manages everything as Compose stack(s); no Quadlet (except maybe to bootstrap Periphery)
+
+**1. Provisioning.** Cleanest runtime story: **one runtime (Docker)**, one control plane. Pre-baked image installs Docker + Periphery (Periphery itself ideally a systemd unit or a single Quadlet unit to bootstrap it). Everything else — Caddy, OpenBao, Postgres, Alloy, Piri, Ingot — is Compose services. Ordering can use Compose `depends_on: condition: service_healthy` + healthchecks, so OpenBao-unseal-wait and Postgres-readiness are expressible _within_ the project. **But:** OpenBao unseal still needs its material from somewhere; putting the unseal/KEK path into Compose env or Komodo Variables would route it through Core's DB — **exactly what constraint 6 forbids** — so you keep an OpenBao-agent sidecar pattern anyway. Caddy owning :443 and doing TLS-ALPN-01 works under Docker but now Docker owns the host's :443 NAT rules.
+
+**2. Image-version bump.** Single path: CI → digest → Komodo (webhook to Core → push over tunnel, or poll). Only the changed service recreates _if_ you leave `auto_update_all_services=false`. **The database-bounce risk is the headline hazard:** if a mis-set `auto_update_all_services=true`, a `destroy_before_deploy=true`, or a whole-project `docker compose up` (e.g. because a shared top-level element like a network or `configs:` changed) sweeps the project, **Postgres and OpenBao get recreated.** Prevention is entirely configuration discipline: exclude Postgres/OpenBao from auto-update, never `destroy_before_deploy`, and always deploy Piri/Ingot by explicit service list. This is _achievable_ but it makes the safety of your database a property of getting several opt-in toggles right, versus the baseline where Postgres is a separate systemd unit that the app-tier reconciler structurally cannot touch. `pdp-gate` as `pre_deploy` (abort semantics unverified). **No automatic rollback**; a failed Piri deploy leaves a red status, not a revert. A `git revert` + re-sync rolls forward to the old digest, which is the practical rollback — but it's forward-only reconvergence, not Komodo detecting failure and reverting.
+
+**3. Config-file change.** Now _all_ config (Caddyfile, `postgresql.conf`, `pg_hba.conf`, OpenBao policies, Piri/Ingot TOML) rides the Komodo path: committed to the stack's git repo, cloned to the host by Periphery, bind-mounted. **You inherit the change-detection fragility for everything**, including the most sensitive files. Config-only changes need `config_files` + `requires="Redeploy"` (or `Restart`) wired correctly, and the TOML-sync redeploy bug (#1381) is directly in your path if you drive config declaratively. A Postgres `pg_hba.conf` change would trigger a **container recreate** unless you add an Action to `pg_ctl reload` instead — reimplementing what `systemctl reload postgresql` gives you for free. **This is the case where the baseline is strongest and Komodo weakest.**
+
+---
+
+### Comparison table
+
+| Dimension                        | Quadlet + git-timer (baseline)                                | Komodo — app tier only (Alt 1)                                | Komodo — everything (Alt 2)                                            |
+| -------------------------------- | ------------------------------------------------------------- | ------------------------------------------------------------- | ---------------------------------------------------------------------- |
+| **Git as source of truth**       | Yes — the pulled commit _is_ the truth on the node            | Split: infra tier git-true; app tier git → Core DB → node     | git → Core MongoDB → node (DB is live truth; shadow of git)            |
+| **Config delivery**              | git → copy → daemon-reload → reload/restart                   | Infra: git-timer. App: Periphery clones repo, bind-mount      | Periphery clones repo, bind-mount for all services                     |
+| **Config-only change detection** | Reliable (timer re-applies every tick)                        | Infra reliable; app fragile (#1381, no reload primitive)      | Fragile for all; recreate-not-reload; #1381 risk                       |
+| **Selective restart**            | Native (`systemctl restart <unit>`)                           | Per-service `compose up -d <svc>`                             | Per-service, but whole-project sweep risk to Postgres/OpenBao          |
+| **pdp-gate placement**           | `ExecStartPre=` — documented fail-closed on non-zero          | `pre_deploy` SystemCommand — **abort on non-zero UNVERIFIED** | Same — `pre_deploy`, abort unverified                                  |
+| **Health gating / rollback**     | `Notify=healthy` + `TimeoutStartSec` + `OnFailure=`           | `compose up -d` detached; no health gate; no auto-rollback    | Same; red status only; rollback = forward re-converge                  |
+| **Secrets**                      | OpenBao agent → tmpfs; no sprawl                              | OpenBao unchanged for infra; app secrets risk Core DB         | Risk of routing secrets through Core DB unless kept in OpenBao sidecar |
+| **Inbound ports on node**        | None (git pull + registry pull outbound)                      | None (Periphery dials out)                                    | None (Periphery dials out)                                             |
+| **Credential blast radius**      | Node holds read-only pull + git read; worst case = bad commit | Core can exec on all nodes (app tier) + git-timer creds       | **Core can exec on all 300 nodes** (full box)                          |
+| **bootc/FCOS compatibility**     | Native (Podman + systemd, image-managed)                      | Poor — needs Docker layered in + Docker/Podman coexistence    | Poor — needs Docker layered in (but single runtime)                    |
+| **Moving parts**                 | Fewest (systemd + timer + git)                                | Most (2 runtimes, 2 control planes, 2 config paths)           | Medium (1 runtime, +Core+MongoDB centrally)                            |
+| **Fleet visibility**             | Build it yourself (or none)                                   | Dashboard + logs + terminal for app tier                      | Dashboard + logs + terminal for whole box                              |
+
+---
+
+## Recommendations
+
+**Stage 0 — Default position: keep the baseline for the partner fleet.** For single-node-per-region, singleton, semi-trusted-operator appliances on an immutable OS, the Quadlet + git-timer + commit-the-digest design is better aligned on every hard constraint except "nice dashboard." It keeps blast radius minimal (read-only creds, no central executor), keeps systemd's ordering/`Notify=healthy`/`ExecStartPre` fail-closed semantics that your `pdp-gate` and health-gating depend on, and stays native on bootc. Do **not** adopt Komodo to solve a problem the baseline already solves.
+
+**Stage 1 — Address the actual gap (fleet visibility) cheaply first.** The genuine thing Komodo buys is a "which node is on which version" dashboard, aggregated logs without standing up Loki, and one-off break-glass terminal access. Before adopting a second control plane, close these with lower-blast-radius tools: ship the digest each node is running as a telemetry field through the Alloy path you already have; use Grafana for the version matrix; use your existing outbound telemetry for logs; and keep break-glass as an auditable, outbound-initiated session (e.g. a Tailscale SSH or boundary session) rather than a standing executor.
+
+**Stage 2 — If you still want Komodo, pilot Alternative 1 on Debian 13, not bootc, and only for FilOne's own trust domain first.** Komodo is a materially better fit for **FilOne's own centrally-controlled, fully-trusted infrastructure** than for the semi-trusted partner fleet, because there the "Core can exec everywhere" property is inside your own trust boundary rather than exposing partners to your control plane and vice versa. Run Core with MongoDB, 2FA, OIDC, `/ws/periphery` IP-allowlisted, and per-server RBAC scoping so operators can Execute only their stacks. Manage only the frequently-changing app tier (Piri/Ingot).
+
+**Falsifiable conditions under which Komodo becomes the right call for the partner fleet — all must hold:**
+
+1. **`pre_deploy` non-zero exit provably aborts the deploy** (test it: a `pre_deploy` that `exit 2` must leave the old container running and mark the deploy failed). If it proceeds anyway, `pdp-gate` cannot fail closed and Komodo is disqualified for Piri.
+2. **Config-file-only changes reliably trigger redeploy via your chosen declaration path** (verify #1381's fix in the running version; if you drive config via TOML sync and it silently no-ops, that's a data-integrity hazard).
+3. **You accept Docker on the box** and either abandon bootc/FCOS or commit to maintaining a Docker-layered image and the Docker/Podman networking seam.
+4. **You accept a central Core as a first-class production system** (HA-less singleton, DB backups, schema-migration upgrades, internet-reachable, in the partner trust path) and have a story for Core compromise ≈ fleet compromise.
+5. **The webhook-speed deploy latency is worth the second control plane** — quantify: if merge-to-running on the baseline poll timer is already acceptable (minutes), the seconds Komodo saves rarely justify the cost.
+
+**Benchmarks that would change the recommendation:** a released Komodo version with (a) documented fail-closed `pre_deploy`, (b) native health-gated deploys with auto-rollback to previous digest, (c) first-class Podman/Quadlet support, and (d) a second maintainer / governance beyond one person. Until at least (a)+(b) land, do not put Komodo in front of Piri's restart path.
+
+---
+
+## Caveats (what to re-verify at implementation time)
+
+- **`pre_deploy` abort semantics (highest priority, UNVERIFIED).** Neither docs nor a source quote confirm that a non-zero `pre_deploy` exit aborts `docker compose up`. Test empirically before trusting `pdp-gate` to it. This is the load-bearing assumption for gating Piri restarts.
+- **Config-file redeploy via TOML sync (issue #1381).** Reported broken at v2.1.2, marked closed, **fix in v2.2.x/v2.3.x unconfirmed.** If you drive config declaratively from git, verify a committed config change actually redeploys before relying on it.
+- **No automatic rollback / no health-gated deploy success.** Confirmed from behavior (`compose up -d` detached, async health monitoring). If Komodo adds health-gated deploys later, revisit.
+- **Podman support is second-class and version-sensitive** (issues #544, #315, #974, #448). Podman 6.0's move off iptables may further shift the Docker/Podman coexistence story.
+- **Single-maintainer / bus factor ~1.** Fast-moving means behaviors and defaults change release-to-release (the current line has already reached v2.3.1 as of 31 Jul 2026); pin Periphery/Core versions and read each changelog.
+- **Source-quality flags:** version/architecture facts here are from official docs (komo.do/docs), the GitHub repo/releases, `docs.rs/komodo_client`, and the source-cited DeepWiki. Operational reconnection/backoff behavior and the Docker/Podman coexistence pain are from community blogs (Salt Data, FoxxMD, homelabor.net) and GitHub issues/discussions, not official docs — treat them as strong-but-secondary. The `pre_deploy` behavior and #1381 fix status are explicitly unresolved. No CVEs were found for `moghtech/komodo`, but that is not a security clearance given the project's age and maintainer count.
