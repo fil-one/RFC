@@ -26,12 +26,11 @@ This document proposes how to deploy and operate the appliance.
 4. Upgrades must cause as short downtime as possible. We should aim for zero-downtime upgrades.
 5. Upgrades must honours timing constraints, e.g. we cannot upgrade in the window where the Piri
    node is required to submit a PDP proof.
-6. The deployment should be realised as immutable infrastructure fully driven by code
-   (infrastructure-as-code).
-7. We must pin versions of all services and dependencies, so that we always deploy a combination of
+6. The deployment should be managed using infrastructure-as-code.
+7. We must pin versions of all services, so that we always deploy a combination of
    versions that was tested in staging and is known to work together correctly.
 
-The following services does not support more than one instance running concurrently, therefore upgrades must be implemented as in-place restarts:
+The following services do not support more than one instance running concurrently, therefore upgrades must be implemented as in-place restarts:
 
 - Ingot
 - Piri
@@ -64,19 +63,19 @@ This is the bedrock on which we build the rest of the stack.
 
 ### Operating System
 
-A Linux-based OS with a container runtime (Docker or Podman).
+A minimal Linux-based distro with a container runtime (Podman) and systemd.
 
-Updated infrequently, mostly to apply bugfixes and security patches.
+Updated infrequently, primarily to apply bugfixes and security patches.
 
 Easy to recreate, disposable.
 
 ### Infra Services
 
 - A Postgres-compatible database, with point-in-time backup & recovery
-- A secure secret manager (Vault)
+- A secure secret manager (OpenBao, unsealed using FilOne's central OpenBao instance)
 - Caddy (TLS termination, cert management)
 
-Updated infrequently, mostly to apply bugfixes and security patches.
+Updated infrequently, primarily to apply bugfixes and security patches.
 
 Backed up to an external location (not the control-plane volume).
 
@@ -91,17 +90,436 @@ Updated frequently to ship new features.
 
 - Filecoin JSON RPC API like chain.love
 
-## Hypothesis / Goals
+## Proposal
 
-TBD
+1. Podman + Quadlet for running each infra & app service as a systemd unit.
+1. Config files and pinned image versions tracked in git.
+1. systemd-timer with git-pull script to reconcile.
+1. Rollback is implemented as `git revert` to the previous set of configs & image versions and another deploy.
+1. We can run on any Linux distro with Podman & systemd. If we own the OS, then let's use an immutable image-based OS like Fedora CoreOS or bootc.
 
-## Design
+### We operate the appliance
 
-TBD
+The flow - how are changes deployed:
 
-## Alternatives Considered
+1. A pull request modifies pinned image versions and/or config versions for the staging node
+2. The pull request is merged
+3. The staging node pulls the new commit (timer-based job) and reconciles the services
+4. The staging node dispatches GHA verify workflow
+5. The workflow performs automated end-to-end smoke tests
+   - create a new tenant, create a new access key, create a new bucket, upload/download object, etc.
+6. If the tests pass, the workflow creates a new pull request to update the per-region infra definition files
+   - One pull request per region, so that we can roll out changes incrementally
+   - If there is an already open pull request for the same region, the workflow closes it.
+7. A developer merges the PR for the production region.
+8. The production node pulls the new commit and reconciles the services
+9. (Optionally: the production node dispatches a workflow to run non-destructive end-to-end tests)
 
-TBD
+### Provider operates the appliance
+
+We need a slightly different approach in case the appliance services are operated by the region provider.
+
+Straw-man proposal 1:
+
+1. We add a new directory with image versions & base config files for provider-operated nodes, treat it as a new virtual region.
+1. After the staging deployment passed the tests, the workflow opens a pull request to update that virtual region.
+1. It's up to the region operator to decide when they want to pull the changes & apply them
+
+Straw-man proposal 2:
+
+1. Provider-operated nodes don't use git-based IaaC, they use Docker tags instead.
+2. After the staging deployment passed the tests, if Piri or Ingot has a new image version, the workflow creates a new Docker tag for both Piri & Ingot images, sharing the same version number.
+3. It's up to the appliance operator to watch new Docker image version and apply the updates, e.g. using podman auto-update.
+
+### Why the immutable OS
+
+- Prevents a sloppy operator from breaking the box
+- Prevents [snowflake servers](https://martinfowler.com/bliki/SnowflakeServer.html)
+- Unattended security updates
+- A botched OS update is automatically reverted
+
+## Scenarios / Runbook
+
+### Upgrade Piri or Ingot image version or update their config
+
+Lock-step: one commit bumps both digests and includes any config changes.
+
+**Reconciliation**
+
+1. Pre-pull both images (abort before any restart on failure)
+2. `pdp-gate wait` (paying Piri's drain, up to 60 min)
+3. restart `piri.service` then `ingot.service`, health-gated
+
+**Downstream impact**
+
+- Piri's restart is externally invisible but slow.
+- Ingot drops in-flight requests (no graceful shutdown; SDK retries absorb most, browser pre-signed URLs don't)
+
+**TODOs**
+
+- Improve Ingot to support graceful shutdowns
+- Investigate if Caddy can queue connections while Ingot is restarting
+
+### Update Caddy config
+
+**Reconciliation**
+
+1. Sync configs (directory bind-mount — never a single file)
+2. Check the config hash diff to detect changes
+3. `systemctl reload caddy`; Caddy validates during load, and an invalid config fails the reload leaving the old config serving.
+
+**Downstream impact**
+
+Zero-downtime everywhere; `:443` never closes.
+
+### Upgrade Caddy image version
+
+1. Dependabot PR against the `deps/` shim; `make render` (CI) propagates the pin into the staging
+   unit; GitHub auto-merge enabled for Caddy PRs — the human gate is removed, the staging gate is
+   not.
+2. Staging restarts Caddy (no pdp-gate), health-gated; verify workflow runs.
+
+**Promotion to prod regions is manual, like every other tier**
+
+- A prod Caddy restart closes `:443` briefly, and that downtime is only ever incurred on a human's decision.
+- For a _security_ bump, patch latency now equals human response time, so add an alert on "staging
+  carries a Caddy digest ahead of prod for > N hours" — the promotion stays a choice, but an
+  unpromoted security
+  patch must not be silent;
+
+On merge of the promotion PR, prod nodes restart Caddy on their next tick.
+
+**Downstream impact:**
+
+- ~1–3 s of `:443` closed per node;
+
+Socket activation is what would dissolve the downtime: with systemd owning `:443`, an image
+swap queues connections in the accept backlog instead of refusing them, turning the restart
+from downtime into added latency. This requires verification whether Caddy consumes `LISTEN_FDS`.
+
+Post-restart checks include cert validity headroom, since TLS-ALPN-01 renewal failures are silent
+until expiry.
+
+### Update OpenBao config
+
+Staging reconciler runs `bao-validate`, then `systemctl reload openbao` (SIGHUP).
+
+### Upgrade OpenBao version
+
+Rare, announced, human-gated per node. A restart seals the vault; recovery requires the unseal round-trip to central — a total regional read outage for the duration.
+
+The reconciler does not pull the changes automatically. Instead, we implement a metric & alert to
+let us know when a node is not up to date.
+
+Per node, inside an announced window:
+
+1. Pre-flight cheapest checks first:
+2. Central OpenBao reachable and healthy (never overlap a central maintenance window)
+3. Image pre-pulled;
+4. Raft snapshot taken;
+5. Downgrade/storage-format compatibility already checked in release notes _during staging_.
+6. Optionally stop Ingot for a clean edge.
+7. Human triggers the gated upgrade unit
+8. Wait: start → unseal round-trip → healthy, where healthy = successful transit encrypt/decrypt.
+9. Verify Ingot end-to-end reads; close the window;
+
+Repeat per node — never fleet-parallel, since every one is a full regional read outage.
+
+**Rollback**
+
+Revert the digest in staging → verify → promote the revert; each node's human
+re-triggers the upgrade unit, paying the seal/unseal cost again. If the new version migrated raft
+storage format, rollback is restore-from-snapshot — which is why compatibility is a staging-time
+check, not a prod-incident discovery.
+
+### Update Postgres config
+
+The reconciler does not pull the changes automatically. Instead, we implement a metric & alert to
+let us know when a node is not up to date.
+
+Per node, inside an announced window:
+
+1. Edit in `nodes/staging/`; merge; staging runs `pg_ctl reload` — unconditionally safe;
+   `postmaster`-context params simply don't apply and set `pending_restart`.
+2. The verify suite includes `SELECT count(*) FROM pg_settings WHERE pending_restart;` — **a nonzero
+   count is now visible at verify time, before promotion**, not just as a standing alert. Promote
+   knowing whether a restart window is owed.
+3. Prod nodes reload on their tick; the standing `pending_restart` alert remains the backstop per
+   node.
+
+## Upgrade Postgres patch/minor version
+
+The reconciler does not pull the changes automatically. Instead, we implement a metric & alert to
+let us know when a node is not up to date.
+
+Per node, inside an announced window:
+
+1. pre-flight:
+
+   1. image pre-pulled,
+   2. base backup verified,
+   3. WAL current,
+   4. no long transactions.
+
+2. `systemctl restart postgres.service` from the new digest,
+3. health gate,
+4. Ingot reconnect verified.
+
+**Downstream impact**
+
+- Seconds-to-a-minute of Piri & Ingot metadata errors per node;
+- No cascade (no `Requires=`);
+- Optional clean stop of Ingot for zero error noise — pick one policy fleet-wide so partner-visible behaviour is consistent.
+
+**Rollback**
+
+Patch/minor formats are compatible in both directions in practice — revert in staging, verify,
+promote, re-trigger per node. Release notes still checked for the rare on-disk change, at staging
+time.
+
+**TODOs**
+
+- Verify that Piri and Ingot PG clients handle dropped connections and automatically reconnect after
+  the PG server comes online again
+
+### Upgrade Postgres major version
+
+The one scenario where git revert is not the rollback: the data directory is rewritten; the
+revert path is restore-from-backup.
+
+**The staging run is a full dress rehearsal of the migration, including the restore rehearsal.**
+
+1. **Plan at staging time:** release notes, extension compatibility, `pg_upgrade` vs dump/restore
+   (for a single-node metadata DB, dump/restore is often the honest choice and doubles as a backup
+   test).
+
+2. **Stage:** digest + volume-path change (new data dir `/var/mnt/filone/postgres-<ver>`) in one commit to
+   `nodes/staging/`. Human runs the purpose-built oneshot migration unit on staging:
+
+   1. stop Ingot & Piri,
+   2. old cluster stopped,
+   3. migrate into the new data dir,
+   4. start from the new unit,
+   5. `vacuumdb --analyze-in-stages`,
+   6. real-query verification,
+   7. start Ingot,
+   8. smoke suite.
+
+3. **Promote the files.** Per prod node, inside a long announced pdp-clear window:
+
+   1. fresh base backup restore-rehearsed as part of the window plan;
+   2. disk headroom for two data dirs;
+   3. stop Ingot & Piri deliberately (a window this long as ride-it-out is an error storm);
+   4. run the same migration unit;
+   5. verify;
+   6. start Piri & Ingot only after verification — the point of no return is chosen, not stumbled past.
+
+4. Keep each node's old data dir through an agreed soak; remove via follow-up commit/cleanup.
+
+**Downstream impact:**
+
+Full Piri & Ingot outage per node for the window (tens of minutes, size-dependent).
+
+**Rollback**
+
+Retained old data dir + backups. Writes accepted post-migration are lost on rollback, which is exactly why Ingot & Piri stays down until verification passes.
+
+### Provision a new region
+
+- Enrollment-based provisioning, two OS paths.
+- Nothing per-node is baked into any image.
+- All provisioning logic lives in one idempotent, repo-versioned script, `filone-enroll`; the only per-node input is a **single one-time enrollment token**.
+- Two supported OS paths converge on the same enrolled state:
+
+#### Enrollment
+
+1. Path A — immutable OS
+
+One _generic_ FCOS/bootc qcow2/ISO for the whole fleet, plus a per-node Ignition file:
+
+- hostname/node-id,
+- the `/var/mnt/filone` mount
+- and a oneshot that runs `filone-enroll <token>` on first boot.
+
+Keeps atomic updates, rollback, read-only `/usr`.
+
+2. Path B — mutable OS, already-provisioned VM.
+
+- Ops runs the same `filone-enroll <token>` on the existing box.
+- The script performs what Ignition would have and its prereq check bites harder: **systemd +
+  Podman ≥ 5.0 (`Notify=healthy`), hard-fail otherwise** — Debian 13 (5.4.2) passes, Ubuntu LTS
+  archives do not without a backport.
+
+  Accepted costs, stated so they are chosen and not discovered:
+  - no atomic OS rollback or A/B updates;
+  - OS patching becomes a mutable-OS process with an explicit owner;
+  - bootc bound-images and `/usr`-baked options are unavailable.
+
+#### Provisioning
+
+Everything downstream of enrollment is byte-identical on both paths: units are distro-agnostic and
+all state was already under `/var/mnt/filone`.
+
+**What `filone-enroll` does** (the whole provisioning surface, in one place):
+
+1. prereq check
+2. data directory
+3. `/etc/filone/node-id`
+4. install reconcile script + timer + `filone-bao-bootstrap` oneshot
+5. redeem the enrollment token against central OpenBao (OpenBao response-wrapping: single-use, short-TTL, minted per node)
+6. obtain the secrets from the central OpenBao and seal them into `systemd-creds` (TPM-backed where
+   available, host-key otherwise):
+
+   - git read credential (unless the repo is public?)
+   - registry pull credential (unless the GHCR images are publicly accessible?)
+   - OpenBao seal credential
+
+7. enable the timer.
+
+Nothing app-specific; apps arrive from git on the first tick.
+
+A used or expired token fails loudly; an intercepted token is single-use and therefore noisy, not quiet.
+
+The steps:
+
+1. **Central prep (Terraform):**
+   - Transit seal key + policy + per-node credentials in/around central OpenBao, and mint the **wrapped enrollment token**.
+   - The bootstrap set the token redeems into stays host-bound in `systemd-creds` — never in the local OpenBao (self-bricking rule).
+2. **Repo prep:**
+   - Add `nodes/<newnode>/` on `main` via the promotion script targeted at just this node — the node
+     is born at the current verified-in-staging state, not at whatever staging has half-baked.
+3. **Enroll:**
+
+- Path A — boot the generic image with the node's Ignition + token.
+- Path B — run `filone-enroll <token>` on the provisioned box.
+
+4. **Node phones home outbound (first deploy metric, first journal batch); DNS pointed.**
+
+   No inbound ports, ever, on either path.
+
+5. **First convergence:**
+   - fetch `main`,
+   - validate
+   - pre-pull
+   - install units
+   - start in dependency order.
+
+     OpenBao first: unseal round-trip to central — confirm central reachability (and that the
+     enrollment token hasn't expired) before scheduling.
+6. **Acceptance:**
+
+   - deploy timestamp fresh
+   - OpenBao unsealed and passing a real transit op-
+   - Ingot health exercising transit unwrap
+   - Piri healthy
+   - Caddy serving with first ACME issuance verified.
+
+   Then announce.
+
+## Detecting and troubleshooting a failed deployment
+
+### Detection — three layers, cheapest first
+
+1. **The restart itself fails.**
+
+   `Notify=healthy` + `HealthCmd` + explicit `TimeoutStartSec` means
+   `systemctl restart` returns non-zero if the service never reaches healthy (set the timeout
+   explicitly — bug #27290 — and generously for Piri given the drain).
+
+   The reconciler sees the failure synchronously.
+
+2. **`OnFailure=` on every service unit**
+
+   Fires an alert unit → textfile metric + journald event → Alloy → central Grafana.
+
+   Catches crashes _between_ deploys too, not just during them.
+
+3. **Deadman/staleness alert** on `deploy_last_success_timestamp_seconds`.
+
+   A dead timer, a wedged git fetch, or a quarantine loop all look identical from central: the
+   timestamp goes stale. Threshold must exceed poll interval + worst-case Piri drain (the 15-minute
+   rev-1 value fires on every Piri deploy; size it above ~poll + 60 min until the drain question is
+   resolved).
+
+**TODOs**
+
+We didn't want to run Alloy with access to our Grafana instance. How else can we get alerts?
+
+### Automatic response in the reconciler
+
+_This was suggested by Claude, I am not sure if this is a good idea. Almost certainly not needed for the initial version._
+
+On any failed apply the reconciler:
+
+1. records the bad SHA in a quarantine file so subsequent ticks skip it — no flapping;
+2. reverts the working tree to the last-good SHA and re-applies, restoring the previous units and (because digests are pinned and images aren't aggressively pruned) the previous containers;
+3. emits `deploy_failed{sha=…}` and leaves last-success stale so the deadman fires if nobody acts.
+   Quarantine clears when a _new_ commit lands — the fix is always a new commit (revert or
+   forward-fix), never a manual poke on the node.
+
+Known limits, by design:
+
+- forward-only DB migrations make app-revert insufficient on its own
+- a partial multi-service failure (Piri restarted fine, Ingot didn't) reverts both to keep lock-step
+- and a healthy-but-wrong deployment sails through — health-check quality is the ceiling on everything this layer can catch.
+
+### Troubleshooting sequence (human, after the alert)
+
+#### Where did it stop?
+
+```
+journalctl -u reconcile.service -n 200
+```
+
+The reconciler logs each phase (fetch, validate, pre-pull, per-unit apply). Check the quarantine file for the offending SHA and the exact failed step.
+
+**TODOs**
+
+This requires SSH access to the box. Should we send logs to Grafana instead?
+
+#### Why did the unit fail?
+
+```
+systemctl status <unit>
+journalctl -u <unit> --since <deploy time>
+```
+
+If the container started but failed health:
+
+```
+podman logs <container>
+```
+
+The usual buckets:
+
+- image pull/digest mismatch (registry or credential)
+- config invalid (should have been caught by `quadlet -dryrun` / `caddy validate` / `bao-validate` — if it wasn't, fix the validator too)
+- health-check timing (came up slower than `TimeoutStartSec` — distinguish "broken" from "slow")
+- or a dependency down (OpenBao sealed → Ingot can never go healthy; check unseal status _first_ whenever Ingot fails — it's the common cause with an uncommon-looking symptom)
+
+#### Confirm current state is last-good
+
+- `git -C /var/lib/filone/config rev-parse HEAD` vs the quarantined SHA
+- `systemctl list-units 'filone-*'` all active
+- running digests vs unit digests (`podman inspect --format '{{.ImageDigest}}'`)
+
+#### Fix forward in git
+
+1. Revert or fix on `main`
+2. merge
+3. CI renders
+4. quarantine clears on the new SHA
+5. node converges.
+
+Only if the node itself is wedged (dead timer, corrupted checkout) does anyone touch the box — and
+then only to restart the reconcile timer or re-clone, never to hand-edit units.
+
+#### If the deadman fired without a deploy
+
+- timer dead (`systemctl status reconcile.timer`)
+- git credential expired/revoked
+- egress broken
+- (on bootc only) an OS rollback re-converging against an old app state: check `bootc status` for a rollback whenever node behaviour looks "impossibly old."
 
 ## Open Questions
 
@@ -194,6 +612,61 @@ documentation shows a sample Ansible script.
 ## References
 
 - https://www.thelinuxvault.net/blog/how-to-run-podman-containers-under-systemd-with-quadlet/
+
+## Alternatives Considered
+
+### Close runners-up
+
+**Quadlet + ansible-pull on a timer**
+
+- Requires Ansible on every box, which is awkward on an immutable /usr (layer it or containerize it) and creates version drift across a 30-box fleet
+- `ansible.builtin.systemd_service` daemon-reload is not idempotent, so restart gating needs care to avoid double-restarts
+- More moving parts than a shell reconciler for essentially the same convergence semantics
+
+**Docker Compose + Portainer CE GitOps polling**
+
+- Requires the root Docker daemon plus Portainer itself as persistent moving parts; a real penalty on `bootc`
+- Mixed cadence is project-level, so protecting Postgres/OpenBao from an unintended recreate takes ongoing discipline
+- "Force redeployment / git-wins" is documented as Business-Edition-only in the 2.27 LTS docs — unverified on CE
+- Loses the systemd `OnFailure=` alerting path and per-unit cgroup directiveso
+
+### Evaluated but rejected
+
+**Komodo v2 (Core + Periphery)**
+
+- Compose/Docker-only — does not manage Quadlet, conflicting with the bootc/Podman-native design
+- Core + MongoDB compromise equals fleet-wide arbitrary execution across partner boxes
+- Loses systemd fail-closed semantics and Notify=healthy health gating
+- Key behaviors unverified from primary sources (pre_deploy abort-on-nonzero, critical for pdp-gate) plus issue #1381: config-only changes don't trigger redeploy via TOML sync
+
+**Kamal**
+
+- Mandatory inbound SSH violates the outbound-only trust boundary with partner hardware
+- Its headline zero-downtime advantage dissolves for singleton Piri/Ingot services
+- Weaker immutability story — assumes a mutable host
+
+**podman auto-update + timer**
+
+- Mutually exclusive with digest pinning: `Image=...@sha256:...` never triggers an update, so you'd need floating tags, making the registry — not git — the source of truth
+- Its automatic rollback (re-tag to previous on restart failure) actively fights the git-revert model
+- Ignores config changes entirely
+- Kept only as a rejected CD engine; cosign verification layered independently instead
+
+### Ruled out on category fit
+
+- **Flux / Argo CD**: Kubernetes controllers with no supported non-K8s mode; we had ruled out K8s/K3s.
+- **Harbormaster**: Compose-only, niche, low activity; maintenance status itself a risk. Strictly dominated by Portainer for the same runtime.
+- **bootc bound images / `bootc upgrade` as CD**:binds app images to the OS lifecycle, so it can't express per-service cadences; useful as baseline pinning only.
+- **Watchtower**: archived December 2025; dead upstream.
+
+### Push family
+
+- Long-lived SSH key in a CI secret — inbound port plus a forever-credential in GitHub reaching every box
+- Tailscale ephemeral push — cleanest push option, but node state = last push (weaker git-as-truth), no coalescing for Piri's long drain, and the box joins a central tailnet with the OAuth secret in GitHub
+- OIDC short-lived SSH certs — most secure push, most moving parts (you run a CA)
+- Self-hosted runner on the node — trust inversion: CI identity executing arbitrary code on the partner's box; GitHub's own docs warn against it
+- Webhook receiver on node — needs an inbound port (or tunnel), and per-push firing became a liability once coalescing mattered for Piri's drain
+- Ansible push over SSH — same inbound concerns; ansible-pull dominates it
 
 ---
 
