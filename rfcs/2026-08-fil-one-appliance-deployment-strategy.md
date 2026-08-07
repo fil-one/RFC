@@ -247,7 +247,7 @@ Per node, inside an announced window:
 3. Prod nodes reload on their tick; the standing `pending_restart` alert remains the backstop per
    node.
 
-## Upgrade Postgres patch/minor version
+### Upgrade Postgres patch/minor version
 
 The reconciler does not pull the changes automatically. Instead, we implement a metric & alert to
 let us know when a node is not up to date.
@@ -669,6 +669,8 @@ documentation shows a sample Ansible script.
 - Ansible push over SSH — same inbound concerns; ansible-pull dominates it
 
 ---
+
+# WARNING: RAW NOTES FOLLOW
 
 **THE TEXT BELOW CONTAINS RAW NOTES AND CLAUDE OUTPUT. PROBABLY NOT WORTH READING, BUT A USEFUL CONTEXT FOR CLAUDE.**
 
