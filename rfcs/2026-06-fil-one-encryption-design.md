@@ -117,7 +117,7 @@ Object DELETE destroys every part's row in Ingot's DB. Subsequent GET/HEAD retur
 | ------------------------- | --------------------- | --------------------------- | --------------------------------------- | -------------------------------------------------------------------- |
 | Blob CEK                  | AES-256               | Blob                        | —                                       | Encrypts the blob contents. Constant across regions when replicated. |
 | Region KEK                | AES-256               | Region                      | Region secure storage[^secure-storage]  | Wraps the Blob CEK for the read path.                                |
-| Region-KEK(Blob-CEK)      | A256KW Result         | Region × Blob[^replication] | Region Ingot DB                         | Unwrapped by Ingot to serve read requests.                           |
+| Region-KEK(Blob-CEK)      | AES-256-GCM Result[^region-wrap-gcm] | Region × Blob[^replication] | Region Ingot DB                         | Unwrapped by Ingot to serve read requests.                           |
 | Tenant KEK                | X25519                | Tenant                      | Hilt DB (public key only)               | Wraps the Blob CEK for region-independent recovery.                  |
 | Tenant-KEK(Blob-CEK)      | ECDH-ES+A256KW Result | Blob                        | FEE Header at start of blob, in Forge   | Unwrapped by Hilt for region-independent recovery.                   |
 | Hilt Root KEK             | AES-256               | Hilt (i.e., exactly one)    | Fil One secure storage[^secure-storage] | Seals the KEKs in the Hilt DB.                                       |
@@ -133,6 +133,8 @@ Key types:
 [^secure-storage]: "Secure storage" here refers to a secure secrets manager, such as Vault. It must be able to hold a non-exported key and wrap or unwrap as requested by the local process. Ideally, it wraps an HSM, but a fully-software equivalent is acceptable. This is a policy knob we can tweak according to our relationship with regions and our appetite for precaution.
 
 [^replication]: Replication is not a current concern, so "Region × Blob" is currently the same as "Blob".
+
+[^region-wrap-gcm]: Amended 2026-08: the region wrap is AES-256-GCM performed inside the region's secrets manager, context-bound to (space, blob digest); it was originally specified as A256KW. The tenant wrap and Hilt wraps are unchanged. Rationale and deployment: [RFC: Regional security principles and key management deployment proposal](./2026-08-regional-security-and-key-management.md).
 
 ### The Region DB
 
