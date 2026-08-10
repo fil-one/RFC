@@ -29,6 +29,8 @@ This document proposes how to deploy and operate the appliance.
 6. The deployment should be managed using infrastructure-as-code.
 7. We must pin versions of all services, so that we always deploy a combination of
    versions that was tested in staging and is known to work together correctly.
+8. The process for managing the staging environment must match the process for managing the
+   production environment. Only the configuration and image versions should vary.
 
 The following services do not support more than one instance running concurrently, therefore upgrades must be implemented as in-place restarts:
 
