@@ -201,6 +201,26 @@ scripts/
   # ...
 ```
 
+### Provision a new region
+
+```
+git clone fil-forge/infra fil-one
+cd fil-one
+./scripts/provision-region.sh
+```
+
+What `provision-region.sh` does:
+
+1. Check pre-requisites: systemd + Podman ≥ 5.0 (`Notify=healthy`), hard-fail otherwise.
+1. Start Platform services in dependency order.
+1. Start Forge services in dependency order.
+1. Acceptance:
+   - Deploy timestamp fresh
+   - OpenBao unsealed and passing a real transit op
+   - Ingot health exercising transit unwrap
+   - Piri healthy
+   - Caddy serving with first ACME issuance verified.
+
 ## Post-MVP
 
 ### We operate the appliance
@@ -234,7 +254,9 @@ Straw-man proposal 2:
 
 1. Provider-operated nodes don't use git-based IaaC, they use Docker tags instead.
 2. After the staging deployment passed the tests, if Piri or Ingot has a new image version, the workflow creates a new Docker tag for both Piri & Ingot images, sharing the same version number.
-3. It's up to the appliance operator to watch new Docker image version and apply the updates, e.g. using podman auto-update.
+3. It's up to the appliance operator to watch new Docker image versions and apply the updates, e.g.
+   using podman auto-update.
+4. It's up to the appliance operator to manage their config files and apply any necessary changes.
 
 ## Post-MVP Scenarios & Runbook
 
@@ -427,6 +449,8 @@ Retained old data dir + backups. Writes accepted post-migration are lost on roll
 
 #### Enrollment
 
+**This section contains proposal from Claude. The one-time enrolment token and node-id may be unnecessary complications.**
+
 1. Path A — immutable OS
 
 One _generic_ FCOS/bootc qcow2/ISO for the whole fleet, plus a per-node Ignition file:
@@ -479,13 +503,15 @@ The steps:
 1. **Central prep (Terraform):**
    - Transit seal key + policy + per-node credentials in/around central OpenBao, and mint the **wrapped enrollment token**.
    - The bootstrap set the token redeems into stays host-bound in `systemd-creds` — never in the local OpenBao (self-bricking rule).
+
 2. **Repo prep:**
    - Add `nodes/<newnode>/` on `main` via the promotion script targeted at just this node — the node
      is born at the current verified-in-staging state, not at whatever staging has half-baked.
+
 3. **Enroll:**
 
-- Path A — boot the generic image with the node's Ignition + token.
-- Path B — run `filone-enroll <token>` on the provisioned box.
+   - Path A — boot the generic image with the node's Ignition + token.
+   - Path B — run `filone-enroll <token>` on the provisioned box.
 
 4. **Node phones home outbound (first deploy metric, first journal batch); DNS pointed.**
 
@@ -500,6 +526,7 @@ The steps:
 
      OpenBao first: unseal round-trip to central — confirm central reachability (and that the
      enrollment token hasn't expired) before scheduling.
+
 6. **Acceptance:**
 
    - deploy timestamp fresh
