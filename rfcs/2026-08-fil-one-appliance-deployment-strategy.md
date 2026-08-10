@@ -35,7 +35,7 @@ The following services do not support more than one instance running concurrentl
 - Ingot
 - Piri
 - Postgres
-- Vault
+- Vault/OpenBao
 - Caddy
 
 Zero-downtime upgrades are not possible now, this remains an aspirational future goal.
@@ -46,9 +46,8 @@ Our stack can be organised into the following layers:
 
 1. Hardware
 1. Operating System
-1. Infra Services
+1. Platform Services
 1. Forge Services
-1. External Dependencies
 
 It is not yet clear who will operate which layer - FilOne or the region operator.
 
@@ -69,11 +68,12 @@ Updated infrequently, primarily to apply bugfixes and security patches.
 
 Easy to recreate, disposable.
 
-### Infra Services
+### Platform Services
 
-- A Postgres-compatible database, with point-in-time backup & recovery
+- A Postgres-compatible database
 - A secure secret manager (OpenBao, unsealed using FilOne's central OpenBao instance)
 - Caddy (TLS termination, cert management)
+- Filecoin RPC API node (Lotus, Forest). Can be initially replaced with an external provider like chain.love.
 
 Updated infrequently, primarily to apply bugfixes and security patches.
 
@@ -86,17 +86,122 @@ Backed up to an external location (not the control-plane volume).
 
 Updated frequently to ship new features.
 
-### External Dependencies
-
-- Filecoin JSON RPC API like chain.love
-
 ## Proposal
 
 1. Podman + Quadlet for running each infra & app service as a systemd unit.
 1. Config files and pinned image versions tracked in git.
 1. systemd-timer with git-pull script to reconcile.
 1. Rollback is implemented as `git revert` to the previous set of configs & image versions and another deploy.
-1. We can run on any Linux distro with Podman & systemd. If we own the OS, then let's use an immutable image-based OS like Fedora CoreOS or bootc.
+1. We can run on any Linux distro with Podman & systemd.
+1. Post-MVP: If we own the OS, then let's use an immutable image-based OS like Fedora CoreOS or bootc.
+
+### Why the immutable OS
+
+- Prevents a sloppy operator from breaking the box
+- Prevents [snowflake servers](https://martinfowler.com/bliki/SnowflakeServer.html)
+- Unattended security updates
+- A botched OS update is automatically reverted
+
+## MVP
+
+For the next few weeks to months, we prioritize time-to-market over robustness and scalability.
+
+### OS & Platform
+
+We expect very little if any upgrades of the OS and platform services: only critical bug fixes and
+security patches.
+
+We will upgrade these components manually in a scheduled maintenance window, by following Runbook
+instructions.
+
+A longer downtime of 30-60 minutes is acceptable.
+
+See the post-MVP sections for more details, we will implement a trimmed-down process for MVP:
+
+- [Update Postgres config](#update-postgres-config)
+- [Upgrade Postgres patch/minor version](#upgrade-postgres-patchminor-version)
+- [Update Caddy config](#update-caddy-config)
+- [Upgrade Caddy image version](#upgrade-caddy-image-version)
+- [Update OpenBao config](#update-openbao-config)
+- [Upgrade OpenBao version](#upgrade-openbao-version)
+
+### Forge Services
+
+We expect to upgrade Forge services at most once per week, during a scheduled
+maintenance window. There will be no continuous deployment for every git commit.
+
+Docker image versions will be pinned to a specific SHA.
+
+Promotion (staging -> region N) will implemented as an automated script triggered manually by a
+developer.
+
+The deployment process will be implemented as an automated script, but it will be started by a
+developer and use an SSH session on the target machine.
+
+1. git-pull the latest configuration
+1. pre-pull both images (abort before any restart on failure)
+1. `pdp-gate wait` (paying Piri's drain, up to 60 min)
+1. restart `piri.service` then `ingot.service`, health-gated
+
+See the prototype implementation in [smelt#11](https://github.com/fil-forge/smelt/pull/11).
+
+**Downstream impact**
+
+- Piri's restart is externally invisible but slow.
+- Ingot drops in-flight requests (no graceful shutdown; SDK retries absorb most, browser pre-signed URLs don't)
+
+**TODOs**
+
+- Rework Piri & Ingot config schemes so that secrets are stored in external files or Vault/OpenBao.
+- Improve Ingot to support graceful shutdowns
+- Investigate if Caddy can queue connections while Ingot is restarting
+
+### Implementation details
+
+We will create a new GitHub repository (`fil-forge/infra`) with the following layout:
+
+```
+staging/
+  central/
+    # centralised services (Hilt, Sprue) & their dependencies
+    # out of scope of this RFC
+  eu-central-3/
+    platform/
+      postgres/
+        # config & image version
+      openbao/
+        # config & image version
+      caddy/
+        # config & image version
+      lotus/
+        # config & image version
+    forge/
+      piri/
+        # config & image version
+      ingot/
+        # config & image version
+production/
+  central/
+    # centralised services (Hilt, Sprue) & their dependencies
+    # out of scope of this RFC
+  us-west-1/
+    platform/
+      # ...
+    forge/
+      # ...
+scripts/
+  # provision a new region (install platform services, install Forge)
+  provision-region.sh
+  # upgrade Piri & Ingot in the given region
+  reconcile-region.sh
+  # run end-to-end tests against the given region
+  test-region.sh
+  # promote staging versions & configs to the given region
+  upgrade-region.sh
+  # ...
+```
+
+## Post-MVP
 
 ### We operate the appliance
 
@@ -131,14 +236,7 @@ Straw-man proposal 2:
 2. After the staging deployment passed the tests, if Piri or Ingot has a new image version, the workflow creates a new Docker tag for both Piri & Ingot images, sharing the same version number.
 3. It's up to the appliance operator to watch new Docker image version and apply the updates, e.g. using podman auto-update.
 
-### Why the immutable OS
-
-- Prevents a sloppy operator from breaking the box
-- Prevents [snowflake servers](https://martinfowler.com/bliki/SnowflakeServer.html)
-- Unattended security updates
-- A botched OS update is automatically reverted
-
-## Scenarios / Runbook
+## Post-MVP Scenarios & Runbook
 
 ### Upgrade Piri or Ingot image version or update their config
 
@@ -154,11 +252,6 @@ Lock-step: one commit bumps both digests and includes any config changes.
 
 - Piri's restart is externally invisible but slow.
 - Ingot drops in-flight requests (no graceful shutdown; SDK retries absorb most, browser pre-signed URLs don't)
-
-**TODOs**
-
-- Improve Ingot to support graceful shutdowns
-- Investigate if Caddy can queue connections while Ingot is restarting
 
 ### Update Caddy config
 
@@ -206,7 +299,8 @@ Staging reconciler runs `bao-validate`, then `systemctl reload openbao` (SIGHUP)
 
 ### Upgrade OpenBao version
 
-Rare, announced, human-gated per node. A restart seals the vault; recovery requires the unseal round-trip to central — a total regional read outage for the duration.
+Rare, announced, human-gated per node. A restart seals the vault; recovery requires the unseal
+round-trip to central — a total regional read outage for the duration.
 
 The reconciler does not pull the changes automatically. Instead, we implement a metric & alert to
 let us know when a node is not up to date.
@@ -2040,7 +2134,7 @@ The user explicitly asks whether layers can use different tools. General princip
 
 - **TF (central) + Packer image + ansible-pull (OS/infra) + Quadlet/Compose (app).** Mental models: 4 (TF, Packer, Ansible, Podman/systemd). Industry-standard combination; the seams are well-understood. Drift: TF (central), ansible-pull (in-VM OS/infra), Quadlet auto-update (app). **Seam risk:** ansible-pull and Quadlet must not both manage the same unit files — give ansible-pull ownership of _writing_ Quadlet files and let systemd/podman own runtime. Verdict: **coherent, recommended baseline.**
 - **TF + cloud-init (stock distro) + ansible-pull + Kamal.** Same as above but Kamal for app — **reject** (C1: inbound SSH + singleton). Drop Kamal, use Quadlet.
-- **TF + Nomad for everything above the OS.** Mental models: 2-3 (TF, Nomad, +Vault/Consul). Cleanest HashiCorp-stack story; Nomad owns app _and_ can run infra services as jobs. Seam risk low (one control plane). Drift: TF central, Nomad reconciles jobs. Verdict: **coherent; the "all-in on HashiCorp" path.** Best at ≥30 regions.
+- **TF + Nomad for everything above the OS.** Mental models: 2-3 (TF, Nomad, +Vault/Consul). Cleanest HashiCorp-stack story; Nomad owns app _and_ can run platform services as jobs. Seam risk low (one control plane). Drift: TF central, Nomad reconciles jobs. Verdict: **coherent; the "all-in on HashiCorp" path.** Best at ≥30 regions.
 - **bootc/FCOS retained for OS, "no package layering" rule relaxed, + TF central.** The _minimal_ relaxation: keep A/B rollback (the thing you'd otherwise rebuild), allow a little package layering for e.g. a kernel module or a debug tool, Terraform for central only. Mental models: 2 (rpm-ostree/bootc, TF). **This is the lowest-regret way to honour the user's request without throwing away unattended rollback** — it relaxes immutability _just enough_ to add packages while keeping the safety net. Verdict: **strongly worth considering; arguably the sweet spot.**
 - **NixOS (OS+infra) + containers (app).** Mental models: 2 (Nix, containers) but Nix is a heavy one. Everything-as-code, rollback native. Seam: Nix can _also_ declare the containers (oci-containers module) — tempting to unify, but then app cadence is coupled to nixos-rebuild. Better to let Nix own OS/infra and Quadlet/Podman own the fast-moving app. Verdict: **coherent and elegant iff the team pays the Nix tax.**
 - **K3s + Flux on a mutable distro.** Mental models: 2-3 (K8s, Flux, distro) but K8s is heavy. Everything reconciled via GitOps; drift self-heals. Seam risk: the distro's own updates (kernel/podman) sit _below_ K8s and aren't managed by Flux — you still need a host-update story (unattended-upgrades or a snapshot layer). Verdict: **only if you want K8s for its own sake.**
@@ -2158,7 +2252,7 @@ That yields three placements, and **choosing between them is how each layer gets
 
 **OS — kernel, libraries, container runtime.** There is no package-level update path and, importantly, **no separate runtime update path**: kernel, systemd, glibc, podman and crun all ship inside one image, so "update Podman" _is_ "update the OS". Flow: zincati or `bootc-fetch-apply-updates.timer` fetches the new release → rpm-ostree/bootc stages it into the inactive slot → **stage but do not auto-reboot** → `pdp-gate` clears → reboot in the scheduled window → greenboot health-checks on boot, and failure boots the previous deployment unattended. Cadence: days, batched — the batched CVE tier unchanged. Rollback: automatic, unattended, and the property the mutable-distro option obliges you to rebuild. Discipline: no layering, no kexec, no live patching.
 
-**Infra services — Postgres, Vault, Caddy.** Mechanically a tag or digest change plus a unit restart, but all three want different handling and treating them as one group was the error corrected in §F3. Auto-update selection is **by label only**: Podman checks only containers carrying `io.containers.autoupdate`, ignores unlabelled ones, and a single run acts on every labelled container. **Label discipline is therefore the tier boundary.** Caddy owns `:443` and the ACME account state; Postgres carries the major-version data-directory trap; Vault should not be durable on the box at all.
+**Platform services — Postgres, Vault, Caddy.** Mechanically a tag or digest change plus a unit restart, but all three want different handling and treating them as one group was the error corrected in §F3. Auto-update selection is **by label only**: Podman checks only containers carrying `io.containers.autoupdate`, ignores unlabelled ones, and a single run acts on every labelled container. **Label discipline is therefore the tier boundary.** Caddy owns `:443` and the ACME account state; Postgres carries the major-version data-directory trap; Vault should not be durable on the box at all.
 
 **Forge services — Piri, Ingot.** The fast tier, as already corrected in the RFC's Piri review: CI builds `CGO_ENABLED=0`, cosign-signs, pushes; promotion moves the `:prod` channel tag; on-box `filone-upgrade.timer` fires every 15 minutes → `pdp-gate` → `snapshot-piri-db` → `podman auto-update --rollback`, with `podman-auto-update.timer` masked so nothing runs ungated. `Notify=healthy` (no sd_notify in the tree, and it is what makes `--rollback` fire on a bad image), `StopTimeout=300` / `TimeoutStopSec=330`, and acceptance defined as one proof submitted on the new version rather than the unit going active. Signature enforcement via `/etc/containers/policy.json` means a partner-swapped image will not start.
 
@@ -2239,7 +2333,7 @@ These are RFC-level bugs the discussion surfaced. None of them depend on the mut
 **Per layer, given "mutable but code-driven, Terraform-preferred":**
 
 - **OS — take the minimal relaxation first.** Section F makes this the default rather than a footnote: **keep bootc/FCOS and relax only the no-layering rule.** You retain unattended A/B rollback, and you keep the placement lever (§F1) that lets each layer have its own cadence with no additional tooling. If you do leave, pick **one** distro with native near-unattended rollback — first choice **openSUSE Leap Micro/MicroOS (btrfs+snapper boot-into-snapshot)**, strong alternative **Ubuntu 24.04 + snapshot.ubuntu.com** (best R7 story) _with_ a ZFS-BE or snapper layer added; do not run Ubuntu without a rollback layer. **Do not adopt live kernel patching as a headline feature** — take Livepatch only because it rides along with Ubuntu Pro, and skip paid TuxCare for this workload.
-- **Infra services (Postgres/secrets/Caddy):** Keep on the same runtime as the app (Quadlet units in `/etc`), Caddy as the long-lived :443 owner via TLS-ALPN-01, secrets rendered short-lived into tmpfs from central Vault/OpenBao. Do **not** run durable Vault in the partner VM. **Do not bake Caddy or Postgres into the OS image** (§F3): leave both unlabelled for auto-update and give each its own gated upgrade unit — Caddy's reactive on a security bump, Postgres's hand-invoked inside a planned window with a rehearsed restore. Chase socket activation for the proxy if Caddy supports `LISTEN_FDS`.
+- **Platform services (Postgres/secrets/Caddy):** Keep on the same runtime as the app (Quadlet units in `/etc`), Caddy as the long-lived :443 owner via TLS-ALPN-01, secrets rendered short-lived into tmpfs from central Vault/OpenBao. Do **not** run durable Vault in the partner VM. **Do not bake Caddy or Postgres into the OS image** (§F3): leave both unlabelled for auto-update and give each its own gated upgrade unit — Caddy's reactive on a security bump, Postgres's hand-invoked inside a planned window with a rehearsed restore. Chase socket activation for the proxy if Caddy supports `LISTEN_FDS`.
 - **App (Piri/Ingot):** **Podman Quadlet + `podman auto-update`** as the default, driven by the gated `filone-upgrade.timer` with `podman-auto-update.timer` masked. Migrate to **Nomad client-only** at the ~30-region inflection _if_ FilOne wants a declarative, Terraform-submittable fleet control plane and will run the servers. **Reject Kamal.**
 - **Alloy — the one thing worth binding.** bootc's own stated use cases for bound images are log forwarders, monitoring, config-management agents and security agents, which describes Alloy exactly, and binding guarantees it is present at boot without working networking — the property that matters most during the outages you want telemetry for. Bind Alloy; keep Caddy floating. These are consistent positions, not a contradiction: bind what should be slow and must always be present, float what must be patched in hours.
 - **Terraform:** central resources only (DNS, Vault/OpenBao, Grafana Cloud, registry, inventory); Terragrunt for per-region state now, evaluate Stacks at ~30 regions on HCP. Terraform should **not** reach into the partner box; use the Nomad provider (talk to the orchestrator API) if you want Terraform-driven app deploys.
