@@ -86,7 +86,8 @@ Split the components into three Terraform workspaces:
    - signing-service
    - plc
 
-This allows us to scope changes and limit their blast radius - a mistake in apps configuration will not accidentally drop or recreate the DB server.
+This gives us faster deployments for typical changes that touch only the apps, as Terraform planner
+does not need to check ~60 platform resources.
 
 **Terraform Modules**
 
