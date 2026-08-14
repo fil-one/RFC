@@ -31,7 +31,7 @@ Appliance.
 The following requirements are out of the scope of the initial version:
 
 1. Zero-downtime upgrades
-2. High availability / no single points of failures.
+2. High availability / no single points of failure.
 3. Multi-region deployment.
 4. Local Lotus node providing Filecoin RPC
 
@@ -54,7 +54,7 @@ Adopt a cloud-native architecture that allows us to push a lot of the operationa
 while preventing a vendor lock-in that would make it difficult to migrate to a different cloud
 provider or onprem.
 
-- Run all Forge services as idenpendent OCI containers on AWS ECS Fargate
+- Run all Forge services as independent OCI containers on AWS ECS Fargate
 - A single Postgres on AWS RDS, shared by all services, with one database per service for isolation
 - OpenBao running on AWS ECS Fargate, unsealed automatically using AWS KMS
 - AWS S3 for sprue
@@ -83,7 +83,7 @@ Split the components into three Terraform workspaces:
    - hilt
    - swarf
    - delegator
-   - signing-service
+   - piri-signing-service
    - plc
 
 This gives us faster deployments for typical changes that touch only the apps, as Terraform planner
@@ -111,7 +111,7 @@ provisioning a new deployment.
 
 Terraform files for Forge Central will live in a dedicated GitHub repository - https://github.com/fil-forge/infra-central.
 
-Every commit landed to the `main` branch in this repository will trigge `terraform plan` and
+Every commit landed to the `main` branch in this repository will trigger `terraform plan` and
 `terraform apply` for the dev workspaces (platform, apps).
 
 We will create GitHub Actions-based pipeline to automatically promote changes from individual
@@ -130,14 +130,14 @@ Rejected: SST's main focus is on serverless projects written in TypeScript.
 Rejected:
 
 - Feature gaps:
-  - Storoku models one public HTTP service per repository, with its own VPC, ECS cluster, ALB, and so on. Our project is seven services sharing one stage.
+  - Storoku models one public HTTP service per repository, with its own VPC, ECS cluster, ALB, and so on. Our project is six services sharing one stage.
   - We need to fetch secrets from SSM and write them to config files when services start. Storoku has no entryPoint/command override; nothing writes secrets to files.
-  - Storoku hardcodes the healtcheck enpoint, while Forge services use multiple different paths
+  - Storoku hardcodes the healthcheck endpoint, while Forge services use multiple different paths.
   - No general-purpose Lambda we could use to provision secrets
   - Autoscaling with blue/green deployments is not compatible with our DB migrations that require `desired_count = 1`
 - Storoku adds another layer of abstraction that both humans and coding agents would need to learn.
 - Coding agents can handle the verbosity of Terraform for us, there is less need for prefabricated resource bundles.
-- Storoku is not maintaned. The only bugfixes and improvements we will get are those we make ourselves.
+- Storoku is not maintained. The only bugfixes and improvements we will get are those we make ourselves.
 
 However, we will review the best practices and security hardening that went into Storoku and apply
 it to our Terraform projects.
@@ -149,7 +149,7 @@ Rejected? Discussing this on Slack.
 Pulumi has two main advantages:
 
 - We can use our language of choice (Go) instead of HCL, which makes it easier to create reusable components.
-- We can write unit test for our infrastructure definitions and run them as part of regular "go test" workflow.
+- We can write unit tests for our infrastructure definitions and run them as part of regular "go test" workflow.
 
 It also comes with downsides:
 
@@ -160,7 +160,7 @@ It also comes with downsides:
   Node.js to our dependencies. (Adding Node.js is not a big deal to me, but it's a bit ugly.)
 
 - If we want to use Pulumi Cloud, it's yet another service to procure, and they charge per resource
-  managed (not per-seat/per-run as Hashicorp), which get expensive as the stack grows. (I am not
+  managed (not per-seat/per-run as HashiCorp), which get expensive as the stack grows. (I am not
   sure if this is applicable to us, though.) The alternative is DIY backend on S3 + KMS. We will
   lose RBAC beyond S3 bucket IAM, no web UI, no deployment history view.
 
