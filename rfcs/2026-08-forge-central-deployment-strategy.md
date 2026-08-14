@@ -160,7 +160,7 @@ It also comes with downsides:
   Node.js to our dependencies. (Adding Node.js is not a big deal to me, but it's a bit ugly.)
 
 - If we want to use Pulumi Cloud, it's yet another service to procure, and they charge per resource
-  managed (not per-seat/per-run as HashiCorp), which get expensive as the stack grows. (I am not
+  managed (not per-seat/per-run as HashiCorp), which gets expensive as the stack grows. (I am not
   sure if this is applicable to us, though.) The alternative is DIY backend on S3 + KMS. We will
   lose RBAC beyond S3 bucket IAM, no web UI, no deployment history view.
 
