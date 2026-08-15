@@ -30,7 +30,7 @@ Start sessions from the workspace directory. That gives every machine the same k
 
 ## Generated writing sounds like us
 
-[knowledge-base/writing-style.md](https://github.com/fil-one/knowledge-base/blob/main/writing-style.md) is the FilOne Standard: the writing rules for anything reader-facing, because reading overly-AI-flavored prose is getting to be significant cognitive overhead to work, and costs us credibility for anything external. AGENTS.md imports the rules into every session started from the workspace, and setup.sh also installs them as the FilOne Standard output style, so commit messages, PR descriptions, docs, and plain terminal replies follow them too. On a new workspace the style is the default; if you already have a `.claude/settings.local.json`, the script leaves it alone and prints the line to add. Rule changes go to knowledge-base by PR; pull your clone and re-run setup.sh to pick them up.
+[knowledge-base/writing-style.md](https://github.com/fil-one/knowledge-base/blob/main/writing-style.md) is the FilOne Standard: the writing rules for anything reader-facing, because reading overly-AI-flavored prose is getting to be significant cognitive overhead at work, and costs us credibility for anything external. AGENTS.md imports the rules into every session started from the workspace, and setup.sh also installs them as the FilOne Standard output style, so commit messages, PR descriptions, docs, and plain terminal replies follow them too. On a new workspace the style is the default; if you already have a `.claude/settings.local.json`, the script leaves it alone and prints the line to add. Rule changes go to knowledge-base by PR; pull your clone and re-run setup.sh to pick them up.
 
 ## AGENTS.md in every repo
 
