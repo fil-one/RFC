@@ -15,7 +15,7 @@ We lean hard on AI tools now, and each of us wired them up alone. I propose we s
 
 ## Where we are
 
-Most first drafts, code and prose, start machine-written now. What the tools know still depends on whose machine they run on. Ten of our fifty repos give agents guidance every tool can read, and two more are half-converted; six keep it in a `CLAUDE.md` only Claude sees; thirty-two offer nothing at all. The shared knowledge base and the writing rules reach a session only if that laptop happens to be wired for them. The same task run by two of us produces different code and different-sounding prose, and what any of us learns about making the tools good stays on one machine. 
+Most first drafts, code and prose, start machine-written now. What the tools know still depends on whose machine they run on. Ten of our fifty repos give agents guidance every tool can read, and two more are half-converted; six keep it in a `CLAUDE.md` only Claude sees; thirty-two offer nothing at all. The shared knowledge base and the writing rules reach a session only if that laptop happens to be wired for them. The same task run by two of us produces different code and different-sounding prose, and what any of us learns about making the tools good stays on one machine.
 
 ## One bootstrap script
 
