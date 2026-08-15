@@ -2,7 +2,7 @@
 
 **Status:** Proposal
 **Author:** Hannah Howard
-**Audience:** FilOne engineers
+**Audience:** Fil One engineers
 **Date:** 2026-08-12
 
 ## TL;DR
