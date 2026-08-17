@@ -144,16 +144,17 @@ it to our Terraform projects.
 
 **[Pulumi](https://www.pulumi.com/)**
 
-Rejected? Discussing this on Slack.
+Rejected.
 
 Pulumi has two main advantages:
 
 - We can use our language of choice (Go) instead of HCL, which makes it easier to create reusable components.
 - We can write unit tests for our infrastructure definitions and run them as part of regular "go test" workflow.
 
-It also comes with downsides:
+However, the downsides outweigh them:
 
-- We are already using Terraform to manage FilOne Cloudflare domains; we will end up having both Terraform and Pulumi in our toolbelt.
+- We are already using Terraform to manage FilOne Cloudflare domains; we will end up having both
+  Terraform and Pulumi in our toolbelt.
 
 - Pulumi is primarily TypeScript. Some plugins like awsx require Node.js runtime even if we describe
   our Pulumi resources in Go. Either we will be limited to core features only, or we have to add
