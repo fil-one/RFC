@@ -23,7 +23,7 @@ Proposal for service identities/URLs in the Forge network.
 
 We run these services in staging but typically they are run by a 3rd party:
 
-- `did:web:staging.eu-central-3.s3.fil-forge.com` (Ingot)
+- `did:web:staging.eu-central-3.s3.filonecontent.com` (Ingot)
 - `did:key:z...` `https://staging.piri-0.fil-forge.com` (Piri)
 
 ### Production
@@ -37,5 +37,5 @@ We run these services in staging but typically they are run by a 3rd party:
 
 Multiple of these run by 3rd parties:
 
-- `did:web:<REGION>.s3.<FORGE_DOMAIN>` (Ingot)
+- `did:web:<REGION>.s3.filonecontent.com` (Ingot)
 - `did:key:z...` `https://piri.<PROVIDER_DOMAIN>` (Piri)
