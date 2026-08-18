@@ -37,5 +37,5 @@ We run these services in staging but typically they are run by a 3rd party:
 
 Multiple of these run by 3rd parties:
 
-- `did:web:<REGION>.s3.<DOMAIN>` (Ingot)
-- `did:key:z...` `https://piri.<DOMAIN>` (Piri)
+- `did:web:<REGION>.s3.<FORGE_DOMAIN>` (Ingot)
+- `did:key:z...` `https://piri.<PROVIDER_DOMAIN>` (Piri)
