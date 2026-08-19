@@ -7,13 +7,13 @@
 
 ## TL;DR
 
-We lean hard on AI now, and each of us wired it up alone. This RFC sets the conventions for how we work with AI: the writing standard, the guidance agents get, and how AI-built code ships and gets reviewed. It supersedes [dedicated review time and stacked PRs](2026-07-review-time-and-stacked-prs.md); the norms live here, and that document keeps the evidence and the tooling evaluation.
+We lean hard on AI now, and each of us wired it up alone. This RFC sets the conventions for how we work with AI: the writing standard, the guidance agents get, and how AI-built code ships and gets reviewed. It incorporates the norms from [dedicated review time and stacked PRs](2026-07-review-time-and-stacked-prs.md) and supercedes that RFC. The original document remains to keep the evidence and the tooling evaluation.
 
-1. **One writing standard.** Everyone adopts the FilOne Standard as the base of their writing style, however they want to do it. The recommended path is [workspace-setup](https://github.com/fil-one/workspace-setup). A required install waits for a monorepo.
+1. **One writing standard.** Everyone adopts the FilOne Standard as the base of their writing style, however they want to do it. The recommended path is [workspace-setup](https://github.com/fil-one/workspace-setup). You're welcome to customize the style to your liking but begin there.
 2. **Readable prose is the author's job.** If a teammate ships you clearly unintelligible AI-generated text, you are fully empowered to hold them accountable.
 3. **One home for agent guidance.** Every repo carries an `AGENTS.md`, and `CLAUDE.md` is the one-line import `@AGENTS.md`.
 4. **Stacked PRs are the default for big work.** Anything bigger than about an hour of review ships as a stack of small dependent PRs. Tooling adoption works like the writing standard: however you like, workspace-setup recommended.
-5. **The review hour stays required.** One hour a day, held on the calendar.
+5. **Every developer dedicates time every day to review** Minimum one hour a day, held on the calendar.
 6. **An accelerated workflow for AI-built work.** Spec first with human review, then review and merge your own stack if you are confident. Human review on request, always. Adversarial AI review before submitting is recommended.
 
 ## Where we are
@@ -33,13 +33,13 @@ git clone git@github.com:fil-one/workspace-setup.git
 ./workspace-setup/setup.sh ~/projects/filecoin
 ```
 
-You get a workspace that symlinks your fil-forge and fil-one clone trees, clones the shared knowledge base, and installs the FilOne Standard as Claude Code's default output style, so commit messages, PR descriptions, docs, and plain terminal replies follow it. It will not disturb the checkouts you already have. Start sessions from the workspace directory and every session gets the knowledge base, routing rules, and writing standard. If you'd rather wire the style yourself (a copy in `~/.claude/output-styles`, an import in your own agent config, instructions to whatever tool you use), that's fine too, as long as generated prose starts from the standard.
+You get a workspace that symlinks your fil-forge and fil-one clone trees, clones the shared knowledge base, and installs the FilOne Standard as Claude Code's default output style, so commit messages, PR descriptions, docs, and plain terminal replies follow it. It will not disturb the checkouts you already have. Start sessions from the workspace directory and every session gets the knowledge base, routing rules, and writing standard. The workspace also keeps itself current: a session-start hook pulls rule changes daily and re-runs setup. If you'd rather wire the style yourself (a copy in `~/.claude/output-styles`, an import in your own agent config, instructions to whatever tool you use), that's fine too, as long as generated prose starts from the standard.
 
 The required, synced install waits for a monorepo, if we move to one. Claude Code can pin a shared plugin from a repo's checked-in settings, but across fifty repos that means seeding fifty pointer files; in a monorepo it is one file, and the standard ships with the repo.
 
 ## Readable prose is the author's job
 
-A machine-written first draft is still yours. Prose you expect other humans to read has to be readable by other humans, and shipping raw model output to a reviewer hands them your editing work. Prose a reviewer has to decode burns the review hour. If you read something clearly unintelligible and AI-generated, you are fully empowered to hold your teammate accountable for it. "This is unintelligible, revise so I can review" is a reasonable response to a PR.
+A machine-written first draft is still yours to own. Prose you expect other humans to read has to be readable by other humans, and shipping raw model output to a reviewer hands them your editing work. Prose a reviewer has to decode burns the review hour. If you read something clearly unintelligible and AI-generated, you are fully empowered to hold your teammate accountable for it. "This is unintelligible, revise so I can review" is a reasonable response to a PR.
 
 ## AGENTS.md in every repo
 
@@ -53,7 +53,7 @@ The recommended tooling is GitHub's native stacked pull requests, driven by the 
 
 The norm binds our agents too. Each active repo's `AGENTS.md` carries the stack instruction, and the generated workspace AGENTS.md states it as a default for local sessions in every repo, including those with no guidance of their own.
 
-## The review hour stays required
+## Dedicated time for reviews
 
 Each of us holds one hour a day on the calendar for review, checks the review queue before starting new build work, and gives a first response to any review request within one business day. The accelerated workflow shifts the queue toward specs and away from routine PRs.
 
@@ -64,7 +64,9 @@ When taking on a sizable ticket (one that won't fit a single reviewable PR), you
 1. Submit an ADR, RFC, or architectural prose spec of what you are going to implement, and get human review from a colleague on that.
 2. Submit the rest of the PR stack, and review and merge it yourself if you are confident.
 
-For smaller tasks that fit in a single reasonably sized PR, you may also simply review and merge your own code if you are confident. You can always request human review on any code if you feel it's necessary.
+For smaller tasks that fit in a single reasonably sized PR, you may also simply review and merge your own code if you are confident. 
+
+You can always request human review on any code if you feel it's necessary.
 
 Adversarial AI review on your PRs before submitting is recommended but not required. Everyone should have received an invite to our ChatGPT Business workspace (the plan formerly called Team), which comes with Codex; tell me if you haven't. I recommend turning on automatic Codex code reviews for the repos you work in.
 
