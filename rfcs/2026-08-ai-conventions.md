@@ -34,11 +34,11 @@ The required, synced install waits for a monorepo, if we move to one. Claude Cod
 
 ## Readable prose is the author's job
 
-A machine-written first draft is still yours. Prose you expect other humans to read has to be readable by other humans, and shipping raw model output to a reviewer hands them your editing work. If you read something clearly unintelligible and AI-generated, you are fully empowered to hold your teammate accountable for it. "This is unintelligible, revise so I can review" is a reasonable response to a PR.
+A machine-written first draft is still yours. Prose you expect other humans to read has to be readable by other humans, and shipping raw model output to a reviewer hands them your editing work. We already committed to an hour a day of review time in [dedicated review time and stacked PRs](2026-07-review-time-and-stacked-prs.md); prose a reviewer has to decode wastes it. If you read something clearly unintelligible and AI-generated, you are fully empowered to hold your teammate accountable for it. "This is unintelligible, revise so I can review" is a reasonable response to a PR.
 
 ## AGENTS.md in every repo
 
-Write agent guidance once and every tool reads it. `AGENTS.md` is the cross-tool convention: Codex, Cursor, Copilot, and most other coding agents read it natively. Claude Code is the exception (it reads `CLAUDE.md`), and the one-line `@AGENTS.md` import is what closes that gap. The pair travels with the clone, so cloud sessions and CI get the same guidance as your terminal. The ask is that every repo carries the pair, starting with new ones.
+Write agent guidance once and every tool reads it. `AGENTS.md` is the cross-tool convention: Codex, Cursor, Copilot, and most other coding agents read it natively. Claude Code is the exception (it reads `CLAUDE.md`), and the one-line `@AGENTS.md` import is what closes that gap. The pair travels with the clone, so cloud sessions and CI get the same guidance as your terminal. The ask is that every repo carries the pair, starting with new ones. [Dedicated review time and stacked PRs](2026-07-review-time-and-stacked-prs.md) already routes its stack norm through each active repo's `AGENTS.md`, so that rollout depends on this one.
 
 ## Rollout
 
