@@ -1,6 +1,6 @@
 # RFC: Dedicated review time and stacked PRs
 
-**Status:** Proposal
+**Status:** Superseded by [AI conventions](2026-08-ai-conventions.md) — the norms live there; this document remains the evidence base and tooling evaluation
 **Author:** Hannah Howard
 **Audience:** Forge engineers
 **Date:** 2026-07-31
