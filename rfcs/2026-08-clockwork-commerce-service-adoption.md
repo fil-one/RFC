@@ -1,190 +1,143 @@
-# RFC: Adopt Clockwork as Fil One's commerce service
+# RFC: Should engineering take on Clockwork?
 
 **Status:** Proposal
 **Author:** [James Kurz](https://github.com/jameskurz-filecoin)
-**Date:** 2026-08-18
+**Audience:** Fil One engineers
+**Date:** 2026-08-19
 
 ## TL;DR
 
-I propose that Fil One adopt
-[Clockwork](https://github.com/fil-one/clockwork) as a standalone service for
-commerce and commercial operations.
+Clockwork is a web app I built. It is not a vendor product and we would not
+sell it. It is a quote-to-cash portal for Filecoin Foundation: quotes, orders,
+partners, invoices, back office.
 
-Clockwork would own the customer, partner, and operator workflows around
-agreements, quotes, POCs, orders, billing, renewals, and offboarding. The
-existing Fil One product would continue to own storage resources, raw usage,
-and provisioning. Billing authority would move only through an explicit
-account/domain cutover. We would connect the two through a small, explicit API
-and event boundary rather than merge Clockwork into the Fil One monorepo.
+I would like the engineering team to look at it, watch a demo, and then decide
+whether we own it. This RFC is that question. It is not a request to cut over
+billing or replace Stripe.
 
-Merging this RFC would approve the direction and an integration phase. It would
-not authorize production migration or billing cutover.
+Alan is right that we might be better off buying something. I want that on the
+table.
 
-## Why
+## What Clockwork is
 
-Fil One's commercial workflow crosses product code, Stripe, HubSpot, provider
-dashboards, documents, and manual coordination. That works for individual
-transactions but makes it hard to answer basic operational questions reliably:
+A Next.js app, Postgres (Supabase), Stripe, and its own login (currently
+WorkOS). Repo: [fil-one/clockwork](https://github.com/fil-one/clockwork).
+Demo: https://clockwork-commerce-demo.netlify.app/ — I will put the password in
+the FF 1Password vault.
 
-- Who owns the customer and organization identity?
-- Which quote, order, entitlement, invoice, and payment belong together?
-- Who is allowed to change pricing or approve an exception?
-- Which system should write to Stripe, provisioning, or CRM?
-- How do we reconcile and recover after a partial failure?
+Who it is for:
 
-Clockwork was built to make those relationships explicit. It provides one
-customer, partner, and internal-operator product around the same commercial
-records, with idempotent workflows, audit history, generated documents, and
-provider boundaries.
+- **Us (FF).** Sales, partnerships, finance, anyone who currently chases a deal
+  through email and PDFs.
+- **Customers and partners, later.** A portal where they can see a quote,
+  accept an order, pay an invoice. Not a SKU we sell.
 
-The implementation now exists and can be evaluated as a product. The remaining
-question is whether we want it to become part of Fil One and invest in the real
-integration.
+Who would own the code if we say yes: **engineering**. Uptime, bugs, security,
+features. That is the expensive part. It does not mean engineering becomes the
+people who talk to customers.
 
-## Proposal
+It was written by me, with a lot of AI assistance. Treat it as an unreviewed
+codebase that happens to have a working demo, not as a finished internal
+platform.
 
-1. **Adopt Clockwork as an adjacent service.** Keep its repository, database,
-   deployment, and release lifecycle separate from the storage control plane.
-2. **Keep one authority for each fact and side effect.** Existing Fil One
-   systems remain authoritative until a specific domain and account are
-   deliberately cut over. We do not dual-write Stripe, usage, provisioning, or
-   CRM.
-3. **Reuse existing identifiers.** Clockwork attaches Fil One organization,
-   tenant, Stripe, entitlement, and provider IDs. It does not recreate an
-   organization because an email or domain happens to match.
-4. **Integrate through signed, versioned, idempotent messages.** Transport
-   success is not business success; both services retain enough information to
-   retry and reconcile.
-5. **Roll out incrementally.** First observe, then shadow, then move one
-   authority for a small cohort. Existing PAYG billing can remain on its current
-   path until we have evidence that moving it is worthwhile and safe.
+Start here, not the `docs/` folder: the README, then the live demo. Skip
+`docs/release-candidate-report.md`. That file is not a good introduction.
 
-## Service boundary
+## Why I built it
 
-| Area | Proposed authority |
-| --- | --- |
-| Authentication | Fil One Auth0 remains the identity authority for existing users. Clockwork receives a verified subject mapping; email matching is not authorization. |
-| Organizations and tenants | Fil One organization and tenant IDs remain the product identity. Clockwork owns the related commercial account and roles. |
-| Products, resources, and raw usage | Fil One owns provisionable capability, storage resources, entitlements, and raw measurements. |
-| Pricing, agreements, quotes, and orders | Clockwork owns approved commercial configuration and workflow. Accepted lines map to versioned Fil One product capabilities. |
-| Stripe and billing | The current integration remains authoritative at first. Exactly one service writes each customer, subscription, meter, invoice, or payment domain after an explicit cutover. |
-| Provisioning | Clockwork sends an approved command; Fil One owns resource state and returns accepted and terminal outcomes. |
-| HubSpot | Existing integrations keep their current fields until field-level ownership is agreed. Clockwork publishes only allow-listed commercial events. |
-| Support | The support provider owns tickets. Clockwork reads safe support signals unless a separate write boundary is approved. |
-| Audit | Each service keeps its own domain audit history and links records with correlation and provider IDs. |
-| Migration | Fil One remains source authority until a per-account cutover. Clockwork owns migration-run, mapping, and projection evidence. |
+Today a Fil One commercial deal is spread across HubSpot, Stripe, Google Docs,
+and people. Fine for one-off pay-as-you-go. Painful for annual contracts,
+partners, and "which quote became which invoice."
 
-The field-level design is already documented in Clockwork's
-[adjacent-service integration boundary](https://github.com/fil-one/clockwork/blob/55b4082d380e086b29da7e76f4e060d19cbb49a6/docs/adjacent-service-integration.md).
+I wanted one place where:
 
-## Integration sequence
+- a quote has line items that map to Fil One products ("100 TB in eu-central-3")
+- accepting the quote becomes an order
+- the order is what we provision
+- invoices and payments attach to that order
+- a partner can see the deals they brought
 
-### 1. Connect identity and organizations
+Stripe still charges the card. Fil One still creates the bucket. Clockwork
+would be the commercial record in the middle.
 
-Map Auth0 issuer and subject to the Clockwork user, and map each Fil One
-organization to a Clockwork account. Missing or ambiguous mappings fail closed.
-We should decide whether this is federation or an explicit account-link step
-after reviewing the current Auth0 setup.
+## What I am not claiming
 
-### 2. Shadow the existing product
+- We are not selling Clockwork.
+- We are not cutting over existing PAYG customers.
+- We are not giving Clockwork permission to write to Stripe, Auth0, or Forge
+  until a later, explicit decision.
+- WorkOS is not a new company-wide identity system. Clockwork used it because
+  that is how I stood the demo up. Fil One users live in Auth0. If we keep
+  Clockwork, we either federate Auth0 into it or rip WorkOS out. I have not
+  done that work.
 
-Import a pinned snapshot and consume real signed events without allowing
-Clockwork to write to Stripe, usage, provisioning, or HubSpot. Compare users,
-organizations, products, customers, subscriptions, usage, entitlements,
-invoices, and provider objects.
+## How it would sit next to Fil One
 
-### 3. Pilot one bounded path
+```
+Customer / partner browser
+        │
+        ▼
+   Clockwork (quotes, orders, invoices, partner view)
+        │  "please provision this SKU for org X"
+        ▼
+   Fil One API (Auth0, tenants, buckets, usage)
+        │
+        ▼
+   Forge / Ingot (actual storage)
+```
 
-Start with a small non-production cohort and one commercial path. My suggested
-first candidate is a net-new annual or partner-assisted order, because it avoids
-moving an existing PAYG subscription. Rehearse retries, duplicates,
-out-of-order events, reconciliation, and rollback before enabling the provider
-effect.
+Stripe: only one system writes for a given customer. Today that system is Fil
+One. It stays that way until we deliberately move a customer.
 
-### 4. Expand by domain
+"Accepted line" just means a line item on an accepted quote. Example:
+`object-storage / 100TB / eu-central-3` on the quote has to match a real Fil
+One product, or the order stops before anyone provisions.
 
-Move additional accounts or authority domains only after the prior cohort has
-zero unexplained money, usage, entitlement, or tenant variance. A rollback
-restores the previous routing owner and replays retained events; it does not
-delete provider or audit facts.
+There is no finished Fil One ↔ Clockwork machine API. Clockwork has an internal
+OpenAPI for its own UI. The integration API is the work this RFC would
+authorize us to design, not something already shipped.
+
+Existing Fil One users would need to be linked on purpose. Matching on email
+is not good enough. New signups later would go through whatever we decide
+after the demo. So yes: a one-time migration of existing accounts, and an
+ongoing path for new ones. Neither is designed yet.
 
 ## What exists today
 
-The reviewed revision is
-[`55b4082`](https://github.com/fil-one/clockwork/tree/55b4082d380e086b29da7e76f4e060d19cbb49a6).
+- A clickable demo of customer, partner, and internal-operator screens.
+- A lot of tests in that repo. They prove the demo workflows, not production
+  Stripe / Auth0 / Forge.
+- GitHub Actions is currently blocked on the org billing limit.
 
-- The [live guided demo](https://clockwork-commerce-demo.netlify.app/) exercises
-  customer, partner, and internal-operator workflows with resettable demo data.
-- The serial demo suite passed 15 of 15 Playwright checks, including
-  quote-to-order,
-  price-book approval, queue refresh, partner work, customer settings, and
-  sandbox payment.
-- The web suite passed 1,659 unit tests before two deployment follow-ups; the
-  follow-ups passed focused proxy, payment, and hydration tests. The database
-  gate exercised 45 pgTAP files and 896 assertions.
-- Formatting, lint, types, generated-contract checks, traceability, security
-  checks, and the production build passed locally. A separate remote smoke
-  passed against the live Netlify deployment.
-- GitHub Actions did not start because of the organization's current
-  billing/spend limit. That needs to be restored before hosted checks can be a
-  production requirement.
+## The real decision
 
-The demo is evidence of the product and deterministic workflows, not evidence
-that real providers are active. Production identity mapping, machine
-authentication, provider accounts, reconciliation, and migration are not wired
-yet. They are the work proposed by this RFC.
+Engineering would be taking on a sizable TypeScript app that I built largely
+solo. Benefits: commercial team and partners get a portal; quotes, orders, and
+invoices live in one place; we stop reconciling spreadsheets.
 
-## Before production
+Costs: we own bugs, security, Stripe edge cases, and every feature request
+from sales. That competes with storage work. Buying Chargebee / Stripe Billing
++ HubSpot might cover most of it with less code. I do not have a vendor bake-off
+yet. If the team would rather go that way, that is a valid outcome of this RFC.
 
-The integration should not launch until:
+I would like:
 
-- identity and organization mapping is unambiguous;
-- the service API has explicit machine authentication;
-- there is one verified writer for each external effect;
-- cross-tenant, duplicate, delayed, reordered, and failed-message cases pass
-  across the real Fil One boundary;
-- cutover and rollback have been rehearsed for the pilot cohort;
-- money, usage, entitlement, and provider objects reconcile with no unexplained
-  variance; and
-- normal service basics are in place: an owning team, production hosting,
-  telemetry/on-call, backups, repository protections, and production-use
-  licensing.
+1. A 45-minute demo for the team. I will schedule it.
+2. A follow-up technical walkthrough of the repo for whoever would own it.
+3. A yes / no / buy-instead decision after that, not before.
 
-## Alternatives
-
-### Put the workflows in the Fil One monorepo
-
-This reduces one deployment but couples a large commercial domain and its
-providers to the storage control plane. It also makes the migration authority
-boundary less clear. I do not think the trade is worthwhile.
-
-### Continue with the current distributed process
-
-This avoids integration work but leaves the customer journey and reconciliation
-spread across systems and manual process. It does not solve the problem
-Clockwork was built for.
-
-### Buy a commerce platform
-
-We could run a focused comparison if the team believes a vendor covers the
-whole scope. We would still need Fil One-specific identity, usage, entitlement,
-provisioning, and reconciliation integration, so feature overlap alone is not a
-replacement for this boundary.
+Until then, please do not treat Clockwork as an incoming dependency of POSIX,
+Forge, or the console.
 
 ## Decisions needed
 
-1. Do we want Clockwork to become Fil One's commerce service?
-2. Which team should own it after adoption?
-
-Those are the decisions needed to accept the direction. The integration phase
-can then settle whether identity uses federation or account linking, which
-bounded path pilots first, and where the production service runs.
+1. Are we willing to spend a demo plus a tech review on this?
+2. After that: own it, kill it, or trial a vendor?
+3. If we own it, who? This means on-call and security, not who talks to
+   customers.
 
 ## References
 
-- [Clockwork repository](https://github.com/fil-one/clockwork)
-- [Reviewed Clockwork revision](https://github.com/fil-one/clockwork/tree/55b4082d380e086b29da7e76f4e060d19cbb49a6)
+- [Clockwork repo](https://github.com/fil-one/clockwork)
 - [Live demo](https://clockwork-commerce-demo.netlify.app/)
-- [Product specification](https://github.com/fil-one/clockwork/blob/55b4082d380e086b29da7e76f4e060d19cbb49a6/commerce_platform_spec.md)
-- [Adjacent-service integration boundary](https://github.com/fil-one/clockwork/blob/55b4082d380e086b29da7e76f4e060d19cbb49a6/docs/adjacent-service-integration.md)
-- [External activation gates](https://github.com/fil-one/clockwork/blob/55b4082d380e086b29da7e76f4e060d19cbb49a6/docs/external-gates.md)
+- [README](https://github.com/fil-one/clockwork/blob/main/README.md)
