@@ -9,41 +9,39 @@
 
 We lean hard on AI tools now, and each of us wired them up alone. I propose we standardize three things:
 
-1. **One bootstrap.** Everyone sets up their machine with the [workspace-setup](https://github.com/fil-one/workspace-setup) script.
-2. **One writing standard.** Generated prose follows the FilOne Standard, which the workspace makes Claude Code's default output style.
+1. **One writing standard.** Everyone adopts the FilOne Standard as the base of their writing style, however they want to do it. The recommended path is [workspace-setup](https://github.com/fil-one/workspace-setup). A required install waits for a monorepo.
+2. **Readable prose is the author's job.** If a teammate ships you clearly unintelligible AI-generated text, you are fully empowered to hold them accountable.
 3. **One home for agent guidance.** Every repo carries an `AGENTS.md`, and `CLAUDE.md` is the one-line import `@AGENTS.md`.
 
 ## Where we are
 
 Most first drafts, code and prose, start machine-written now. What the tools know still depends on whose machine they run on. Ten of our fifty repos give agents guidance every tool can read, and two more are half-converted; six keep it in a `CLAUDE.md` only Claude sees; thirty-two offer nothing at all. The shared knowledge base and the writing rules reach a session only if that laptop happens to be wired for them. The same task run by two of us produces different code and different-sounding prose, and what any of us learns about making the tools good stays on one machine.
 
-## One bootstrap script
+## Generated writing sounds like us
+
+[knowledge-base/writing-style.md](https://github.com/fil-one/knowledge-base/blob/main/writing-style.md) is the FilOne Standard: the writing rules for anything reader-facing, because reading overly-AI-flavored prose is getting to be significant cognitive overhead at work, and costs us credibility for anything external. Adopt it as the base of your own setup, and personalize on top as long as the spirit holds.
+
+The recommended path is workspace-setup:
 
 ```bash
 git clone git@github.com:fil-one/workspace-setup.git
 ./workspace-setup/setup.sh ~/projects/filecoin
 ```
 
-You get a workspace directory that symlinks to your fil-forge and fil-one clone trees, clones the shared knowledge base, and writes the AGENTS.md, CLAUDE.md, and Claude Code settings that tie it together. It asks before installing the optional ai-dev process module; declining is fine. It will not disturb the checkouts you already have: clones stay wherever you keep them, and the workspace reaches them through symlinks. Mine still points at `~/projects/go/src/github.com` — nothing moved, and I work from a much simpler path than the full Go tree.
+You get a workspace that symlinks your fil-forge and fil-one clone trees, clones the shared knowledge base, and installs the FilOne Standard as Claude Code's default output style, so commit messages, PR descriptions, docs, and plain terminal replies follow it. It will not disturb the checkouts you already have. Start sessions from the workspace directory and every session gets the knowledge base, routing rules, and writing standard. If you'd rather wire the style yourself (a copy in `~/.claude/output-styles`, an import in your own agent config, instructions to whatever tool you use), that's fine too, as long as generated prose starts from the standard.
 
-Start sessions from the workspace directory. That gives every machine the same knowledge base, routing rules, and writing standard.
+The required, synced install waits for a monorepo, if we move to one. Claude Code can pin a shared plugin from a repo's checked-in settings, but across fifty repos that means seeding fifty pointer files; in a monorepo it is one file, and the standard ships with the repo.
 
-## Generated writing sounds like us
+## Readable prose is the author's job
 
-[knowledge-base/writing-style.md](https://github.com/fil-one/knowledge-base/blob/main/writing-style.md) is the FilOne Standard: the writing rules for anything reader-facing, because reading overly-AI-flavored prose is getting to be significant cognitive overhead at work, and costs us credibility for anything external. AGENTS.md imports the rules into every session started from the workspace, and setup.sh also installs them as the FilOne Standard output style, so commit messages, PR descriptions, docs, and plain terminal replies follow them too. On a new workspace the style is the default; if you already have a `.claude/settings.local.json`, the script leaves it alone and prints the line to add. Rule changes go to knowledge-base by PR; pull your clone and re-run setup.sh to pick them up.
+A machine-written first draft is still yours. Prose you expect other humans to read has to be readable by other humans, and shipping raw model output to a reviewer hands them your editing work. If you read something clearly unintelligible and AI-generated, you are fully empowered to hold your teammate accountable for it. "This is unintelligible, revise so I can review" is a reasonable response to a PR.
 
 ## AGENTS.md in every repo
 
-Write agent guidance once and every tool reads it. `AGENTS.md` is the cross-tool convention: Codex, Cursor, Copilot, and most other coding agents read it natively. Claude Code is the exception (it reads `CLAUDE.md`), and the one-line `@AGENTS.md` import is what closes that gap. The ask is that every repo carries the pair, starting with new ones.
+Write agent guidance once and every tool reads it. `AGENTS.md` is the cross-tool convention: Codex, Cursor, Copilot, and most other coding agents read it natively. Claude Code is the exception (it reads `CLAUDE.md`), and the one-line `@AGENTS.md` import is what closes that gap. The pair travels with the clone, so cloud sessions and CI get the same guidance as your terminal. The ask is that every repo carries the pair, starting with new ones.
 
 ## Rollout
 
-1. Run the script this week. It takes a few minutes; if it fights your setup, tell me and I'll fix the script rather than your machine.
-2. Existing workspace: add the `outputStyle` line yourself — the script never edits a settings file you already have.
-3. New repos start with `AGENTS.md` plus the one-line `CLAUDE.md`.
-4. Reassess in a month: if the output style feels heavy in day-to-day coding, we flip it to opt-in.
-
-## Decisions needed
-
-- **Default-on output style.** The style shapes how Claude talks in every session, including casual ones. I propose default-on with personal opt-out (delete the `outputStyle` line).
-- **Backfill.** Six repos keep real guidance in a `CLAUDE.md` no other tool will find. Convert them in one sweep now, or as we touch them? I lean as-touched — the sweep is an hour of agent work if anyone feels strongly.
+1. Adopt the standard this week: run the script, or wire the style into your own setup. If the script fights your setup, tell me and I'll fix the script rather than your machine.
+2. New repos start with `AGENTS.md` plus the one-line `CLAUDE.md`.
+3. Backfill: six repos keep real guidance in a `CLAUDE.md` no other tool will find — `ingot`, `smelt`, `sprue`, `go-ipni-tools`, and two private repos. Convert them as we touch them; the sweep is an hour of agent work if anyone feels strongly.
