@@ -38,7 +38,7 @@ A machine-written first draft is still yours. Prose you expect other humans to r
 
 ## AGENTS.md in every repo
 
-Write agent guidance once and every tool reads it. `AGENTS.md` is the cross-tool convention: Codex, Cursor, Copilot, and most other coding agents read it natively. Claude Code is the exception (it reads `CLAUDE.md`), and the one-line `@AGENTS.md` import is what closes that gap. The pair travels with the clone, so cloud sessions and CI get the same guidance as your terminal. The ask is that every repo carries the pair, starting with new ones. [Dedicated review time and stacked PRs](2026-07-review-time-and-stacked-prs.md) already routes its stack norm through each active repo's `AGENTS.md`, so that rollout depends on this one.
+Write agent guidance once and every tool reads it. `AGENTS.md` is the cross-tool convention: Codex, Cursor, Copilot, and most other coding agents read it natively. Claude Code is the exception (it reads `CLAUDE.md`), and the one-line `@AGENTS.md` import is what closes that gap. The pair travels with the clone, so cloud sessions and CI get the same guidance as your terminal. The ask is that every repo carries the pair, starting with new ones. [Dedicated review time and stacked PRs](2026-07-review-time-and-stacked-prs.md) already routes its stack norm through each active repo's `AGENTS.md`, so that rollout depends on this one. The workspace carries the norm as a default too: setup.sh installs the `gh stack` tooling, and the generated workspace AGENTS.md states the stack norm for local sessions in every repo, including the thirty-two with no guidance of their own. The per-repo line still covers cloud sessions and CI.
 
 ## Rollout
 
