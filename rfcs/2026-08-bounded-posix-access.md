@@ -18,9 +18,19 @@ deliverable is a docs page (`--endpoint-url`, `--force-path-style`, `--region`).
 If a real backup dies, I come back with the actual failure — not a 100k-line
 Rust tree.
 
-What I need: a staging **bucket and key**. I create them in the existing
-console if I can; if I cannot, I need someone to mint one. Nothing gets
-installed on Forge.
+What I need: a staging **bucket and key**. Nothing gets installed on Forge.
+
+The first command, after AWS CLI PUT/GET works path-style:
+
+```bash
+mount-s3 "$BUCKET" /mnt/filone \
+  --endpoint-url https://ingot.staging.fil.one \
+  --region eu-central-3 \
+  --force-path-style
+```
+
+`--force-path-style` is required. Virtual-host style does not work on this
+gateway.
 
 ## What this is
 
@@ -48,9 +58,7 @@ restore. Native S3 to the same bucket worked.
 
 ## The fork, honestly
 
-I forked too early. This RFC does not need that fork.
-
-I looked at the code before writing this. On `posixmount` main:
+I forked too early. This RFC does not need that fork. On `posixmount` main:
 
 - The client still talks ordinary SigV4 S3.
 - Staged write-back (the thing that would be “deeper POSIX”) defaults to off
@@ -62,32 +70,15 @@ I looked at the code before writing this. On `posixmount` main:
 - Prefix-only mounts already exist in upstream Mountpoint (`--prefix`). We do
   not need a fork for “folder inside a bucket.”
 
-Kubernetes CSI would be a DaemonSet on **whoever’s cluster is mounting**, not
-on Forge. It is out of this RFC.
-
-The four open posixmount PRs
-([#18](https://github.com/fil-one/posixmount/pull/18)–[#21](https://github.com/fil-one/posixmount/pull/21))
-should stay parked.
+No Kubernetes CSI in this RFC. The open posixmount PRs should stay parked.
 
 ## What I am asking for
 
 1. A staging bucket and a bucket-scoped key. I will use the existing console if
    I have access. `eu-central-3` is only the bucket’s region, not a place we
    ship code.
-2. I run Mountpoint on a client that can already reach Fil One S3 (laptop or
-   any Linux box). Nobody deploys onto Forge nodes.
-
-First command, after AWS CLI PUT/GET works with path-style addressing:
-
-```bash
-mount-s3 "$BUCKET" /mnt/filone \
-  --endpoint-url https://ingot.staging.fil.one \
-  --region eu-central-3 \
-  --force-path-style
-```
-
-`--force-path-style` is the Fil One-specific bit. Virtual-host style does not
-work on this gateway.
+2. I run that `mount-s3` command on a laptop (or any Linux client). Nobody
+   deploys onto Forge nodes.
 
 Then: copy bytes both ways and checksum. Then try the long backup, interrupt
 it, restore, checksum. Unmount. Revoke the key if needed. The bucket is still
