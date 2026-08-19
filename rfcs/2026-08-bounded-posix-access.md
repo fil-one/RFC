@@ -7,18 +7,16 @@
 
 ## TL;DR
 
-Some tools want a directory, not the S3 API. I investigated that and built a
-prototype on AWS [Mountpoint](https://docs.aws.amazon.com/AmazonS3/latest/userguide/mountpoint.html).
-Adopting it would make this team own ~100k lines of Rust. That is not worth it
-right now.
+Some workloads cannot use S3 directly; they want a folder. I built a prototype
+on AWS [Mountpoint](https://docs.aws.amazon.com/AmazonS3/latest/userguide/mountpoint.html).
+Adopting it would make this team own ~100k lines of Rust. That is not a current
+priority. Off-the-shelf is a good outcome.
 
-This is **not** a current priority. Off-the-shelf is a good outcome. I want to
-mark [posixmount](https://github.com/fil-one/posixmount) experimental, keep
-anything reusable (path-style notes, credential-file rules, tests), and stop
-asking anyone to review the fork.
-
-If we later need a folder mount for a real customer, first try stock Mountpoint
-or rclone from a laptop. Only reopen a fork if that fails.
+**Decision:** do not adopt the fork. Extract anything reusable from
+[posixmount](https://github.com/fil-one/posixmount) (path-style notes, tests,
+credential-file rules), mark the repo a spike, and stop the review. If a real
+customer later needs a mount, try stock Mountpoint or rclone from a laptop
+first. Only then consider a tiny patch or a maintained third-party client.
 
 ## What I looked at
 
@@ -64,8 +62,8 @@ The open posixmount PRs should close or stay parked. No CSI.
   the need next quarter.
 - **Buy/use rclone mount or another maintained client.** Also fine; compare
   only when we have a workload.
-- **Keep building filfs.** No. Maintenance cost is the reason Alan pushed
-  back, and he was right.
+- **Keep building filfs.** No. The maintenance cost is the whole point of
+  this RFC.
 
 ## What I am not asking for
 
