@@ -1,4 +1,4 @@
-# RFC: Should engineering take on Clockwork?
+# RFC: Spend 45 minutes on the Clockwork demo before anyone talks about owning it
 
 **Status:** Proposal
 **Author:** [James Kurz](https://github.com/jameskurz-filecoin)
@@ -36,9 +36,8 @@ features. Not who talks to customers.
 Treat it as an unreviewed codebase with a working demo, not a finished
 internal platform.
 
-Start at the README, then the live demo. Skip `docs/`, especially
-`docs/release-candidate-report.md`. The README line “one artifact chain, no
-re-keying” is brochure language. Ignore it.
+Start at the live demo. Skip `docs/`, especially
+`docs/release-candidate-report.md`.
 
 ## What you can click today
 
@@ -58,28 +57,26 @@ done (draft and prod share the same blob store).
 
 ## Login, Stripe, Fil One — as they actually are
 
-I read the code. Three different systems:
-
 | Who | Login | What they touch |
 | --- | --- | --- |
 | Fil One customers | Auth0, Fil One console | Buckets, usage, today’s PAYG Stripe |
 | Clockwork **demo** visitors | Shared password + persona cookie | Fake quotes/orders. No WorkOS. No Stripe. |
-| Clockwork **if we ran it for real** | WorkOS AuthKit (ADR 0004) | Clockwork’s own DB. Stripe SDK exists (`StripeFinanceGateway`) but is not the writer for Fil One customers. |
+| Clockwork **if we ran it for real** | WorkOS AuthKit | Clockwork’s own DB. A Stripe adapter exists in the repo; it is not the writer for Fil One customers. |
 
 Clockwork does not sit in front of Auth0. Fil One does not proxy Clockwork.
 People who buy storage still log into Fil One. People who issue quotes would
 log into Clockwork.
 
-If we keep Clockwork, we either federate Auth0 into WorkOS or rip WorkOS out.
-That work is not done.
+Fil One stays on Auth0. Clockwork-if-real stays on WorkOS. This RFC does not
+choose federation.
 
 Stripe: only one system writes for a given customer. Today that is Fil One. It
 stays that way until we deliberately move a customer. The demo never calls
 Stripe.
 
-There is no Fil One ↔ Clockwork machine API. There are HTTP ports and fakes
-pointing at unnamed URLs. The integration API is not in scope of this RFC. Do
-not block POSIX or the console on it.
+There is no Fil One API. Provisioning and the other integrations are typed
+ports with fakes, not a client against a live Fil One URL. This RFC does not
+ask us to design one.
 
 ## Why I built it
 
@@ -104,8 +101,9 @@ I have not done that comparison. A vendor is allowed to win.
 
 ## The real decision
 
-Engineering would be taking on Next.js, Supabase, WorkOS, a Stripe adapter,
-Trigger.dev, and every sales feature request. That competes with storage work.
+If we owned it, production would be Next.js on Vercel with Supabase Postgres,
+WorkOS AuthKit, a Stripe adapter, and Trigger.dev. The Netlify demo is not
+that stack. Owning it competes with storage work.
 
 I would like:
 
@@ -113,8 +111,7 @@ I would like:
 2. A follow-up walkthrough of the repo for whoever would own it.
 3. A yes / no / **trial a vendor** decision after that.
 
-Until then, please do not treat Clockwork as an incoming dependency of POSIX,
-Forge, or the console.
+Until then, Clockwork is not a dependency of anything else.
 
 ## Decisions needed
 
