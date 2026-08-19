@@ -142,7 +142,7 @@ Observe that in the table above, multiple permissions map to the same forge comm
 
 To address this problem and facilitate authorization at Ingot, delegations for accessing the Forge network MUST be accompanied by the list of S3 permissions assigned to the access key. See [`/s3/request/authorize`](#s3requestauthorize).
 
-Given a tenant key `did:plc:tenant`, a bucket `did:key:bucket`, and an access key `did:key:access`, granting the `s3:GetObject` and `s3:PutObject` permissions involves creating and storing the following 5 UCAN delegations:
+Given a tenant key `did:plc:tenant`, a bucket `did:key:bucket`, and an access key `did:key:access`, granting the `s3:GetObject` and `s3:PutObject` permissions involves creating and storing the following UCAN delegations:
 
 ```jsonc
 {
