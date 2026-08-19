@@ -13,15 +13,16 @@ Stripe, PDFs, and people. It makes Fil One look less finished than the storage
 product, and it blocks deals we should be able to close or demo.
 
 [Clockwork](https://github.com/fil-one/clockwork) is a working prototype of that
-journey. We would not sell it as a product. This RFC asks whether the customer
-value is worth a **real pilot** — and if so, whether we own this app, or buy
-something that covers the same path.
+journey: someone issues a quote, an approver accepts it, the customer sees an
+order, and that order is what we would provision. We would not sell Clockwork.
+PAYG in the Fil One console stays as it is.
 
-Off-the-shelf is allowed to win. Doing nothing is not, if we keep promising
-partners a coherent commercial experience we cannot show.
+**Decision after a 45-minute demo:** pilot this app, trial a vendor (Chargebee
+or Stripe Billing + HubSpot), or kill it. Off-the-shelf is allowed to win.
+Doing nothing is not, if we keep showing partners a journey we cannot run.
 
-**Decision after a 45-minute demo:** own a pilot, trial a vendor, or kill it.
-Not a billing cutover, not a Fil One rewrite.
+Not a billing cutover. Not a Fil One rewrite. Not anyone owning the repo from
+this document alone.
 
 ## Who is stuck today
 
@@ -33,11 +34,8 @@ Not a billing cutover, not a Fil One rewrite.
 - **Us (sales, partnerships, finance)** who cannot point at one record and say
   which quote became which order, which invoice, which tenant.
 
-PAYG in the Fil One console is fine. This is everything next to it.
-
-Clockwork is for all three audiences. The hosted demo lets you click each of
-them. Sales and finance have not signed off that they will live in it; the demo
-is how we find that out.
+Clockwork is for all three. Sales and finance have not signed off that they
+will live in it; the demo is how we find that out.
 
 ## What you can show a client tomorrow
 
@@ -89,13 +87,6 @@ demo.
   this RFC — as long as we can still demo a coherent journey to clients.
 - **Keep stitching email/PDF/HubSpot.** Cheap for engineering. Continues to
   block the conversations that need a quote-to-order story.
-
-## What I am not asking for
-
-- Selling Clockwork.
-- Moving existing PAYG customers off Fil One Stripe.
-- POSIX, Forge, or console work waiting on this.
-- Anyone owning the repo on the basis of this document alone.
 
 ## Decisions needed
 
