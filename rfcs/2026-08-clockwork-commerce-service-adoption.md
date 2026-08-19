@@ -1,4 +1,4 @@
-# RFC: Spend 45 minutes on the Clockwork demo before anyone talks about owning it
+# RFC: Use Clockwork to unblock the quote-to-order journey we show clients
 
 **Status:** Proposal
 **Author:** [James Kurz](https://github.com/jameskurz-filecoin)
@@ -7,120 +7,104 @@
 
 ## TL;DR
 
-Clockwork is a quote-to-cash web app I built for Filecoin Foundation. We would
-not sell it. Off-the-shelf is allowed to win.
+Enterprise and channel conversations still cannot walk one path from a tailored
+quote to approval, order, provisioning, and billing. That work lives in HubSpot,
+Stripe, PDFs, and people. It makes Fil One look less finished than the storage
+product, and it blocks deals we should be able to close or demo.
 
-I would like the team to click through the demo, then decide: **own it, kill
-it, or trial a vendor.** This RFC is that question. It is not a billing
-cutover, not a Fil One API design, and not a dependency of POSIX or the
-console.
+[Clockwork](https://github.com/fil-one/clockwork) is a working prototype of that
+journey. We would not sell it as a product. This RFC asks whether the customer
+value is worth a **real pilot** — and if so, whether we own this app, or buy
+something that covers the same path.
 
-## What Clockwork is
+Off-the-shelf is allowed to win. Doing nothing is not, if we keep promising
+partners a coherent commercial experience we cannot show.
 
-A TypeScript monorepo I built, with a lot of AI assistance. Repo:
-[fil-one/clockwork](https://github.com/fil-one/clockwork).
+**Decision after a 45-minute demo:** own a pilot, trial a vendor, or kill it.
+Not a billing cutover, not a Fil One rewrite.
 
-Who it is for:
+## Who is stuck today
 
-- **Us (FF), first.** Sales, partnerships, finance — anyone who currently
-  chases a deal through email, PDFs, HubSpot, and Stripe.
-- **Customers and partners, later.** A portal where they can see a quote,
-  accept an order, pay an invoice. Not a SKU we sell.
+- **A prospective customer** who needs an annual or custom quote, not self-serve
+  PAYG. Today that is email and a PDF. They cannot see the quote, accept it, or
+  watch it become an account.
+- **A channel partner** who should register a deal, price it, and see commission
+  without a spreadsheet.
+- **Us (sales, partnerships, finance)** who cannot point at one record and say
+  which quote became which order, which invoice, which tenant.
 
-Sales and finance have not agreed they will use this. That is part of what
-the demo is for.
+PAYG in the Fil One console is fine. This is everything next to it.
 
-Who would own the code if we say yes: **engineering**. Uptime, bugs, security,
-features. Not who talks to customers.
+Clockwork is for all three audiences. The hosted demo lets you click each of
+them. Sales and finance have not signed off that they will live in it; the demo
+is how we find that out.
 
-Treat it as an unreviewed codebase with a working demo, not a finished
-internal platform.
+## What you can show a client tomorrow
 
-Start at the live demo. Skip `docs/`, especially
-`docs/release-candidate-report.md`.
+https://clockwork-commerce-demo.netlify.app/
 
-## What you can click today
+Shared password (Netlify env; I will put it in the FF 1Password vault before
+we sit down — it is not in git). Then pick a persona. The site is fake data on
+Netlify. It does not talk to Stripe, WorkOS, Auth0, or Forge.
 
-Hosted demo: https://clockwork-commerce-demo.netlify.app/
+Walk this:
 
-That site is Next.js on Netlify with fake data in Netlify Blobs. It does
-**not** run Postgres, Stripe, or WorkOS. There is no production on-call.
+1. `/demo` → **Start as Mara Voss** (customer).
+2. Open the issued annual quote and accept it (PO `PO-DEMO-0312`).
+3. Download the order-form PDF. The quote flips to accepted.
+4. Switch to an internal persona if you want the operator view.
+5. **Restore demo data** when you are done.
 
-The gate is a shared password, then a persona picker. Password lives in the
-Netlify env (`CLOCKWORK_DEMO_ACCESS_PASSWORD`). I will put it in the FF
-1Password vault. It is not in the git repo.
+That is the impression I want in the room: quote → accept → order, in one
+place, looking like a product. The RFC is whether we make a slice of that
+true against Fil One.
 
-Flagship path: `/demo` → **Start as Mara Voss** → follow **Review the issued
-version and proceed to acceptance** on quote `Q-2026-0312` → accept the order
-with PO `PO-DEMO-0312` → confirm the PDF → **Restore demo data** when you are
-done (draft and prod share the same blob store).
+## What Clockwork is (and is not)
 
-## Login, Stripe, Fil One — as they actually are
+A TypeScript app I built, with a lot of AI assistance. Not a vendor. Not a
+SKU we sell.
 
-| Who | Login | What they touch |
-| --- | --- | --- |
-| Fil One customers | Auth0, Fil One console | Buckets, usage, today’s PAYG Stripe |
-| Clockwork **demo** visitors | Shared password + persona cookie | Fake quotes/orders. No WorkOS. No Stripe. |
-| Clockwork **if we ran it for real** | WorkOS AuthKit | Clockwork’s own DB. A Stripe adapter exists in the repo; it is not the writer for Fil One customers. |
+The **demo** is Next.js on Netlify plus a password and persona cookies.
 
-Clockwork does not sit in front of Auth0. Fil One does not proxy Clockwork.
-People who buy storage still log into Fil One. People who issue quotes would
-log into Clockwork.
+**If we ran it for real:** Next.js on Vercel, Supabase Postgres, WorkOS AuthKit
+for Clockwork login, a Stripe adapter in-repo, Trigger.dev. Fil One customers
+would still log into Fil One with Auth0. Clockwork would not sit in front of
+Auth0 or become the PAYG Stripe writer.
 
-Fil One stays on Auth0. Clockwork-if-real stays on WorkOS. This RFC does not
-choose federation.
+There is no Fil One API yet. Provisioning is typed ports and fakes. A pilot
+would need the smallest real call: “this approved order means enable this
+product for this org.” That is later work. This RFC does not design it.
 
-Stripe: only one system writes for a given customer. Today that is Fil One. It
-stays that way until we deliberately move a customer. The demo never calls
-Stripe.
+Engineering would own uptime, bugs, and security if we keep the app. That
+competes with storage work. Name that cost before we fall in love with the
+demo.
 
-There is no Fil One API. Provisioning and the other integrations are typed
-ports with fakes, not a client against a live Fil One URL. This RFC does not
-ask us to design one.
+## Alternatives
 
-## Why I built it
+- **Pilot Clockwork.** My lean, because we can put it in front of a client
+  now. Smallest next step after the demo: one non-PAYG path, no Stripe cutover,
+  no Auth0 federation.
+- **Buy Chargebee, or Stripe Billing + HubSpot.** Allowed to win. I have not
+  done a bake-off. If the team would rather buy, that is a valid result of
+  this RFC — as long as we can still demo a coherent journey to clients.
+- **Keep stitching email/PDF/HubSpot.** Cheap for engineering. Continues to
+  block the conversations that need a quote-to-order story.
 
-A Fil One commercial deal is spread across HubSpot, Stripe, Google Docs, and
-people. Fine for one-off PAYG. Painful for annual contracts, partners, and
-“which quote became which invoice.”
+## What I am not asking for
 
-I wanted one place where a quote’s line items map to Fil One products
-(“100 TB in eu-central-3”), accepting the quote becomes an order, and invoices
-attach to that order.
-
-That is a product wish, not a reason we have to own this repo.
-Chargebee, or Stripe Billing + HubSpot, might cover most of it with less code.
-I have not done that comparison. A vendor is allowed to win.
-
-## What I am not claiming
-
-- We are not selling Clockwork.
-- We are not cutting over existing PAYG customers.
-- We are not asking Fil One to proxy Auth0 or Stripe through Clockwork.
-- We are not asking anyone to own this on the basis of this document alone.
-
-## The real decision
-
-If we owned it, production would be Next.js on Vercel with Supabase Postgres,
-WorkOS AuthKit, a Stripe adapter, and Trigger.dev. The Netlify demo is not
-that stack. Owning it competes with storage work.
-
-I would like:
-
-1. A 45-minute demo. I will schedule it.
-2. A follow-up walkthrough of the repo for whoever would own it.
-3. A yes / no / **trial a vendor** decision after that.
-
-Until then, Clockwork is not a dependency of anything else.
+- Selling Clockwork.
+- Moving existing PAYG customers off Fil One Stripe.
+- POSIX, Forge, or console work waiting on this.
+- Anyone owning the repo on the basis of this document alone.
 
 ## Decisions needed
 
-1. Are we willing to spend a demo plus a tech review on this?
-2. After that: own it, kill it, or trial a vendor?
-3. If we own it, who is on-call?
+1. Sit through the demo.
+2. Then: **pilot Clockwork**, **trial a vendor**, or **kill it**.
+3. If we pilot: who is on-call, and what is the one customer path in scope.
 
 ## References
 
-- [Clockwork repo](https://github.com/fil-one/clockwork)
 - [Live demo](https://clockwork-commerce-demo.netlify.app/)
-- [README rewrite PR](https://github.com/fil-one/clockwork/pull/35)
+- [Clockwork repo](https://github.com/fil-one/clockwork)
+- [README rewrite (not merged)](https://github.com/fil-one/clockwork/pull/35)
