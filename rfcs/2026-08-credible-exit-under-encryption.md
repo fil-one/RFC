@@ -22,8 +22,10 @@ carried as a second root in the exit CAR; O(parts) key work, blobs and CIDs
 untouched -- as the standard cooperative exit; **versioned tenant key
 release** for full-tenant departure; and an explicit yes/no on whether
 vendor-failure-resistant exit ("Tier 2") is promised. Tier 2 is provisional
-throughout: the RFC establishes its true cost and forces the promise
-decision, but ships Tier 1 only. An affirmed Tier 2 gets its own RFC.
+throughout: the RFC establishes its true cost, but ships Tier 1 only.
+**Position as of review: Tier 1 is implemented now; Tier 2 is deferred --
+planned, not promised.** The pre-positioning set is specified in a follow-up
+RFC before any Tier 2 implementation or customer-facing claim.
 
 ## Motivation
 
@@ -251,11 +253,14 @@ nothing in v1's format blocks it.
 
 **B as the canonical cooperative exit** -- scoped, O(parts) key work, stock
 crypto, single artifact. **A for full-tenant departure**, versioned bundle,
-ceremony controls up front. **The Tier 2 promise decided in this RFC's
-review -- the promise, not the design**: "yes" schedules a follow-up RFC for
-the pre-positioning set as an opt-in feature; "no" is Option C in miniature
-and the documentation says so. Either way this RFC ships Tier 1 only. C for
-the whole promise only as an explicit, argued product decision.
+ceremony controls up front. **Tier 2: deferred -- planned, not promised.**
+Per review, cooperative exit is implemented now and the adversarial tier is
+planned even though it is not being built: a follow-up RFC specifies the
+pre-positioning set (D plus root checkpoints plus durable retrieval
+authority, retention as the bounded residual) as an opt-in feature, and the
+customer-facing Tier 2 promise is decided there, not here. Until that RFC
+lands, documentation makes no vendor-failure-resistance claim. C for the
+whole promise only as an explicit, argued product decision.
 
 ## Prerequisites (normative)
 
@@ -306,10 +311,10 @@ re-encryption, but it does not work today:
   anyway? (B excludes them naturally: not reachable from the root.)
 - Object Lock / legal hold: lock is service state that does not travel;
   does exit of held objects need a compliance gate?
-- **(Merge-blocking)** Is Tier 2 promised? The decision recorded is
-  direction, not design: yes schedules the follow-up RFC; no gets
-  documented explicitly. Resolved in this review -- the document merges
-  with the answer, not the question.
+- **(Resolved in review, 2026-08)** Is Tier 2 promised? **Deferred:
+  implement Tier 1 now; plan Tier 2 without building it.** A follow-up RFC
+  specifies the pre-positioning set and carries the customer-facing promise
+  decision; until it lands, no vendor-failure-resistance claim is made.
 
 ## Evaluation Criteria
 
