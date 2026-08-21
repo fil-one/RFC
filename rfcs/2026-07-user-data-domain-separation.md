@@ -28,9 +28,9 @@ This is a well-established pattern: AWS serves user data from `amazonaws.com`, n
 
 ## Design
 
-1. **Register a dedicated data domain** — proposed: `filone.com`. Regional S3 endpoints become `<region>.s3.filone.com` (e.g. `eu-west-1.s3.filone.com`).
+1. **Register a dedicated data domain** — adopted: `filonecontent.com`. Regional S3 endpoints become `<region>.s3.filonecontent.com` (e.g. `eu-west-1.s3.filonecontent.com`).
 2. **Nothing but user data lives on this domain.** No console, no marketing pages, no email. Publish a null MX and restrictive SPF/DMARC records so the domain cannot be used to send mail.
-3. **Add the domain to the [Public Suffix List](https://publicsuffix.org/).** With `filone.com` (or `s3.filone.com`) listed as a public suffix, browsers treat each subdomain as an independent site — cookies cannot be scoped across subdomains, and reputation systems that respect the PSL (including Safe Browsing) can flag an individual subdomain rather than the whole domain.
+3. **Add the domain to the [Public Suffix List](https://publicsuffix.org/).** With `filonecontent.com` (or `s3.filonecontent.com`) listed as a public suffix, browsers treat each subdomain as an independent site — cookies cannot be scoped across subdomains, and reputation systems that respect the PSL (including Safe Browsing) can flag an individual subdomain rather than the whole domain.
 4. **Migration.** Presigned URLs sign the `Host` header, so existing `*.s3.fil.one` URLs cannot be redirected (a redirect changes the host and breaks the SigV4 signature). Regional providers serve **both** domains during a deprecation window at least as long as the maximum presigned URL expiry, with `fil.one` endpoints removed thereafter. Console, docs and SDK-generated endpoint URLs switch to the new domain immediately.
 
 ## Alternatives Considered
@@ -41,8 +41,7 @@ This is a well-established pattern: AWS serves user data from `amazonaws.com`, n
 
 ## Open Questions
 
-- Is `filone.com` the right domain?
-- PSL scope: list `filone.com` itself or `s3.filone.com`?
+- PSL scope: list `filonecontent.com` itself or `s3.filonecontent.com`?
 
 ## Evaluation Criteria
 
