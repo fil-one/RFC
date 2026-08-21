@@ -14,17 +14,17 @@ Proposal for service identities/URLs in the Forge network.
 
 ### Staging
 
-- `did:web:staging.upload.fil-forge.com` (Sprue)
-- `did:web:staging.indexer.fil-forge.com` (Indexing Service)
-- `did:web:staging.signer.fil-forge.com` (Signing Service)
-- `did:web:staging.delegator.fil-forge.com` (Delegator)
-- `did:web:staging.auth.fil-forge.com` (Hilt)
-- `did:web:staging.revoke.fil-forge.com` (Swarf)
+- `did:web:upload.staging.fil-forge.com` (Sprue)
+- `did:web:indexer.staging.fil-forge.com` (Indexing Service)
+- `did:web:signer.staging.fil-forge.com` (Signing Service)
+- `did:web:delegator.staging.fil-forge.com` (Delegator)
+- `did:web:auth.staging.fil-forge.com` (Hilt)
+- `did:web:revoke.staging.fil-forge.com` (Swarf)
 
 We run these services in staging but typically they are run by a 3rd party:
 
-- `did:web:staging.eu-central-3.s3.filonecontent.com` (Ingot)
-- `did:key:z...` `https://staging.piri-0.fil-forge.com` (Piri)
+- `did:web:eu-central-3.s3.staging.filonecontent.com` (Ingot)
+- `did:key:z...` `https://piri-0.staging.fil-forge.com` (Piri)
 
 ### Production
 
