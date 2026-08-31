@@ -104,7 +104,8 @@ This is the instance where we continuously ship all changes.
 - **Data rention:** Weekly network reset on Sunday morning UTC.
 - **Regions:** Single region (us-east-9).
 
-Accessible from all non-production FilOne deployments (e.g. https://staging.fil.one, but also PR previews) as
+Accessible from all non-production FilOne deployments (e.g. https://staging.fil.one, but also PR
+previews) as the region `us-east-9`.
 
 ### 3. Staging
 
