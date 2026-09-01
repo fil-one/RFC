@@ -23,8 +23,24 @@ Proposal for service identities/URLs in the Forge network.
 
 We run these services in staging but typically they are run by a 3rd party:
 
-- `did:web:eu-central-3.s3.staging.filonecontent.com` (Ingot)
+- `did:web:s3.eu-central-3.staging.filonecontent.com` (Ingot)
 - `did:key:z...` `https://piri-0.staging.fil-forge.com` (Piri)
+
+### Dev
+
+Ephemeral and personal stages (PR previews, developer sandboxes) live under a
+single `dev` label, so all of them share one DNS delegation and a stage can be
+created or torn down without touching the parent zone. `<STAGE>` is a personal
+handle (e.g. `bajtos`) or a PR number (e.g. `pr-920`).
+
+- `did:web:upload.<STAGE>.dev.fil-forge.com` (Sprue)
+- `did:web:indexer.<STAGE>.dev.fil-forge.com` (Indexing Service)
+- `did:web:signer.<STAGE>.dev.fil-forge.com` (Signing Service)
+- `did:web:delegator.<STAGE>.dev.fil-forge.com` (Delegator)
+- `did:web:auth.<STAGE>.dev.fil-forge.com` (Hilt)
+- `did:web:revoke.<STAGE>.dev.fil-forge.com` (Swarf)
+- `did:web:s3.<REGION>.<STAGE>.dev.filonecontent.com` (Ingot)
+- `did:key:z...` `https://piri-0.<STAGE>.dev.fil-forge.com` (Piri)
 
 ### Production
 
@@ -37,5 +53,5 @@ We run these services in staging but typically they are run by a 3rd party:
 
 Multiple of these run by 3rd parties:
 
-- `did:web:<REGION>.s3.filonecontent.com` (Ingot)
+- `did:web:s3.<REGION>.filonecontent.com` (Ingot)
 - `did:key:z...` `https://piri.<PROVIDER_DOMAIN>` (Piri)
