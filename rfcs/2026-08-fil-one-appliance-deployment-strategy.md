@@ -1,4 +1,4 @@
-# RFC: FilOne Appliance Deployment Strategy
+# RFC: Fil One Appliance Deployment Strategy
 
 **Status:** Proposal
 
@@ -8,7 +8,7 @@
 
 ## Motivation
 
-FilOne Appliance is a set of services operating FilOne node on infrastructure provided by a regional
+Fil One Appliance is a set of services operating Fil One node on infrastructure provided by a regional
 provider. Two main goals are shortening time needed to set up a new region and guaranteeing high
 operational rigour even if the regional provider does not have the necessary skills or experience.
 
@@ -21,8 +21,8 @@ This document proposes how to deploy and operate the appliance.
 
 1. Setting up a new region must not require any engineering or advanced system administration on the
    side of the region provider/operator.
-2. FilOne must be able to deploy security and bug fixes in a timely manner (hours, not days).
-3. FilOne must have visibility into operational metrics and logs.
+2. Fil One must be able to deploy security and bug fixes in a timely manner (hours, not days).
+3. Fil One must have visibility into operational metrics and logs.
 4. Upgrades must cause as short downtime as possible. We should aim for zero-downtime upgrades.
 5. Upgrades must honours timing constraints, e.g. we cannot upgrade in the window where the Piri
    node is required to submit a PDP proof.
@@ -51,7 +51,7 @@ Our stack can be organised into the following layers:
 1. Platform Services
 1. Forge Services
 
-It is not yet clear who will operate which layer - FilOne or the region operator.
+It is not yet clear who will operate which layer - Fil One or the region operator.
 
 ### Hardware
 
@@ -73,7 +73,7 @@ Easy to recreate, disposable.
 ### Platform Services
 
 - A Postgres-compatible database
-- A secure secret manager (OpenBao, unsealed using FilOne's central OpenBao instance)
+- A secure secret manager (OpenBao, unsealed using Fil One's central OpenBao instance)
 - Caddy (TLS termination, cert management)
 - Filecoin RPC API node (Lotus, Forest). Can be initially replaced with an external provider like chain.love.
 
