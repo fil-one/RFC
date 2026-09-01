@@ -24,8 +24,8 @@ This document proposes how to deploy and operate the appliance.
 2. Fil One must be able to deploy security and bug fixes in a timely manner (hours, not days).
 3. Fil One must have visibility into operational metrics and logs.
 4. Upgrades must cause as short downtime as possible. We should aim for zero-downtime upgrades.
-5. Upgrades must honours timing constraints, e.g. we cannot upgrade in the window where the Piri
-   node is required to submit a PDP proof.
+5. Upgrades must honour operator obligations on chain. E.g., we cannot upgrade in the window where
+   the Piri node is required to submit a PDP proof.
 6. The deployment should be managed using infrastructure-as-code.
 7. We must pin versions of all services, so that we always deploy a combination of
    versions that was tested in staging and is known to work together correctly.
@@ -49,9 +49,9 @@ Our stack can be organised into the following layers:
 1. Hardware
 1. Operating System
 1. Platform Services
-1. Forge Services
+1. Apps Services
 
-It is not yet clear who will operate which layer - Fil One or the region operator.
+It is not yet clear who will operate the OS, Platform and Apps layers - Fil One or the region operator.
 
 ### Hardware
 
@@ -60,7 +60,7 @@ This is the bedrock on which we build the rest of the stack.
 1. The machine
 2. Network connectivity: a public IP under a stable domain name, and open port 443
 3. Storage - control plane: a persisted volume mounted as local FS in the machine
-4. Storage - data plane: an S3-compatible object storage, in the same datacenter, accessible via S3 (HTTPS)
+4. Storage - data plane: an S3-compatible object storage, in the same datacenter
 
 ### Operating System
 
@@ -75,7 +75,7 @@ Easy to recreate, disposable.
 - A Postgres-compatible database
 - A secure secret manager (OpenBao, unsealed using Fil One's central OpenBao instance)
 - Caddy (TLS termination, cert management)
-- Filecoin RPC API node (Lotus, Forest). Can be initially replaced with an external provider like chain.love.
+- Filecoin RPC API node (Lotus). Can be initially replaced with an external provider like chain.love.
 
 Updated infrequently, primarily to apply bugfixes and security patches.
 
