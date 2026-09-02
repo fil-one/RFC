@@ -48,8 +48,8 @@ Our stack can be organised into the following layers:
 
 1. Hardware
 1. Operating System
-1. Platform Services
-1. Apps Services
+1. Platform
+1. Apps
 
 It is not yet clear who will operate the OS, Platform and Apps layers - Fil One or the region operator.
 
@@ -64,7 +64,7 @@ This is the bedrock on which we build the rest of the stack.
 
 ### Operating System
 
-A minimal Linux-based distro with a container runtime (Podman) and systemd.
+A minimal Linux-based distro with a container runtime (Docker + Compose) and systemd.
 
 Updated infrequently, primarily to apply bugfixes and security patches.
 
@@ -91,67 +91,48 @@ Updated frequently to ship new features.
 ## Proposal
 
 1. Two Docker Compose projects - one for "platform" services, the other for "apps" services
-1. Config files and pinned image versions tracked in git.
-1. systemd-timer with git-pull script to reconcile.
-1. Rollback is implemented as `git revert` to the previous set of configs & image versions and another deploy.
-1. We can run on any Linux distro with Docker Compose & systemd.
-1. Post-MVP: If we own the OS, then let's use an immutable image-based OS like Fedora CoreOS or bootc with Podman+Quadlet replacing Docker Compose.
-1. Continuous deployment for the dev instance, manual deployments for everything else.
-
-### Why the immutable OS
-
-- Prevents a sloppy operator from breaking the box
-- Prevents [snowflake servers](https://martinfowler.com/bliki/SnowflakeServer.html)
-- Unattended security updates
-- A botched OS update is automatically reverted
+2. Config files and pinned image versions tracked in git.
+3. systemd-timer with git-pull script to reconcile.
+4. Rollback is implemented as `git revert` to the previous set of configs & image versions and another deploy.
+5. We can run on any Linux distro with Docker Compose & systemd.
+6. Continuous deployment for the dev instance.
+7. Manual promotion from dev to other nodes, with changes applied automatically from definitions tracked in git.
 
 ## MVP
 
 For the next few weeks to months, we prioritize time-to-market over robustness and scalability.
 
+### Hardware
+
+Deploy the dev node to a single AWS EC2 instance, to mimic a single VM running in the region datacenter.
+
+Manage the AWS infrastructure using OpenTofu; store the state in S3; apply updates via a GitHub Actions workflow.
+
 ### OS
 
-We will upgrade the OS manually in a scheduled maintenance window, by following Runbook instructions.
+The dev node will use vanilla Ubuntu Server offered by AWS. We will upgrade the OS manually and very infrequently.
 
 ### Platform & Apps
 
 Docker image versions will be pinned to a specific SHA.
 
 Dev environment: Continuous deployment - every commit landed in one of Forge repositories will be
-deployed to the appliance in less than 10 minutes, unless we need to wait for Piri to finish
-submitting the proof.
+deployed to the appliance in about 5 minutes. Longer deployment time when we need to wait for Piri
+to finish submitting the PDP proof.
 
 Non-dev environments: We will upgrade the components in a scheduled maintenance window. The upgrade
 is performed by promoting a set of IaaC definitions that are known to work well in dev. The actual
 deployment will be handled by the automated reconciler script running on the appliance host.
 
-A longer downtime of 30-60 minutes is acceptable.
-
-See the post-MVP sections for more details, we will implement a trimmed-down process for MVP:
-
-- [Update Postgres config](#update-postgres-config)
-- [Upgrade Postgres patch/minor version](#upgrade-postgres-patchminor-version)
-- [Update Caddy config](#update-caddy-config)
-- [Upgrade Caddy image version](#upgrade-caddy-image-version)
-- [Update OpenBao config](#update-openbao-config)
-- [Upgrade OpenBao version](#upgrade-openbao-version)
-
-**Downstream impact**
-
-- Piri's restart is externally invisible but slow.
-- Ingot drops in-flight requests (no graceful shutdown; SDK retries absorb most, browser pre-signed URLs don't)
-
-**TODOs**
-
-- Rework Piri & Ingot config schemes so that secrets are stored in external files or Vault/OpenBao.
-- Improve Ingot to support graceful shutdowns
-- Investigate if Caddy can queue connections while Ingot is restarting
+Every deployment will perform a full restart of affected services. Changes in Platform
+will stop all Apps before upgrading Platform, and bring Apps up after Platform is healthy again.
 
 ### Implementation details
 
 We will create a new GitHub repository `fil-forge/infra-node` with the following layout:
 
 ```sh
+# Configuration of appliance instances:
 # Docker Compose manifests, templates and env files
 nodes/
   dev/
@@ -166,6 +147,10 @@ nodes/
     # same structure as above
   staging/
     # same structure as above
+systemd/
+  # definition of timers shared by all nodes
+
+# AWS infrastructure (our nodes running on AWS)
 terraform/
   envs/
     # AWS resources shared per AWS account:
@@ -178,8 +163,7 @@ terraform/
     dev/
   modules/
     # OpenTofu definitions shared by more than one env
-systemd/
-  # definition of timers
+
 scripts/
   # scripts executed by GitHub Actions workflows
   ci/
@@ -213,9 +197,11 @@ A more detailed runbook will live in the infra-nodes repository, see
 an infra-central counter-part in
 [docs/appliance-onboarding.md](https://github.com/fil-forge/infra-central/blob/main/docs/appliance-onboarding.md).
 
-## Continous deployment
+## Updating & upgrading appliances
 
-For the dev instance we operate ourselves:
+### Nodes we operate
+
+Continuous deployments for the dev instance we operate ourselves:
 
 1. A pull request modifies pinned image versions and/or config versions for the dev node
 2. The pull request is merged
@@ -226,37 +212,73 @@ For the dev instance we operate ourselves:
 6. If the tests pass, the workflow creates a new pull request to update the per-region infra
    definition files. If there is an already open pull request for the same region, the workflow
    updates it.
-7. A developer merges the PR for the staging/production region
-8. The staging/production node pulls the new commit and reconciles the services
-9. The GHA verification workflow triggered by the merged pull request actively polls node's state,
+
+To upgrade the non-dev appliance:
+
+1. A developer merges a PR changing a non-dev node configuration
+2. The node pulls the new commit and reconciles the services
+3. The GHA verification workflow triggered by the merged pull request actively polls node's state,
    waits until the changes are deployed, and runs non-destructive end-to-end tests
 
-### Provider operates the appliance
+### Updating appliances operated by region providers
 
 We need a slightly different approach in case the appliance services are operated by the region provider.
 
 Straw-man proposal 1:
 
 1. We add a new directory with image versions & base config files for provider-operated nodes, treat it as a new virtual region.
-1. After the staging deployment passed the tests, the workflow opens a pull request to update that virtual region.
-1. It's up to the region operator to decide when they want to pull the changes & apply them
+1. After the dev deployment passed the tests, the workflow opens a pull request to update that virtual region.
+1. It's up to the region operator to decide when they want to pull the changes & apply them. They can use the same reconciler script as we use, just not install the systemd timer.
 
 Straw-man proposal 2:
 
 1. Provider-operated nodes don't use git-based IaaC, they use Docker tags instead.
-2. After the staging deployment passed the tests, if Piri or Ingot has a new image version, the workflow creates a new Docker tag for both Piri & Ingot images, sharing the same version number.
+2. After the dev deployment passed the tests, if Piri or Ingot has a new image version, the
+   workflow creates a new Docker tag for both Piri & Ingot images, sharing the same version number.
 3. It's up to the appliance operator to watch new Docker image versions and apply the updates, e.g.
    using podman auto-update.
 4. It's up to the appliance operator to manage their config files and apply any necessary changes.
 
+Straw-man proposal 3:
+
+1. Distribute the two Apps (Ingot and Piri) as a single Linux distro package (apt for Debian/Ubuntu, rpm for RHEL/Fedora).
+2. After the dev deployment passed the tests, we publish a new version of the appliance package.
+3. It's up to the appliance operator to apply updates and manage the platform dependencies.
+
 ## Post-MVP Hardening
 
-### Caddy Config Changes
+### No secrets in Ingot & Piri config files
+
+Improve Piri & Ingot to support alternate options for loading secrets, e.g. env vars or OpenBao.
+
+### Graceful shutdown in Ingot
+
+Ingot needs to implement graceful shutdowns. When the shutdown is initiated, it will stop accepting
+new requests, but keep running until all existing in-flight requests are handled to completion or
+time out.
+
+### Zero-downtime Ingot upgrades
+
+Audit for where Ingot is storing state that isn't fundamentally multiprocess compatible, this is
+likely a very few places. Rework these areas to support multiple Ingot processes running
+concurrently, and then move quickly to blue-green deployments via Caddy as a load balancer.
+
+### Zero-downtime Piri upgrades
+
+Perhaps we can separate the API interface of Piri which is near stateless from the task scheduling
+parts. This may not be as hard as we think as I think the Harmony task scheduler is pretty
+multiprocess friendly.
+
+Once cleared up, move to blue-green deployments via Caddy as a load balancer.
+
+### Zero-downtime Caddy upgrades
+
+**Config changes**
 
 Caddy is able to pick up config changes without the need to restart. We should improve the
-reconciler script to detect config-only changes and don't restart Caddy.
+reconciler script to detect config-only changes and apply them via SIGHUP instead of restarting Caddy.
 
-### Caddy Upgrades
+**Version upgrades**
 
 Caddy's upgrades are deployed to prod regions manually. As a result, we can easily end up running
 Caddy in production with known security vulnerabilities for weeks.
@@ -270,7 +292,7 @@ of Caddy: let systemd listen on `:443`, so that a Caddy image swap queues connec
 accept backlog instead of refusing them, turning the restart from downtime into added latency. This
 requires verification whether Caddy consumes `LISTEN_FDS`.
 
-### OpenBao Upgrades
+### More robust OpenBao upgrades
 
 Upgrading OpenBao requires restart that seals the vault requires the unseal round-trip to central —
 a total regional read outage for the duration. That's one more reason why OpenBao's upgrades must be
@@ -286,18 +308,18 @@ When the reconciler is performing the upgrade, it should start with the cheap pr
 
 Upgrades must be rolled per node — never fleet-parallel, since every one is a full regional read outage.
 
-### Postgres Config Changes
+### More robust Postgres upgrades
 
-Postgres is able to pick up most configuration changes without restart. We should improve the
-reconciler script to detect such changes and apply them without restarting the server.
+**Config changes**
+
+Postgres is able to pick up most configuration changes via SIGHUP without restart . We should
+improve the reconciler script to detect such changes and apply them without restarting the server.
 
 See https://www.heatware.net/postgresql/reload-config-with-pg-ctl/
 
-### Postgres Upgrades
+**Patch/minor version upgrades**
 
 Implement a metric & alert to let us know when a node is not up to date.
-
-**Patch/minor versions**
 
 The reconciler should run pre-flight checks before deploying the upgrade:
 
@@ -309,15 +331,15 @@ The reconciler should run pre-flight checks before deploying the upgrade:
 After the upgrade & restart, it should run the following checks:
 
 1. PG server is healthy
-2. Ingot is connected
+2. Piri & Ingot are connected
 
-**Rollback**
+Rollback:
 
 Patch/minor formats are compatible in both directions in practice — revert in staging, verify,
 promote, re-trigger per node. Release notes still checked for the rare on-disk change, at staging
 time.
 
-**Major versions**
+### Postgres major version upgrades
 
 The one scenario where git revert is not the rollback: the data directory is rewritten; the
 revert path is restore-from-backup.
@@ -360,6 +382,24 @@ Full Piri & Ingot outage per node for the window (tens of minutes, size-dependen
 
 Retained old data dir + backups. Writes accepted post-migration are lost on rollback, which is exactly why Ingot & Piri stays down until verification passes.
 ollback re-converging against an old app state: check `bootc status` for a rollback whenever node behaviour looks "impossibly old."
+
+### Adopt an immutable OS
+
+Why an immutable OS:
+
+- Prevents a sloppy operator from breaking the box
+- Prevents [snowflake servers](https://martinfowler.com/bliki/SnowflakeServer.html)
+- Unattended security updates
+- A botched OS update is automatically reverted
+
+Options to explore: Fedore CoreOS or bootc; Podman + Quadlet instead of Docker Compose.
+
+### More comprehensive testing
+
+We should implement additional tests to verify that the appliance works correctly after changes were deployed:
+
+- End to end tests. E.g. create tenant, create bucket, upload object, download object
+- Soak tests
 
 ## Open Questions
 
@@ -438,9 +478,11 @@ documentation shows a sample Ansible script.
 
 **Podman + Quadlet**
 
-- Adding another tool, we already use Docker Compose in Smelt
-- Popular distros like vanilla Ubuntu on AWS ship an older version missing some of the features we need
-- The biggest benefit - first-class support on FOCS/bootc - it not relevant, since we decided to use mutable OS for simplicity
+- Distro version sensitivity. Ubuntu LTS ships Podman too old for Notify=healthy.
+- The reconciler would need a custom diff/restart logic.
+- Weaker newcomer ergonomics and smaller ecosystem. "One YAML, docker compose up -d" is a friendlier mental model. We already use Docker Compose in Smelt.
+- Implementing zero-downtime upgrades requires more manual work with Quadlet than with Docker Compose.
+- The biggest benefit - first-class support on FOCS/bootc - it not relevant, since we decided to use mutable OS in MVP for simplicity.
 
 **Komodo v2 (Core + Periphery)**
 
@@ -461,6 +503,12 @@ documentation shows a sample Ansible script.
 - Its automatic rollback (re-tag to previous on restart failure) actively fights the git-revert model
 - Ignores config changes entirely
 - Kept only as a rejected CD engine; cosign verification layered independently instead
+
+**apt/rpm packages**
+
+- This is similar to Podman+Quadlet in the sense that we don't have full control over which version is installed at what time.
+- To manage the node via IaaC & git, we would need to implement a manual process for installing the particular version of each service.
+- Running two versions of the same service is not trivial, the path to zero-downtime blue/green deployments is not clear.
 
 ### Ruled out on category fit
 
