@@ -32,15 +32,12 @@ This document proposes how to deploy and operate the appliance.
 8. The process for managing the dev environment must match the process for managing the
    production environment. Only the configuration and image versions should vary.
 
-The following services do not support more than one instance running concurrently, therefore upgrades must be implemented as in-place restarts:
+### Out of the scope
 
-- Ingot
-- Piri
-- Postgres
-- Vault/OpenBao
-- Caddy
+- zero-downtime upgrades
+- high-availability setup
 
-Zero-downtime upgrades are not possible now, this remains an aspirational future goal.
+See [Post-MVP Hardening](#post-mvp-hardening) for more details.
 
 ## Components & Dependencies
 
