@@ -200,22 +200,21 @@ an infra-central counter-part in
 
 Continuous deployments for the dev instance we operate ourselves:
 
-1. A pull request modifies pinned image versions and/or config versions for the dev node
-2. The pull request is merged
-3. The dev node pulls the new commit (timer-based job) and reconciles the services
-4. A GHA verification workflow triggered by the merged pull request actively polls node's state, waits until the changes are deployed
-5. The workflow performs automated end-to-end smoke tests
-   - create a new tenant, create a new access key, create a new bucket, upload/download object, etc.
-6. If the tests pass, the workflow creates a new pull request to update the per-region infra
-   definition files. If there is an already open pull request for the same region, the workflow
+1. A pull request modifies pinned image versions and/or config versions for the dev node.
+2. The pull request is merged automatically merged after all CI checks passed.
+3. The dev node pulls the new commit (timer-based job) and reconciles the services.
+4. A GHA verification workflow triggered by the merged pull request actively polls node's state, waits until the changes are deployed.
+5. The workflow performs automated smoke tests - checks that apps are serving HTTP requests and reporting healthy status.
+6. If the tests pass, the workflow creates a new pull request to update the per-region infra.
+   definition files. If there is an already open pull request for the same region, the workflow.
    updates it.
 
 To upgrade the non-dev appliance:
 
-1. A developer merges a PR changing a non-dev node configuration
-2. The node pulls the new commit and reconciles the services
+1. A developer merges a PR changing a non-dev node configuration.
+2. The node pulls the new commit and reconciles the services.
 3. The GHA verification workflow triggered by the merged pull request actively polls node's state,
-   waits until the changes are deployed, and runs non-destructive end-to-end tests
+   waits until the changes are deployed, and runs non-destructive end-to-end tests.
 
 ### Updating appliances operated by region providers
 
@@ -377,8 +376,7 @@ Full Piri & Ingot outage per node for the window (tens of minutes, size-dependen
 
 **Rollback**
 
-Retained old data dir + backups. Writes accepted post-migration are lost on rollback, which is exactly why Ingot & Piri stays down until verification passes.
-ollback re-converging against an old app state: check `bootc status` for a rollback whenever node behaviour looks "impossibly old."
+Restore from retained old data dir + backups. Writes accepted post-migration are lost on rollback, which is exactly why Ingot & Piri stays down until verification passes.
 
 ### Adopt an immutable OS
 
