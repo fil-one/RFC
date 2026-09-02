@@ -28,8 +28,8 @@ This document proposes how to deploy and operate the appliance.
    the Piri node is required to submit a PDP proof.
 6. The deployment should be managed using infrastructure-as-code.
 7. We must pin versions of all services, so that we always deploy a combination of
-   versions that was tested in staging and is known to work together correctly.
-8. The process for managing the staging environment must match the process for managing the
+   versions that was tested in dev and is known to work together correctly.
+8. The process for managing the dev environment must match the process for managing the
    production environment. Only the configuration and image versions should vary.
 
 The following services do not support more than one instance running concurrently, therefore upgrades must be implemented as in-place restarts:
@@ -335,8 +335,8 @@ After the upgrade & restart, it should run the following checks:
 
 Rollback:
 
-Patch/minor formats are compatible in both directions in practice — revert in staging, verify,
-promote, re-trigger per node. Release notes still checked for the rare on-disk change, at staging
+Patch/minor formats are compatible in both directions in practice — revert in dev, verify,
+promote, re-trigger per node. Release notes still checked for the rare on-disk change, at dev
 time.
 
 ### Postgres major version upgrades
@@ -344,7 +344,7 @@ time.
 The one scenario where git revert is not the rollback: the data directory is rewritten; the
 revert path is restore-from-backup.
 
-**The staging run is a full dress rehearsal of the migration, including the restore rehearsal.**
+**The dev run is a full dress rehearsal of the migration, including the restore rehearsal.**
 
 1. **Plan before upgrading the dev node:** release notes, extension compatibility, `pg_upgrade` vs dump/restore
    (for a single-node metadata DB, dump/restore is often the honest choice and doubles as a backup
