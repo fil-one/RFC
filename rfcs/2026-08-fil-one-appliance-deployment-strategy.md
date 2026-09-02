@@ -126,7 +126,7 @@ will stop all Apps before upgrading Platform, and bring Apps up after Platform i
 
 ### Implementation details
 
-We will create a new GitHub repository `fil-forge/infra-node` with the following layout:
+We will create a new GitHub repository `fil-forge/infra-nodes` with the following layout:
 
 ```sh
 # Configuration of appliance instances:
@@ -201,12 +201,12 @@ an infra-central counter-part in
 Continuous deployments for the dev instance we operate ourselves:
 
 1. A pull request modifies pinned image versions and/or config versions for the dev node.
-2. The pull request is merged automatically merged after all CI checks passed.
+2. The pull request is merged automatically after all CI checks pass.
 3. The dev node pulls the new commit (timer-based job) and reconciles the services.
 4. A GHA verification workflow triggered by the merged pull request actively polls node's state, waits until the changes are deployed.
 5. The workflow performs automated smoke tests - checks that apps are serving HTTP requests and reporting healthy status.
-6. If the tests pass, the workflow creates a new pull request to update the per-region infra.
-   definition files. If there is an already open pull request for the same region, the workflow.
+6. If the tests pass, the workflow creates a new pull request to update the per-region infra
+   definition files. If there is an already open pull request for the same region, the workflow
    updates it.
 
 To upgrade the non-dev appliance:
@@ -290,7 +290,7 @@ requires verification whether Caddy consumes `LISTEN_FDS`.
 
 ### More robust OpenBao upgrades
 
-Upgrading OpenBao requires restart that seals the vault requires the unseal round-trip to central —
+Upgrading OpenBao requires a restart, which seals the vault and forces the unseal round-trip to central —
 a total regional read outage for the duration. That's one more reason why OpenBao's upgrades must be
 manual and carefully planned.
 
@@ -308,7 +308,7 @@ Upgrades must be rolled per node — never fleet-parallel, since every one is a 
 
 **Config changes**
 
-Postgres is able to pick up most configuration changes via SIGHUP without restart . We should
+Postgres is able to pick up most configuration changes via SIGHUP without restart. We should
 improve the reconciler script to detect such changes and apply them without restarting the server.
 
 See https://www.heatware.net/postgresql/reload-config-with-pg-ctl/
@@ -387,7 +387,7 @@ Why an immutable OS:
 - Unattended security updates
 - A botched OS update is automatically reverted
 
-Options to explore: Fedore CoreOS or bootc; Podman + Quadlet instead of Docker Compose.
+Options to explore: Fedora CoreOS or bootc; Podman + Quadlet instead of Docker Compose.
 
 ### More comprehensive testing
 
@@ -417,7 +417,7 @@ On the other hand, 3rd-party providers have occasional downtimes (Chain.love rep
 
 The region operator has hypervisor access and can read the SSH host key and any authorized-keys material.
 
-Alternative to consider: Trusted Executed Environment, e.g. [Confidential Metal](https://confidential.ai/products#confidential-metal).
+Alternative to consider: Trusted Execution Environment (TEE), e.g. [Confidential Metal](https://confidential.ai/products#confidential-metal).
 
 ### Is a single VM feasible?
 
@@ -462,7 +462,7 @@ documentation shows a sample Ansible script.
 - Requires the root Docker daemon plus Portainer itself as persistent moving parts; a real penalty on `bootc`
 - Mixed cadence is project-level, so protecting Postgres/OpenBao from an unintended recreate takes ongoing discipline
 - "Force redeployment / git-wins" is documented as Business-Edition-only in the 2.27 LTS docs — unverified on CE
-- Loses the systemd `OnFailure=` alerting path and per-unit cgroup directiveso
+- Loses the systemd `OnFailure=` alerting path and per-unit cgroup directives
 
 ### Evaluated but rejected
 
@@ -477,7 +477,7 @@ documentation shows a sample Ansible script.
 - The reconciler would need a custom diff/restart logic.
 - Weaker newcomer ergonomics and smaller ecosystem. "One YAML, docker compose up -d" is a friendlier mental model. We already use Docker Compose in Smelt.
 - Implementing zero-downtime upgrades requires more manual work with Quadlet than with Docker Compose.
-- The biggest benefit - first-class support on FOCS/bootc - it not relevant, since we decided to use mutable OS in MVP for simplicity.
+- The biggest benefit - first-class support on FCOS/bootc - is not relevant, since we decided to use mutable OS in MVP for simplicity.
 
 **Komodo v2 (Core + Periphery)**
 
