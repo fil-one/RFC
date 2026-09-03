@@ -1,4 +1,4 @@
-# RFC: Forge Instances
+# RFC: Forge Instances & Pilot Regions
 
 **Status:** Proposal
 
@@ -78,12 +78,14 @@ How many regions and in which geographic location?
 
 ## Proposal
 
-Provision the following four Forge instances:
+Provision the following three Forge instances:
 
 - production
 - dev
 - staging
-- pilot
+
+Additionally, to support customer pilots, implement support for short-lived pilot regions available
+to selected customers in the production Forge instance.
 
 ### 1. Production
 
@@ -104,6 +106,35 @@ This is the instance our paying customers use.
 
 Note: we need to define the process for shipping hotfixes outside of the regular update schedule.
 The longer the interval between regular updates, the higher the chance that we need a hotfix.
+
+#### Pilot Regions
+
+We need the ability to quickly stand up new regions to allow potential customers evaluate FilOne in
+pilot/proof-of-concept settings. These regions must be production-grade deployment matching the real
+production nodes as much as possible.
+
+Typically, we will need to quickly stand up a new pilot region within 72 hours, keep it running &
+meeting SLAs for 90 days, and decommission it after that.
+
+We will _not_ offer data migration from pilot regions to production.
+
+- **Update frequency:** Manually triggered updates. Typically once before the pilot starts and then
+  when the customer requests new features or we need to fix bugs.
+- **Stability & acceptable outages:** Same guarantees as in production. Full monitoring but alerts &
+  pager duty.
+- **Infrastructure:** Production-like. Nodes will run in Tier-2 infra providers like Vulture, Akamai
+  or servers.com.
+- **FilOne integration**: Available via the production console at https://app.fil.one, with region
+  names suffixed with `-pilot`, e.g. `uk-1-pilot`. Available only to selected users via a feature
+  flag.
+- **Real vs test money:** Real money, Filecoin mainnet.
+- **Data resets:** None during the pilot duration. Data will removed after the pilot has finished.
+- **Regions:** Created on demand.
+- **RPC API:** TBD. Ideally, each region should run a local Lotus node instance. Can we afford the
+  cost and maintenance overhead of that?
+
+Important: by adding pilot regions to the production Forge instance, we allow customers to create S3
+access keys with access to both dev & staging regions.
 
 ### 2. Dev
 
@@ -142,35 +173,6 @@ demos. Not used for load/performance testing to avoid degraded performance durin
 Important: S3 access keys are scoped to a single Forge instance. It won't be possible to create one
 S3 access key with access to both dev & staging regions.
 
-### 4. Pilot
-
-This is the instance we will use for "proof of concept" and "pilot" evaluations performed by
-potential FilOne customers. This must be production-grade deployment matching the real production
-nodes as much as possible.
-
-Typically, we will need to quickly stand up a new pilot region within 72 hours, keep it running &
-meeting SLAs for 90 days, and decommission it after that.
-
-We will _not_ offer data migration from pilot regions to production.
-
-- **Update frequency:** Manually triggered updates. Typically once before the pilot starts and then
-  when the customer requests new features or we need to fix bugs.
-- **Stability & acceptable outages:** Same guarantees as in production. Full monitoring but alerts &
-  pager duty.
-- **Infrastructure:** Production-like. Nodes will run in Tier-2 infra providers like Vulture, Akamai
-  or servers.com.
-- **FilOne integration**: Available via the production console at https://app.fil.one, with region
-  names suffixed with `-pilot`, e.g. `uk-1-pilot`. Available only to selected users via a feature
-  flag.
-- **Real vs test money:** Real money, Filecoin mainnet.
-- **Data resets:** None during the pilot duration. Data will removed after the pilot has finished.
-- **Regions:** Created on demand.
-- **RPC API:** TBD. Ideally, each region should run a local Lotus node instance. Can we afford the
-  cost and maintenance overhead of that?
-
-Important: S3 access keys are scoped to a single Forge instance. It won't be possible to create one
-S3 access key with access to both dev & staging regions.
-
 ## Open questions
 
 - Update frequency for production and staging environments. Do we upgrade regularly (e.g. every
@@ -178,3 +180,19 @@ S3 access key with access to both dev & staging regions.
 - How often we reset data & state in the staging environment.
 - How many Lotus nodes we want to run (per-region vs one central instance)? Where can we outsource
   this to Chain.Love/Protofire?
+
+## Alternatives considered
+
+### Dedicated Forge instance for pilot regions
+
+Pros: Pilots are isolated from production.
+
+- A run-away load test in pilot region does not affect production customers.
+- We can ship changes to central services without risks of breaking production.
+
+Cons:
+
+- Worse user experience, including feature limitations:
+  - A single S3 access key cannot be scoped to access buckets in both production and pilot regions.
+  - Different S3 endpoint hostname format production vs pilot regions.
+- Maintenance overhead - we need to maintain & monitor another set of central services.
