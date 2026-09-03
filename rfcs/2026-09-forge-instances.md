@@ -127,7 +127,8 @@ We will _not_ offer data migration from pilot regions to production.
 - **FilOne integration**: Available via the production console at https://app.fil.one, with region
   names suffixed with `-pilot`, e.g. `uk-1-pilot`. Available only to selected users via a feature
   flag.
-- **Real vs test money:** Real money, Filecoin mainnet.
+- **Real vs test money:** Real money, Filecoin mainnet. We can apply a discount coupon on Stripe to
+  give the customer a free pilot.
 - **Data resets:** None during the pilot duration. Data will removed after the pilot has finished.
 - **Regions:** Created on demand.
 - **RPC API:** TBD. Ideally, each region should run a local Lotus node instance. Can we afford the
