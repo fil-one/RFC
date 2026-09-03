@@ -128,7 +128,8 @@ We will _not_ offer data migration from pilot regions to production.
   flag.
 - **Real vs test money:** Real money, Filecoin mainnet. We can apply a discount coupon on Stripe to
   give the customer a free pilot.
-- **Data resets:** None during the pilot duration. Data will removed after the pilot has finished.
+- **Data resets:** None during the pilot duration. Data will be removed after the pilot has
+  finished.
 - **Regions:** Created on demand.
 - **RPC API:** TBD. Ideally, each region should run a local Lotus node instance. Can we afford the
   cost and maintenance overhead of that?
