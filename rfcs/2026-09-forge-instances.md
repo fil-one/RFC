@@ -120,8 +120,7 @@ We will _not_ offer data migration from pilot regions to production.
 
 - **Update frequency:** Manually triggered updates. Typically once before the pilot starts and then
   when the customer requests new features or we need to fix bugs.
-- **Stability & acceptable outages:** Same guarantees as in production. Full monitoring but alerts &
-  pager duty.
+- **Stability & acceptable outages:** Same guarantees as in production. Full monitoring with alerts routed to the person on pager duty.
 - **Infrastructure:** Production-like. Nodes will run in Tier-2 infra providers like Vulture, Akamai
   or servers.com.
 - **FilOne integration**: Available via the production console at https://app.fil.one, with region
