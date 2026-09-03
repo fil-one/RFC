@@ -237,7 +237,15 @@ each cheap while the platform is healthy:
   method in the space's DID document that signs only exit grants. The
   artifact must also bundle the DID/PLC operation-log material for offline
   issuer verification -- and holding the log is only preservation;
-  validation needs a presentation path (see Prerequisites).
+  validation needs a presentation path (see Prerequisites). As built,
+  spaces are ephemeral `did:key`s whose private key is discarded at bucket
+  creation: there is no space key to rotate and no space DID document to
+  amend, and every space-subject capability chains through the tenant's
+  retained `/` delegation. The rotation-survival question therefore
+  attaches to the *tenant* key, "customer custody of the space authority"
+  means holding a delegation chain rather than a key, and the
+  DID-document remedy presumes moving spaces to resolvable DIDs -- the
+  follow-up RFC must pick against this reality, not the aspirational one.
 - **Retention** is the bounded residual: under insolvency, exit is a race
   against the payment rail, and Tier 2 marketing should say so.
 
@@ -277,7 +285,11 @@ re-encryption, but it does not work today:
    CAS root makes the pin well-defined, but a pin alone does not stop
    blocks orphaned by mid-export overwrites or deletes from being reaped --
    the closure needs an explicit GC/removal exemption for the export's
-   duration.
+   duration. The pin covers key material as well as blocks: cryptoshred is
+   live, and releasing a blob's last claim deletes its region-wrapped-CEK
+   row even though the bytes survive, so the export MUST hold a claim (or
+   defer key-row shredding) for every encrypted digest in the pinned
+   closure until the manifest is built.
 3. **A Hilt/region rewrap API.** Neither unwrap-and-rewrap-to-external-key
    path exists as a service. Note the [regional key-management
    design](https://github.com/fil-one/RFC/pull/21) interaction: OpenBao
@@ -285,7 +297,12 @@ re-encryption, but it does not work today:
    external X25519 key passes each CEK through export-process memory -- a
    bounded per-CEK exposure (blast radius of one object, same as a GET) to
    state as an explicit exception to that design's "no CEK in our
-   processes" property.
+   processes" property. The tenant-path rewrap and Option A carry a second,
+   larger exception: Hilt's vault is opaque key-value storage with no
+   in-vault ECDH, so unwrapping or releasing a tenant KEK passes the raw
+   X25519 private key through Hilt's process memory. Both exceptions are
+   accepted, bounded to the ceremony's duration, and MUST be stated in the
+   implementation -- never logged, never persisted, buffers zeroed.
 4. **Public export schemas and decoder.** `ExitKeyManifestV1` and
    `TenantKeyBundleV1` as versioned canonical IPLD/CBOR schemas, with at
    least one independent decoder covering both.
