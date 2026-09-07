@@ -23,7 +23,7 @@ This document proposes how to deploy and operate the appliance.
    side of the region provider/operator.
 2. Fil One must be able to deploy security and bug fixes in a timely manner (hours, not days).
 3. Fil One must have visibility into operational metrics and logs.
-4. Upgrades must cause as short downtime as possible. We should aim for zero-downtime upgrades.
+4. Upgrades must cause as short downtime as possible.
 5. Upgrades must honour operator obligations on chain. E.g., we cannot upgrade in the window where
    the Piri node is required to submit a PDP proof.
 6. The deployment should be managed using infrastructure-as-code.
@@ -72,7 +72,7 @@ Easy to recreate, disposable.
 - A Postgres-compatible database
 - A secure secret manager (OpenBao, unsealed using Fil One's central OpenBao instance)
 - Caddy (TLS termination, cert management)
-- Filecoin RPC API node (Lotus). Can be initially replaced with an external provider like chain.love.
+- Filecoin RPC API node (Lotus).
 
 Updated infrequently, primarily to apply bugfixes and security patches.
 
