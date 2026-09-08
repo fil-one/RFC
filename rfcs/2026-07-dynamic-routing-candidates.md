@@ -2,6 +2,12 @@
 
 Status: Experimental
 
+> **Note:** Implementation of this RFC is deferred for the time being.
+> [Routing policies](2026-08-routing-policies.md), a space-level alternative
+> to the per-invocation design described here, is being implemented instead.
+> This RFC is retained as a record of the design and the trade-offs
+> considered, and may be revisited.
+
 ## Authors
 
 - [Alan Shaw](https://github.com/alanshaw)
