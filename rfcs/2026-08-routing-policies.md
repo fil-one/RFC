@@ -72,15 +72,15 @@ be discarded — mirroring the
 [bucket key pattern](2026-06-forge-s3-tenant-management.md#bucket-creation).
 
 A policy requires no registration step: it exists in Sprue once its first
-[`/routing/set`](#routingset) invocation succeeds.
+[`/routing/put`](#routingput) invocation succeeds.
 
-### `/routing/set`
+### `/routing/put`
 
-An authorized agent MAY invoke the `/routing/set` capability on a **routing
+An authorized agent MAY invoke the `/routing/put` capability on a **routing
 policy** subject to replace the policy's candidate set.
 
 ```ipldsch
-type RoutingSetArguments struct {
+type RoutingPutArguments struct {
   candidates { DID: Candidate }
 }
 
@@ -90,7 +90,7 @@ type Candidate struct {}
 `candidates` MUST contain one or more entries. Every key MUST be a DID
 identifying a storage node registered with Sprue. An invocation with an empty
 map or a key that does not identify a registered storage node is invalid and
-Sprue MUST reject it.
+Sprue MUST reject it _(error name `InvalidCandidates`)_.
 
 The map is a candidate set, not a preference order — map encoding is
 inherently unordered, and [dag-cbor] sorts map keys, keeping the encoding
@@ -102,7 +102,7 @@ per-node properties that influence routing decisions (e.g. weight).
   "iss": "did:web:hilt.example.com",
   "aud": "did:web:sprue.example.com",
   "sub": "did:key:zPolicy",
-  "cmd": "/routing/set",
+  "cmd": "/routing/put",
   "args": {
     "candidates": {
       "did:key:zPiri1": {},
@@ -132,11 +132,12 @@ type RoutingUseArguments struct {
 
 When present, `policy` MUST identify a routing policy known to Sprue — one
 with a stored candidate set. An invocation referencing an unknown policy is
-invalid and Sprue MUST reject it. When absent, the space's policy reference is
-cleared and the space returns to Sprue's default routing.
+invalid and Sprue MUST reject it _(error name `UnknownPolicy`)_. When absent,
+the space's policy reference is cleared and the space returns to Sprue's
+default routing.
 
 The invocation MUST fail if the subject space is not provisioned with a
-provider.
+provider _(error name `SpaceNotProvisioned`)_.
 
 ```jsonc
 {
@@ -153,27 +154,6 @@ provider.
 ```
 
 The success value is an empty object.
-
-### `/routing/get`
-
-An authorized agent MAY invoke the `/routing/get` capability to inspect stored
-routing state. It takes no arguments. On a **routing policy** subject the
-success value is the policy's candidate set:
-
-```ipldsch
-type RoutingGetPolicyOK struct {
-  candidates { DID: Candidate }
-}
-```
-
-On a **space** subject the success value is the space's policy reference,
-where `policy` is absent when the space references no policy:
-
-```ipldsch
-type RoutingGetSpaceOK struct {
-  policy optional DID
-}
-```
 
 ### Routing
 
@@ -197,9 +177,10 @@ undefined by this RFC. A future revision MAY specify it.
 ### S3 deployment use
 
 [Hilt](2026-06-forge-s3-tenant-management.md) creates one routing policy per
-region at setup and holds the policy's root delegation. It is configured with
-the storage-node DIDs serving each region and maintains each policy's
-candidates with `/routing/set`.
+region when the region's provider is registered, and holds the policy's root
+delegation. Provider registration carries the storage-node DIDs serving the
+region; Hilt writes them to the policy with `/routing/put`. An admin command
+replaces the node set when the provider's nodes change.
 
 On bucket creation, after provisioning the bucket (space) with Sprue, Hilt
 invokes `/routing/use` — signed with the tenant key, whose authority flows
@@ -207,7 +188,7 @@ from the bucket's root delegation — pointing the bucket at its region's
 policy.
 
 A provider adding, removing, or replacing a Piri node is then a single
-`/routing/set` on the region's policy: no space is touched, and every bucket
+`/routing/put` on the region's policy: no space is touched, and every bucket
 in the region follows immediately. Ingot requires no knowledge of storage-node
 DIDs at all.
 
@@ -224,7 +205,7 @@ This design deliberately accepts costs identified in
 - Sprue stores state — a candidate set per policy and a reference per space —
   and MUST resolve the reference on every routing decision for a constrained
   space.
-- Changes require a `/routing/set` or `/routing/use` invocation before taking
+- Changes require a `/routing/put` or `/routing/use` invocation before taking
   effect, creating a window in which Sprue may route using outdated state.
 - A space is pinned to its policy's candidates; a future multi-region bucket
   would need a policy spanning regions, weakening the locality property the
@@ -247,7 +228,7 @@ correct candidates on every write.
 ### Per-space candidate list
 
 Store the candidate set directly as an attribute of each space (e.g. via a
-`/routing/set` on the space subject). Rejected: every space in a region
+`/routing/put` on the space subject). Rejected: every space in a region
 duplicates the same list, and a change to the region's nodes becomes an update
 to every one of its spaces — with a long window in which spaces route to
 outdated nodes.
