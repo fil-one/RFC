@@ -191,12 +191,8 @@ routing semantics as it did before this change.
 
 #### Replication
 
-The policy constrains replica placement as well: every replica node selected
-for the space under the [replication protocol] MUST be a candidate of the
-referenced policy. Since a replica node is never the node that received the
-initial allocation, replication at level _n_ requires the policy to contain at
-least _n + 1_ candidates. Policy managers MUST size candidate sets
-accordingly.
+How a policy applies to replica placement under the [replication protocol] is
+undefined by this RFC. A future revision MAY specify it.
 
 ### S3 deployment use
 
