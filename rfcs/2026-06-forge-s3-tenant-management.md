@@ -106,32 +106,43 @@ Bucket-level:
 
 - `s3:CreateBucket`, `s3:ListAllMyBuckets`, `s3:DeleteBucket`
 
+Multipart upload:
+
+- `s3:AbortMultipartUpload`, `s3:ListMultipartUploadParts`, `s3:ListBucketMultipartUploads`
+
 Note: there is an AWS quirk where `s3:ListBucket` lists _objects_ in a bucket, while `s3:ListAllMyBuckets` lists buckets. Similarly, `s3:ListBucketVersions` allows listing _object_ versions in a bucket.
+
+Note: initiating a multipart upload, uploading a part and completing an upload all require `s3:PutObject` — they have no permission of their own. See [multipart uploads](#multipart-uploads).
 
 When an access key is created, Forge related permissions are delegated from the _tenant_ to the _access key_, depending on what S3 permissions are selected:
 
-| S3 Permission            | Forge Command                                                 |
-| ------------------------ | ------------------------------------------------------------- |
-| `s3:GetObject`           | `/content/retrieve`                                           |
-| `s3:GetObjectVersion`    | `/content/retrieve`                                           |
-| `s3:GetObjectRetention`  | `/content/retrieve`                                           |
-| `s3:GetObjectLegalHold`  | `/content/retrieve`                                           |
-| `s3:PutObject`           | `/content/retrieve`, `/blob/add`, `/index/add`, `/upload/add` |
-| `s3:PutObjectRetention`  | `/content/retrieve`, `/blob/add`, `/index/add`, `/upload/add` |
-| `s3:PutObjectLegalHold`  | `/content/retrieve`, `/blob/add`, `/index/add`, `/upload/add` |
-| `s3:DeleteObject`        | `/blob/remove`, `/upload/remove`                              |
-| `s3:DeleteObjectVersion` | `/blob/remove`, `/upload/remove`                              |
-| `s3:ListBucket`          | `/content/retrieve`                                           |
-| `s3:ListBucketVersions`  | `/content/retrieve`                                           |
-| `s3:CreateBucket`        | n/a                                                           |
-| `s3:ListAllMyBuckets`    | n/a                                                           |
-| `s3:DeleteBucket`        | n/a                                                           |
+| S3 Permission                   | Forge Command                                                                                |
+| ------------------------------- | -------------------------------------------------------------------------------------------- |
+| `s3:GetObject`                  | `/content/retrieve`                                                                          |
+| `s3:GetObjectVersion`           | `/content/retrieve`                                                                          |
+| `s3:GetObjectRetention`         | `/content/retrieve`                                                                          |
+| `s3:GetObjectLegalHold`         | `/content/retrieve`                                                                          |
+| `s3:PutObject`                  | `/content/retrieve`, `/blob/add`, `/index/add`, `/upload/add`, `/blob/abort`, `/blob/remove` |
+| `s3:PutObjectRetention`         | `/content/retrieve`, `/blob/add`, `/index/add`, `/upload/add`, `/blob/abort`                 |
+| `s3:PutObjectLegalHold`         | `/content/retrieve`, `/blob/add`, `/index/add`, `/upload/add`, `/blob/abort`                 |
+| `s3:DeleteObject`               | `/blob/remove`, `/upload/remove`                                                             |
+| `s3:DeleteObjectVersion`        | `/blob/remove`, `/upload/remove`                                                             |
+| `s3:ListBucket`                 | `/content/retrieve`                                                                          |
+| `s3:ListBucketVersions`         | `/content/retrieve`                                                                          |
+| `s3:CreateBucket`               | n/a                                                                                          |
+| `s3:ListAllMyBuckets`           | n/a                                                                                          |
+| `s3:DeleteBucket`               | n/a                                                                                          |
+| `s3:AbortMultipartUpload`       | `/blob/abort`, `/blob/remove`                                                                |
+| `s3:ListMultipartUploadParts`   | `/content/retrieve`                                                                          |
+| `s3:ListBucketMultipartUploads` | `/content/retrieve`                                                                          |
+
+`/blob/abort` accompanies the write commands because an upload may not complete: it abandons a blob that was allocated and uploaded but never accepted. Likewise, `/blob/remove` accompanies the write commands because an S3 put may replace an existing object.
 
 Observe that in the table above, multiple permissions map to the same forge command and some permissions do not have an equivalent Forge command. Hilt and Ingot MUST be able to determine if an access key is authorized to perform the S3 action and cannot do this by simply receiving Forge delegations alone.
 
 To address this problem and facilitate authorization at Ingot, delegations for accessing the Forge network MUST be accompanied by the list of S3 permissions assigned to the access key. See [`/s3/request/authorize`](#s3requestauthorize).
 
-Given a tenant key `did:plc:tenant`, a bucket `did:key:bucket`, and an access key `did:key:access`, granting the `s3:GetObject` and `s3:PutObject` permissions involves creating and storing the following 4 UCAN delegations:
+Given a tenant key `did:plc:tenant`, a bucket `did:key:bucket`, and an access key `did:key:access`, granting the `s3:GetObject` and `s3:PutObject` permissions involves creating and storing the following UCAN delegations:
 
 ```jsonc
 {
@@ -173,11 +184,54 @@ Given a tenant key `did:plc:tenant`, a bucket `did:key:bucket`, and an access ke
 }
 ```
 
+```jsonc
+{
+  "iss": "did:plc:tenant",
+  "aud": "did:key:access",
+  "sub": "did:key:bucket",
+  "cmd": "/blob/abort",
+  // ...
+}
+```
+
 Delegations MUST be indexed by audience and MAY be indexed by subject and command as well. This allows efficient lookup when validating a request and facilitates removal when an access key is deleted.
 
 For multiple buckets, multiple delegations are created. Powerline delegations MAY be created to allow access to _any_ bucket existing or future (see [bucket access](#bucket-access)).
 
 S3 permissions where there is not an equivalent Forge delegation MUST be handled directly by Ingot or forwarded to a UCAN API at Hilt.
+
+### Multipart uploads
+
+The multipart upload API requires the following permissions (see [Multipart upload and permissions](https://docs.aws.amazon.com/AmazonS3/latest/userguide/mpuoverview.html#mpuAndPermissions)):
+
+| S3 Operation              | Required Permission                                     |
+| ------------------------- | ------------------------------------------------------- |
+| `CreateMultipartUpload`   | `s3:PutObject`                                          |
+| `UploadPart`              | `s3:PutObject`                                          |
+| `UploadPartCopy`          | `s3:PutObject` (target), `s3:GetObject` (source object) |
+| `CompleteMultipartUpload` | `s3:PutObject`                                          |
+| `AbortMultipartUpload`    | `s3:AbortMultipartUpload`                               |
+| `ListParts`               | `s3:ListMultipartUploadParts`                           |
+| `ListMultipartUploads`    | `s3:ListBucketMultipartUploads`                         |
+
+Because the three write operations require `s3:PutObject`, an access key that can already put an object can perform multipart writes without being re-issued.
+
+Multipart requests are distinguished from their plain object counterparts by query parameters _alone_. Hilt and Ingot MUST therefore derive the S3 operation from the request method, path **and** query string:
+
+| Request                                            | S3 Operation              | Would otherwise be |
+| -------------------------------------------------- | ------------------------- | ------------------ |
+| `POST /{bucket}/{key}?uploads`                     | `CreateMultipartUpload`   | `PutObject`        |
+| `PUT /{bucket}/{key}?partNumber={n}&uploadId={id}` | `UploadPart`              | `PutObject`        |
+| `POST /{bucket}/{key}?uploadId={id}`               | `CompleteMultipartUpload` | `PutObject`        |
+| `DELETE /{bucket}/{key}?uploadId={id}`             | `AbortMultipartUpload`    | `DeleteObject`     |
+| `GET /{bucket}/{key}?uploadId={id}`                | `ListParts`               | `GetObject`        |
+| `GET /{bucket}?uploads`                            | `ListMultipartUploads`    | `ListBucket`       |
+
+The `uploads`, `uploadId` and `partNumber` parameter names are case-sensitive. The query string is part of the SigV4 canonical request, so once the signature is verified the derived operation is bound to what the caller signed — the same guarantee the request path has.
+
+Stopping an upload rather than completing it MUST discard the parts uploaded so far. Parts still parked — allocated and uploaded, but never accepted — are abandoned with `/blob/abort`; parts already accepted are released with `/blob/remove`. Hence `s3:AbortMultipartUpload` maps to both.
+
+Note: Hilt requires only `s3:PutObject` for `UploadPartCopy`. The copy source is identified by the `x-amz-copy-source` header, which is not guaranteed to be covered by the request signature, so it cannot be authorized safely from the signed request alone. Ingot MUST enforce read access to the copy source.
 
 ### Bucket access
 
@@ -370,6 +424,7 @@ When handling an authorization request the following steps are performed:
 1. Lookup the secret key corresponding to the `accessKeyId` from the `Authorization` header credential (signed requests) or the `X-Amz-Credential` query parameter (presigned URLs).
 1. Derive signing key and verify request signature.
 1. Lookup bucket DID (the subject) from its name in the request URL.
+1. Determine the S3 action from the request method, path and query string (see [multipart uploads](#multipart-uploads)).
 1. Verify the access key has correct permission for the requested S3 action.
 1. Verify the tenant associated with the access key matches the invocation issuer.
 1. Fetch stored delegations for the access key and re-delegate to the invocation issuer.
@@ -668,6 +723,7 @@ Some resources that were used in the making of this document:
 
 * Canonical request https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_sigv-create-signed-request.html#create-canonical-request
 * Sigv4a signing examples https://github.com/aws-samples/sigv4a-signing-examples
+* Multipart upload and permissions https://docs.aws.amazon.com/AmazonS3/latest/userguide/mpuoverview.html#mpuAndPermissions
 
 
 ## Appendix
