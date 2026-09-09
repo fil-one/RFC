@@ -75,7 +75,6 @@ Routes, all under `/tenants/{tenantId}/principals` and authenticated with the pa
 | Method | Path                                 | Purpose                                                 |
 | ------ | ------------------------------------ | ------------------------------------------------------- |
 | PUT    | `/principals/{userId}`               | Create the principal; 200 if it exists. Idempotent.     |
-| POST   | `/principals`                        | Batch create: `{"userIds": [...]}`. Idempotent per id.  |
 | GET    | `/principals`                        | List principals.                                        |
 | GET    | `/principals/{userId}`               | Principal detail.                                       |
 | DELETE | `/principals/{userId}`               | Remove the principal (see [removal](#principal-removal)). 204 if already gone. |
@@ -84,7 +83,7 @@ Routes, all under `/tenants/{tenantId}/principals` and authenticated with the pa
 | POST   | `/principals/{userId}/access-keys`   | Issue a key bound to the principal.                     |
 | GET    | `/principals/{userId}/access-keys`   | List the principal's keys.                              |
 
-`userId` is an opaque string supplied by the caller, unique within the tenant. The batch route exists for the console's provisioning sweep when a network moves to `iam`.
+`userId` is an opaque string supplied by the caller, unique within the tenant.
 
 A principal is represented as:
 
@@ -374,7 +373,7 @@ Forge runs demo and dev environments only, so existing tenants are migrated in p
 1. Deploy Ingot with the effective-action check on every gateway serving the network.
 2. Deploy Hilt. Its migration deletes every existing access key, publishing revocations for their delegations first, and drops the key's `permissions` and `buckets` columns. Tenants, buckets, and bucket root delegations are untouched.
 3. The console calls `POST /tenants/{tenantId}/service-credential` for each existing tenant and stores the result where it keeps the tenant's console credential today.
-4. The console writes principals for existing members through the batch route, and a policy per bucket naming the org's Owners and Admins.
+4. The console creates a principal for each existing member with `PUT /tenants/{tenantId}/principals/{userId}`, then writes a policy per bucket naming the org's Owners and Admins.
 5. The console flips the region's registry entry to `iam`.
 
 Between steps 2 and 5 no key on the network works. Demo and dev tolerate that window.
@@ -486,7 +485,7 @@ The standing delegation lives in the existing `delegation` table with `audience`
 
 1. Hilt's migration has already deleted the tenant's keys and published their revocations.
 2. Fil One calls `POST /tenants/{tenantId}/service-credential`. Hilt mints the credential, issues its powerline delegations, and returns it.
-3. Fil One calls `POST /tenants/{tenantId}/principals` with every member's `userId`.
+3. Fil One calls `PUT /tenants/{tenantId}/principals/{userId}` for every member.
 4. Hilt generates a key and a standing delegation per principal.
 5. Fil One writes each bucket's policy.
 
