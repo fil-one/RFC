@@ -24,7 +24,7 @@ On Forge the ADR settles three things: each member is a principal at the storage
 
 1. The storage system computes what a principal may do on a bucket from that bucket's policy alone, `Allow` minus `Deny`, with an explicit `Deny` winning.
 2. A policy edit changes what every key bound to a named principal may do, with no key reissued.
-3. Every narrowing reaches the gateway's warm caches before Hilt acknowledges it, over the revocation path that already exists.
+3. Every narrowing reaches the gateway's warm caches before Hilt acknowledges it, through a Swarf record that Ingot's firehose consumer acts on.
 4. The console signs a member's traffic, presigned URLs included, with a key bound to that member's principal, and keeps one tenant-wide credential for traffic that has no member actor.
 5. Hilt has one authorization model. Existing tenants move to it in place.
 
@@ -36,15 +36,15 @@ The parent RFC's roles apply. Swarf is added:
 
 | Name  | Description                                                                                                |
 | ----- | ---------------------------------------------------------------------------------------------------------- |
-| Swarf | The Forge revocation service. Hilt publishes revocations to it; Ingot consumes its revocation firehose.    |
+| Swarf | The Forge revocation service. Hilt publishes revocations and principal invalidations to it; Ingot consumes its firehose. |
 
 ### Terms
 
-- **Principal.** A member as Hilt knows them: `(tenant, userId)`. A principal carries no permissions and no role. It is an ed25519 `did:key` whose private key Hilt stores.
+- **Principal.** A member as Hilt knows them: `(tenant, userId)` and nothing more. A principal carries no permissions, no role, and no key material.
 - **Bucket policy.** A bucket's own document of statements. Each statement has an effect, a list of principals, and a list of S3 actions. The policy is created with its bucket and destroyed with it.
 - **Principal-bound key.** An S3 access key that authenticates a request and identifies a principal. It holds no authority of its own.
 - **Service credential.** The console's tenant-wide key for traffic that has no member actor: tenant setup, bucket create and delete, and background workers. Everything a member does in the console, from listing buckets and objects to deleting objects and redeeming presigned URLs, is signed with a key bound to that member's principal.
-- **Standing delegation.** The one stored delegation from a tenant to a principal. Rotating it is how a narrowing reaches the gateway.
+- **Principal invalidation.** The Swarf record that tells every gateway to forget the proofs it cached for a principal's keys. Publishing it is how a narrowing reaches the gateway.
 
 ## Hilt - Tenant API
 
@@ -90,28 +90,11 @@ A principal is represented as:
 ```jsonc
 {
   "userId": "8f2c...",
-  "did": "did:key:z6Mk...",
   "createdAt": "2026-09-09T10:00:00Z"
 }
 ```
 
-On creation Hilt MUST:
-
-1. Generate an ed25519 key. Its DID is the principal's DID. Store the private key at `/tenant/{tenant}/principal/{did}`.
-2. Issue and store the standing delegation, signed with the tenant key:
-
-```jsonc
-{
-  "iss": "did:plc:tenant",
-  "aud": "did:key:principal",
-  "sub": null,        // powerline: every bucket the tenant owns, now or later
-  "cmd": "/",
-  "pol": [],
-  // no expiration
-}
-```
-
-The standing delegation is a proof-chain hop and grants nothing at the request. Hilt holds the principal's private key and issues per-request delegations no wider than the bucket's policy allows. This is the position the parent RFC's powerline key delegations already occupy.
+Creating a principal stores the row and nothing else. A principal has no DID, no vault entry, and no delegation. It appears in no UCAN: Hilt evaluates the bucket policy for the principal and signs the per-request delegation with the tenant key, so the proof chain runs from the bucket to the tenant to the gateway.
 
 The principal's effective actions are read through `GET /principals/{userId}/access`:
 
@@ -206,46 +189,42 @@ The console holds one such key per member for its own traffic, minted on the mem
 
 `GET /tenants/{tenantId}/access-keys` and `GET /tenants/{tenantId}/access-keys/{accessKeyId}` return the `principal` field. The key list does not carry each key's access; the console reads a principal's access once through the principal route instead of once per key.
 
-`DELETE /tenants/{tenantId}/access-keys/{accessKeyId}` is unchanged. It MUST rotate the principal's standing delegation before deleting the key (see [narrowing](#narrowing-and-the-standing-delegation)), because the key holds no delegation of its own that a revocation could name.
+`DELETE /tenants/{tenantId}/access-keys/{accessKeyId}` is unchanged. It MUST publish a principal invalidation before deleting the key (see [narrowing](#narrowing-and-principal-invalidation)), because the key holds no delegation of its own that a revocation could name.
 
 Access keys count toward `accessKeyCount`. Hilt enforces no key limit today, and none is added.
 
-### Narrowing and the standing delegation
+### Narrowing and principal invalidation
 
-A narrowing is any change that removes an action a principal held on a bucket: a policy `PUT` or `DELETE` whose effective set for the principal shrinks, the deletion of one of the principal's keys, or the removal of the principal. Hilt MUST publish the revocations a narrowing requires before acknowledging it.
+A narrowing is any change that removes an action a principal held on a bucket: a policy `PUT` or `DELETE` whose effective set for the principal shrinks, the deletion of one of the principal's keys, or the removal of the principal. Hilt MUST publish a principal invalidation for each affected principal before acknowledging the change.
 
-The gateway caches proof chains until the next UTC midnight and drops a cached chain only when Swarf's firehose names a delegation in it. Every chain for a principal's keys contains the principal's standing delegation, so revoking that one delegation drops every warm chain for every key the principal holds. Hilt therefore rotates the standing delegation on each narrowing:
+The gateway caches proof chains and effective action sets per access key until the next UTC midnight. Nothing in those chains identifies the principal, so no delegation revocation can clear them. The invalidation record names the principal directly (see [Swarf - principal invalidation](#swarf---principal-invalidation)), and the gateway drops every store it holds for that principal's keys.
 
-1. Issue a new standing delegation for the principal and store it.
-2. Publish a revocation of the previous one to Swarf, signed with the tenant key. The tenant issued it, so no witness path is needed.
-3. Commit the change that caused the narrowing together with the new delegation, and delete the previous delegation row.
+If publishing fails, Hilt MUST return 500 and MUST NOT commit the change. A retry publishes again. A failed narrowing leaves the principal with its old access and never with more.
 
-If publishing fails, Hilt MUST return 500 and MUST NOT commit the change. A retry rotates again. The previous delegation stays valid until the revocation lands, so a failed narrowing leaves the principal with its old access and never with more.
+A policy write MUST compute, for each principal named in the old or new document (expanding `*` to every principal of the tenant), whether its effective set on the bucket lost any action, and publish one invalidation per such principal. A widening publishes nothing. Deleting a key publishes one invalidation for the key's principal; the principal's other keys lose their cached proofs too and refill on their next request.
 
-A policy write MUST compute, for each principal named in the old or new document (expanding `*` to every principal of the tenant), whether its effective set on the bucket lost any action, and rotate exactly those principals. A widening rotates nobody and publishes nothing.
-
-The staleness bound for a narrowing is the time from Hilt's acknowledgement to the gateway consuming the firehose record. It is bounded by firehose latency and is independent of the midnight horizon.
+The staleness bound for a narrowing is the time from Hilt's acknowledgement to the gateway consuming the firehose record. It is bounded by firehose latency and is independent of the midnight horizon. The record clears gateway caches and nothing else: a per-request delegation the gateway already holds in flight stays valid at Sprue and Piri until its expiry, because those services check revocation by delegation CID and the record names none.
 
 ### Principal removal
 
 `DELETE /tenants/{tenantId}/principals/{userId}` MUST, in order:
 
-1. Publish a revocation of the principal's standing delegation.
+1. Publish a principal invalidation.
 2. Remove the principal from every statement naming it, deleting statements left with no principal and policies left with no statement.
 3. Delete the principal's keys: vault entries and rows.
-4. Delete the standing delegation row, the principal's vault entry, and the principal row.
+4. Delete the principal row.
 
-A removed member who is later re-invited gets a new principal with a new DID. No statement survives to restore their old access.
+A removed member who is later re-invited gets a new principal row. No statement survives to restore their old access.
 
 ### Bucket deletion
 
-`/s3/bucket/delete` deletes the bucket's policy with the bucket. For an `iam` tenant there are no subject-scoped delegations to revoke: principals hold powerline delegations, and per-request delegations are not stored. Hilt publishes nothing. The gateway removes the bucket from its registry on the same request, and its local authorization refuses any bucket it does not know, so cached chains for the deleted bucket cannot be used.
+`/s3/bucket/delete` deletes the bucket's policy with the bucket. There is nothing to revoke: principals hold no delegations, and per-request delegations are not stored. Hilt publishes nothing. The gateway removes the bucket from its registry on the same request, and its local authorization refuses any bucket it does not know, so cached chains for the deleted bucket cannot be used.
 
 Deleting a tenant cascades over principals, policies, keys, and the service credential. As today, it publishes no revocations and deactivates the tenant's `did:plc`.
 
 ## Hilt - UCAN API
 
-The commands and their argument types are unchanged. The result types gain one field, and the authorization steps gain a branch for `iam` tenants.
+The commands and their argument types are unchanged. The result types gain one field, and the authorization steps gain a branch for access keys.
 
 ### `/s3/request/authorize`
 
@@ -260,11 +239,11 @@ For a request signed with an access key, Hilt performs the parent RFC's steps th
 5. Resolve the bucket by name. If it does not exist, or belongs to another tenant, refuse with `UnknownBucket`.
 6. Compute `effective(principal, bucket)`. If it is empty, refuse with `UnknownBucket`.
 7. If the action is not in the effective set, refuse with `OperationNotPermitted`.
-8. Issue one per-request delegation per Forge command mapped from the action, signed with the principal's private key:
+8. Issue one per-request delegation per Forge command mapped from the action, signed with the tenant key:
 
 ```jsonc
 {
-  "iss": "did:key:principal",
+  "iss": "did:plc:tenant",
   "aud": "did:web:gateway",     // the invocation issuer
   "sub": "did:key:bucket",
   "cmd": "/content/retrieve",
@@ -272,7 +251,7 @@ For a request signed with an access key, Hilt performs the parent RFC's steps th
 }
 ```
 
-The expiry rule is the parent RFC's. Per-request delegations are returned in the response container and are not stored.
+The expiry rule is the parent RFC's. Per-request delegations are returned in the response container and are not stored. Hilt already loads the tenant key to provision buckets, so signing with it adds no vault read the request path does not have today.
 
 **Result.** `AuthorizeOK` gains an optional `principal` field, and `permissions` carries the key's effective actions on the addressed bucket:
 
@@ -280,7 +259,7 @@ The expiry rule is the parent RFC's. Per-request delegations are returned in the
 type AuthorizeOK struct {
   bucket      optional String      # bucket DID; absent for ListBuckets and CreateBucket
   tenant      String               # tenant DID
-  principal   optional String      # principal DID; absent for the service credential
+  principal   optional String      # principal userId; absent for the service credential
   permissions { String: [String] } # access key DID → effective actions on `bucket`
   keys        { String: [VerificationKey] }
   delegations { String: [Link] }
@@ -294,7 +273,7 @@ type AuthorizeOK struct {
 type AuthorizeOK struct {
   Bucket      *did.DID         `cborgen:"bucket,omitempty"`
   Tenant      did.DID          `cborgen:"tenant"`
-  Principal   *did.DID         `cborgen:"principal,omitempty"`
+  Principal   *string          `cborgen:"principal,omitempty"`
   Permissions s3.PermissionSet `cborgen:"permissions"`
   Keys        s3.KeySet        `cborgen:"keys"`
   Delegations s3.ProofSet      `cborgen:"delegations"`
@@ -302,14 +281,11 @@ type AuthorizeOK struct {
 ```
 </details>
 
-For `ListBuckets` the effective actions are `["s3:ListAllMyBuckets"]`. For the service credential `permissions` carries the full vocabulary.
+For `ListBuckets` the effective actions are `["s3:ListAllMyBuckets"]`. For the service credential `permissions` carries the full vocabulary. `tenant` and `principal` together identify the principal, and are what the gateway indexes its caches by.
 
 ### `/s3/bucket/info`
 
-For an access key the chain runs from the bucket to the principal, since the key is not a hop:
-
-- root: bucket → tenant, `cmd: "/"`
-- standing: tenant → principal, `sub: null`, `cmd: "/"`
+For an access key the chain is the bucket root alone, bucket → tenant with `cmd: "/"`. Neither the principal nor the key is a hop.
 
 `InfoOK` gains the same optional `principal` field, and `permissions` carries the key's effective actions on the bucket. A key whose principal cannot reach the bucket receives `UnknownBucket`.
 
@@ -325,13 +301,65 @@ Unchanged. The listing is the tenant's whole bucket set, as AWS lists names the 
 
 No new failure names. `UnknownBucket` covers a bucket that does not exist, belongs to another tenant, or is out of the principal's reach. `OperationNotPermitted` covers an action outside a non-empty effective set and the two bucket operations no policy can grant. Ingot's existing mapping renders them as `NoSuchBucket` (404) and `AccessDenied` (403).
 
+## Swarf - principal invalidation
+
+Swarf gains one command and one firehose event. Both carry a principal identity and no delegation.
+
+### `/principal/invalidate`
+
+* Issuer: Hilt, as its service identity (`did:web:auth.<network>`)
+* Audience: Swarf
+* Subject: Swarf
+
+Records that every proof a gateway cached for the principal's keys is void.
+
+#### Arguments
+
+```ipldsch
+type InvalidateArguments struct {
+  tenant    String   # tenant DID
+  principal String   # userId, unique within the tenant
+}
+```
+
+<details>
+<summary>Go syntax</summary>
+
+```go
+type InvalidateArguments struct {
+  Tenant    did.DID `cborgen:"tenant"`
+  Principal string  `cborgen:"principal"`
+}
+```
+</details>
+
+#### Result
+
+A unit result (`{}`).
+
+#### Authorization
+
+There is no delegation to the principal, so no witness path can prove the invoker's authority over it. Swarf MUST accept the command only from issuers in a configured publisher list, and MUST refuse it from anyone else. The list holds the Hilt service identities of the networks Swarf serves.
+
+### Firehose
+
+`GET /revocations/:from` emits a second event kind alongside `revocation`:
+
+```
+id: bafyreif5fzax7oygfafacvxq2ndhtkshz2av5m42hqeixea7giirdxe5dm
+event: principal
+data: {"tenant":"did:plc:tenant","principal":"8f2c...","cause":{"/":"bafyreif5fz..."},"recorded_at":"2026-09-09T10:00:00Z"}
+```
+
+The cursor, the inclusive resume rule, and deduplication by `cause` are the same as for revocation events. `GET /revocation/:cid` is unaffected: the record revokes no CID, and a verifier that checks proofs by CID never sees it.
+
 ## Ingot - S3 API
 
 Ingot's request path is unchanged: authorize locally from cache when it can, and ask Hilt otherwise.
 
-**Ingot MUST enforce the effective action set.** Today Ingot discards the `permissions` field and authorizes locally by checking that its cache holds a proof chain for each Forge command the operation needs. Several S3 actions map to the same commands: `s3:GetObject` and `s3:ListBucket` both need `/content/retrieve`, and `s3:PutObject` grants `/blob/remove` alongside `s3:DeleteObject`. A chain probe alone therefore cannot enforce a `Deny` on one of them, or a policy that grants one without the other. Ingot MUST cache the `permissions` value per access key and bucket, in the same per-key store as the chains so a revocation drops both, and MUST refuse a fast-path request whose action is not in the cached set. A request for a bucket with no cached set goes to Hilt.
+**Ingot MUST enforce the effective action set.** Today Ingot discards the `permissions` field and authorizes locally by checking that its cache holds a proof chain for each Forge command the operation needs. Several S3 actions map to the same commands: `s3:GetObject` and `s3:ListBucket` both need `/content/retrieve`, and `s3:PutObject` grants `/blob/remove` alongside `s3:DeleteObject`. A chain probe alone therefore cannot enforce a `Deny` on one of them, or a policy that grants one without the other. Ingot MUST cache the `permissions` value per access key and bucket, in the same per-key store as the chains so an invalidation drops both, and MUST refuse a fast-path request whose action is not in the cached set. A request for a bucket with no cached set goes to Hilt.
 
-**Cache invalidation is unchanged.** The firehose consumer drops every per-key store containing a revoked CID. The standing delegation is in every chain for a principal's keys, so a rotation clears them all. Ingot needs no new record type and no per-principal index.
+**The firehose consumer gains a branch.** It drops every per-key store containing a revoked CID today. On a `principal` event it MUST drop every store for access keys whose authorize result carried the event's tenant and principal, which requires Ingot to index its per-key stores by that pair. Dropping the proof stores is enough; the derived signing keys may stay, since a request with a signing key and no chain goes to Hilt. Like the existing revoker, the handler is idempotent and an event matching nothing is a no-op.
 
 **Buckets created through the Tenant API.** Ingot registers a bucket in its own registry only inside its `CreateBucket` handler today. It MUST also register a bucket it first learns of from a successful `/s3/bucket/info`, with default versioning and object-lock state, so a bucket created by `POST /tenants/{tenantId}/buckets` is servable.
 
@@ -370,7 +398,7 @@ Retention and legal-hold writes pass through the API like any other action. The 
 
 Forge runs demo and dev environments only, so existing tenants are migrated in place. Per Forge network:
 
-1. Deploy Ingot with the effective-action check on every gateway serving the network.
+1. Deploy Swarf with the publisher list, and Ingot with the effective-action check and the `principal` event branch, on every gateway serving the network.
 2. Deploy Hilt. Its migration deletes every existing access key, publishing revocations for their delegations first, and drops the key's `permissions` and `buckets` columns. Tenants, buckets, and bucket root delegations are untouched.
 3. The console calls `POST /tenants/{tenantId}/service-credential` for each existing tenant and stores the result where it keeps the tenant's console credential today.
 4. The console creates a principal for each existing member with `PUT /tenants/{tenantId}/principals/{userId}`, then writes a policy per bucket naming the org's Owners and Admins.
@@ -382,27 +410,23 @@ Between steps 2 and 5 no key on the network works. Demo and dev tolerate that wi
 
 ### Allow statements materialized as stored delegations
 
-Hilt could write one tenant-to-principal delegation per bucket and Forge command that an Allow grants, and revoke exactly those on a narrowing. Stored authority would then equal granted authority, and revocation would name the precise delegation. It costs principals times buckets times commands rows, turns an Owner promotion into one delegation set per bucket, and still cannot express `Deny`, which would be enforced at Hilt and Ingot regardless. Rotating one standing delegation per principal produces the same cache effect from one row.
+Hilt could write one tenant-to-principal delegation per bucket and Forge command that an Allow grants, and revoke exactly those on a narrowing. Stored authority would then equal granted authority, and revocation would name the precise delegation. It costs principals times buckets times commands rows, turns an Owner promotion into one delegation set per bucket, and still cannot express `Deny`, which would be enforced at Hilt and Ingot regardless. One invalidation record per principal produces the same cache effect from no rows.
 
 ### Recorded per-request delegations revoked on narrowing
 
 Hilt could persist each per-request delegation it issues and revoke the outstanding ones for a principal and bucket on a narrowing. The revocation would be exact to the bucket, and downstream services would never see a wider grant than the policy. It adds a table that churns once per key per bucket per day, and the gateway drops the whole per-key store on any revoked CID anyway, so the precision changes nothing at the cache.
 
-### A new Swarf record type
+### A did:key principal with a standing delegation
 
-An audience-scoped invalidation record naming the principal would let the standing delegation stay fixed. It changes Swarf and Ingot's consumer for a result the existing `/ucan/revoke` already produces once the standing delegation is one per principal.
+Each principal could be an ed25519 key Hilt stores, holding one powerline delegation from the tenant that sits in every chain for the principal's keys. A narrowing would then rotate that delegation and revoke the old one by CID through Swarf's existing command, so Swarf and Ingot's consumer would change nothing and every downstream verifier would honor the revocation. A did:key principal could also sign its own invocations one day. It costs a vault entry and a stored delegation per member, a hop in every proof chain, and a rotation on every narrowing. The invalidation record trades all of that for a signal only gateways act on.
 
 ### The access key as a proof-chain hop
 
-Storing a principal-to-key delegation and re-delegating from the key per request would mirror today's mechanism and let a key deletion revoke one CID. It adds a hop to every chain and gives the key a delegation of its own, which the ADR's model says it does not have.
+Storing a tenant-to-key delegation and re-delegating from the key per request would mirror today's mechanism, let a key deletion revoke one CID, and clear the gateway through the existing revocation path. It adds a hop to every chain and gives the key a delegation of its own, which the ADR's model says it does not have, and a policy edit would still have nothing to revoke.
 
 ### Policies evaluated at the gateway
 
 Ingot embeds versitygw, whose policy engine is disabled today by returning the admin role for every authenticated request. Storing policies at Ingot and enabling that engine would evaluate them at the edge with no Hilt round trip. It puts the rule outside the system that owns it, requires policy persistence and replication at every gateway, and leaves Hilt unable to issue delegations that match the decision.
-
-### Principals without key material
-
-A principal could be a plain row, with Hilt signing per-request delegations directly from the tenant key. The chain would be one hop shorter and the vault untouched. A principal that is a `did:key` can later sign its own invocations and is a real hop that a revocation can target, which is what the propagation design relies on.
 
 ### Keeping the parent RFC's keys alongside
 
@@ -415,16 +439,17 @@ Scoping `/s3/bucket/list` to the buckets a principal reaches was proposed for ac
 ## Open questions
 
 1. What latency target does `GET /principals/{userId}/access` carry? The console resolves it per request for its bucket list and activity feed. It is an index lookup at Hilt; the number is unmeasured.
-2. A policy edit naming `*` rotates every principal of the tenant. There is no figure for principals per tenant on Forge. If it is large, the rotation is the cost to watch.
-3. Limits on statements per policy and principals per statement. None are specified here.
-4. Rotation of the service credential. The credential has no expiry and no rotate route.
+2. A policy edit naming `*` publishes one invalidation per principal of the tenant. There is no figure for principals per tenant on Forge. If it is large, that fan-out is the cost to watch.
+3. Swarf trusts the publisher list and checks no proof. Whether Swarf should verify that a tenant owns the named principal, for example by consulting Hilt, is open.
+4. Limits on statements per policy and principals per statement. None are specified here.
+5. Rotation of the service credential. The credential has no expiry and no rotate route.
 
 ## Evaluation criteria
 
 - The time from a narrowing's acknowledgement to the gateway's first refusal, measured against a warm key. This is the staleness bound the ADR asks Hilt to publish.
 - Authorization latency for the service credential is unchanged from today's tenant-wide key.
 - The console's in-memory IAM fake and Hilt pass the same contract tests.
-- A policy `PUT` costs one rotation per principal whose access shrank, and nothing else.
+- A policy `PUT` costs one Swarf record per principal whose access shrank, and no delegation writes.
 
 ## References
 
@@ -443,23 +468,23 @@ Changes to the parent RFC's schema. Types and constraints follow the existing mi
 
 ```sql
 CREATE TABLE principal (
-    id          TEXT        PRIMARY KEY,                  -- DID
     tenant_id   TEXT        NOT NULL REFERENCES tenant(id) ON DELETE RESTRICT,
     external_id TEXT        NOT NULL,                     -- console userId
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (tenant_id, external_id)
+    PRIMARY KEY (tenant_id, external_id)
 );
 
 DELETE FROM access_key;                                   -- revocations published by the migration first
 ALTER TABLE access_key
     DROP COLUMN permissions,
     DROP COLUMN buckets,
-    ADD COLUMN principal_id TEXT REFERENCES principal(id) ON DELETE RESTRICT,
-    ADD COLUMN service      BOOLEAN NOT NULL DEFAULT FALSE,
-    ADD CONSTRAINT access_key_kind CHECK (service <> (principal_id IS NOT NULL));
+    ADD COLUMN principal TEXT,                            -- console userId
+    ADD COLUMN service   BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD FOREIGN KEY (tenant_id, principal) REFERENCES principal(tenant_id, external_id) ON DELETE RESTRICT,
+    ADD CONSTRAINT access_key_kind CHECK (service <> (principal IS NOT NULL));
 
-CREATE UNIQUE INDEX access_key_principal_name_idx ON access_key (principal_id, name)
-    WHERE principal_id IS NOT NULL;
+CREATE UNIQUE INDEX access_key_principal_name_idx ON access_key (tenant_id, principal, name)
+    WHERE principal IS NOT NULL;
 
 CREATE TABLE bucket_policy (
     bucket_id  TEXT        PRIMARY KEY REFERENCES bucket(id) ON DELETE CASCADE,
@@ -470,14 +495,16 @@ CREATE TABLE bucket_policy (
 
 -- Which principals a policy names; '*' statements are indexed as NULL principal.
 CREATE TABLE bucket_policy_principal (
-    bucket_id    TEXT NOT NULL REFERENCES bucket(id) ON DELETE CASCADE,
-    principal_id TEXT REFERENCES principal(id) ON DELETE CASCADE,
-    UNIQUE (bucket_id, principal_id)
+    bucket_id  TEXT NOT NULL REFERENCES bucket(id) ON DELETE CASCADE,
+    tenant_id  TEXT NOT NULL,
+    principal  TEXT,
+    FOREIGN KEY (tenant_id, principal) REFERENCES principal(tenant_id, external_id) ON DELETE CASCADE,
+    UNIQUE (bucket_id, principal)
 );
-CREATE INDEX bucket_policy_principal_idx ON bucket_policy_principal (principal_id, bucket_id);
+CREATE INDEX bucket_policy_principal_idx ON bucket_policy_principal (tenant_id, principal, bucket_id);
 ```
 
-The standing delegation lives in the existing `delegation` table with `audience` = principal DID and `subject` NULL. The vault gains `/tenant/{tenant}/principal/{did}` and `/tenant/{tenant}/service-credential`.
+The `delegation` table is unchanged. The vault gains `/tenant/{tenant}/service-credential` and nothing for principals.
 
 ### Example flows
 
@@ -486,33 +513,33 @@ The standing delegation lives in the existing `delegation` table with `audience`
 1. Hilt's migration has already deleted the tenant's keys and published their revocations.
 2. Fil One calls `POST /tenants/{tenantId}/service-credential`. Hilt mints the credential, issues its powerline delegations, and returns it.
 3. Fil One calls `PUT /tenants/{tenantId}/principals/{userId}` for every member.
-4. Hilt generates a key and a standing delegation per principal.
+4. Hilt stores each principal.
 5. Fil One writes each bucket's policy.
 
 #### Grant a member a bucket
 
 1. Fil One reads `GET /tenants/{t}/buckets/photos/policy` and its `ETag`.
 2. Fil One writes the document with an added `Allow` statement, sending `If-Match`.
-3. Hilt compares effective sets before and after for every named principal. Nobody lost an action, so nothing is rotated or published. Hilt stores the document and returns the new `ETag`.
+3. Hilt compares effective sets before and after for every named principal. Nobody lost an action, so nothing is published. Hilt stores the document and returns the new `ETag`.
 4. The member's next request on `photos` misses the gateway cache, reaches Hilt, and is authorized against the new policy.
 
 #### Put an object with an access key
 
 1. A client sends `PUT /photos/cat.jpg` to Ingot, signed with the member's key.
 2. Ingot finds no cached effective set for that key and bucket and invokes `/s3/request/authorize`.
-3. Hilt verifies the signature, loads the key's principal, resolves `photos`, computes `effective(principal, photos)`, finds `s3:PutObject`, and issues principal-to-gateway delegations for the six write commands, expiring at the next UTC midnight.
-4. Ingot invokes `/s3/bucket/info` for the root and standing delegations, caches the chains and the effective set under the key, and serves the request.
+3. Hilt verifies the signature, loads the key's principal, resolves `photos`, computes `effective(principal, photos)`, finds `s3:PutObject`, and signs tenant-to-gateway delegations for the six write commands with the tenant key, expiring at the next UTC midnight.
+4. Ingot invokes `/s3/bucket/info` for the bucket root, caches the chains and the effective set under the key, indexed by tenant and principal, and serves the request.
 5. Later requests from the key on `photos` are authorized locally: the action is in the cached set and a chain resolves for each command.
 
 #### Remove a member from a bucket
 
 1. Fil One writes the policy without the member's statement, with `If-Match`.
-2. Hilt finds the member's effective set on the bucket shrank, issues a new standing delegation for the principal, publishes a revocation of the old one to Swarf, commits the document and the new delegation, and deletes the old delegation row.
-3. Swarf's firehose delivers the revoked CID. Ingot drops every cached store containing it, which is every store for the member's keys.
+2. Hilt finds the member's effective set on the bucket shrank, invokes `/principal/invalidate` on Swarf for the member, and commits the document.
+3. Swarf's firehose delivers the `principal` event. Ingot drops every cached store for the member's keys.
 4. The member's next request on any bucket reaches Hilt. On the removed bucket it receives `UnknownBucket`, which Ingot renders as `NoSuchBucket`.
 
 #### Remove a member
 
 1. Fil One calls `DELETE /tenants/{t}/principals/{userId}`.
-2. Hilt publishes a revocation of the standing delegation, strips the principal from every statement, deletes its keys, and deletes the principal.
-3. Ingot drops the member's cached stores on the firehose record. Their keys no longer resolve at Hilt.
+2. Hilt invokes `/principal/invalidate` on Swarf, strips the principal from every statement, deletes its keys, and deletes the principal row.
+3. Ingot drops the member's cached stores on the `principal` event. Their keys no longer resolve at Hilt.
