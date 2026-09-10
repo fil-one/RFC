@@ -74,6 +74,7 @@ A credential:
 - MUST NOT appear in `GET /tenants/{tenantId}/access-keys`, MUST NOT count toward `accessKeyCount`, and MUST NOT be deletable through the access-key delete route.
 - MUST NOT be bound to a principal. It is not named in any statement and reaches every bucket of the tenant.
 - Has no expiry. Rotation is minting a new credential, moving the caller to it, and deleting the old one.
+- Is stored with its `accessKeyId` as its `name`, so the tenant-wide unique name constraint holds. The name is never returned.
 
 Deleting a credential MUST publish revocations for its powerline delegations before deleting the vault entry and the row, as the parent RFC's key delete does. `POST /tenants/{tenantId}/service-credentials` is also the migration path for a tenant that predates this model.
 
@@ -206,12 +207,14 @@ The staleness bound for a change is the time from Hilt's acknowledgement to the 
 
 ### Principal removal
 
-`DELETE /tenants/{tenantId}/principals/{userId}` MUST, in one transaction and in order:
+`DELETE /tenants/{tenantId}/principals/{userId}` MUST lock the principal row for the whole removal and, in order:
 
-1. Lock the principal row and publish a principal invalidation.
+1. Publish a principal invalidation.
 2. Remove the principal from every statement naming it, deleting statements left with no principal and policies left with no statement.
 3. Delete the principal's keys: vault entries and rows.
-4. Delete the principal row.
+4. Delete the principal row and commit, releasing the lock.
+
+Steps 2 and 3 are idempotent. A failure before step 4 rolls back the principal row and leaves the principal with narrower access; the call is retried and answers 204 once the principal is gone. An authorize request for the principal waits on the lock until the removal commits or rolls back.
 
 A removed member who is later re-invited gets a new principal row. No statement survives to restore their old access.
 
@@ -308,7 +311,7 @@ Swarf gains one command and one firehose event. Both carry a principal identity 
 
 * Issuer: Hilt, as its service identity (`did:web:auth.<network>`)
 * Audience: Swarf
-* Subject: Swarf
+* Subject: Hilt, the issuer's own DID
 
 Records that every proof a gateway cached for the principal's keys is void.
 
@@ -338,7 +341,7 @@ A unit result (`{}`).
 
 #### Authorization
 
-There is no delegation to the principal, so no witness path can prove the invoker's authority over it. Swarf MUST accept the command only from issuers in a configured publisher list, and MUST refuse it from anyone else. The list holds the Hilt service identities of the networks Swarf serves.
+There is no delegation to the principal, so no witness path can prove the invoker's authority over it. Hilt self-signs the invocation with its own DID as subject, the shape `/ucan/revoke` already uses, so a standard UCAN validator accepts it without proofs. Swarf MUST accept the command only from issuers in a configured publisher list, and MUST refuse it from anyone else. The list holds the Hilt service identities of the networks Swarf serves.
 
 ### Firehose
 
@@ -396,7 +399,7 @@ Retention and legal-hold writes pass through the API like any other action. The 
 Forge runs demo and dev environments only, so existing tenants are migrated in place. Per Forge network:
 
 1. Deploy Swarf with the publisher list, and Ingot with the effective-action check and the `principal` event branch, on every gateway serving the network.
-2. Deploy Hilt. Its migration deletes every existing access key, publishing revocations for their delegations first, and drops the key's `permissions` and `buckets` columns. Tenants, buckets, and bucket root delegations are untouched.
+2. Run `hilt migrate iam` against the network's database. It publishes revocations for every existing access key's delegations, then deletes each key's delegations, vault entry, and row. Deploy Hilt. Its schema migration refuses to run while any access key remains, and drops the key's `permissions` and `buckets` columns. Tenants, buckets, and bucket root delegations are untouched.
 3. The console calls `POST /tenants/{tenantId}/service-credentials` for each existing tenant and stores the result where it keeps the tenant's console credential today.
 4. The console creates a principal for each existing member with `PUT /tenants/{tenantId}/principals/{userId}`, then writes a policy per bucket naming the org's Owners and Admins.
 5. The console flips the region's registry entry to `iam`.
@@ -471,7 +474,8 @@ CREATE TABLE principal (
     PRIMARY KEY (tenant_id, external_id)
 );
 
-DELETE FROM access_key;                                   -- revocations published by the migration first
+-- The migration aborts if any access_key row remains: `hilt migrate iam`
+-- publishes their revocations and deletes them first.
 ALTER TABLE access_key
     DROP COLUMN permissions,
     DROP COLUMN buckets,
@@ -479,6 +483,7 @@ ALTER TABLE access_key
     ADD COLUMN service   BOOLEAN NOT NULL DEFAULT FALSE,
     ADD FOREIGN KEY (tenant_id, principal) REFERENCES principal(tenant_id, external_id) ON DELETE RESTRICT,
     ADD CONSTRAINT access_key_kind CHECK (service <> (principal IS NOT NULL));
+-- name keeps its NOT NULL and UNIQUE (tenant_id, name); a service credential stores its accessKeyId there.
 
 CREATE UNIQUE INDEX access_key_principal_name_idx ON access_key (tenant_id, principal, name)
     WHERE principal IS NOT NULL;
@@ -509,7 +514,7 @@ The `delegation` table is unchanged. The vault gains `/tenant/{tenant}/service-c
 
 #### Migrate an existing tenant
 
-1. Hilt's migration has already deleted the tenant's keys and published their revocations.
+1. `hilt migrate iam` has already published revocations for the tenant's keys and deleted them.
 2. Fil One calls `POST /tenants/{tenantId}/service-credentials`. Hilt mints the credential, issues its powerline delegations, and returns it.
 3. Fil One calls `PUT /tenants/{tenantId}/principals/{userId}` for every member.
 4. Hilt stores each principal.
