@@ -204,6 +204,8 @@ The console sends the header on every bucket it creates. The document names the 
 }
 ```
 
+`principalId` is provided in the request body rather than as a path parameter so that `POST /tenants/{tenantId}/access-keys` can create both service keys and principal-bound keys. This preserves the console's existing calls, while the key type is inferred from the fields supplied in the request body. A separate `POST /tenants/{tenantId}/principals/{principalId}/access-keys` route is discussed in [Alternatives considered](#separate-creation-routes-per-kind).
+
 Hilt MUST generate and store the key exactly as the parent RFC specifies, MUST record the principal on the key row, and MUST store `NULL` for its permissions and its bucket list. 422 on a `principalId` that is not a live principal of the tenant, and 409 on a duplicate name for that principal. The response is the parent RFC's `CreatedAccessKey` with a `principal` field carrying the `principalId`, and no `permissions` or `buckets`.
 
 Hilt MUST also issue the key one delegation, its marker, and store it in the `delegation` table with the tenant's other grants:
