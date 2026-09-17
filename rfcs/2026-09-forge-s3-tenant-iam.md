@@ -334,7 +334,7 @@ Ingot's request path is unchanged: authorize locally from cache when it can, and
 
 Ingot caches, per access key, what Hilt's authorize response carries: the delegations, the effective action set under each bucket Hilt named, the derived SigV4 verification key, and the tenant, all until the next UTC midnight plus clock skew. The fast path verifies the signature with the cached key, requires the action to be in the cached set for the bucket, and requires a chain to Ingot's agent for every Forge command the action maps to. Anything less goes to Hilt, whose answer refills the caches. The cached set is what makes `deny` enforceable. Several S3 actions map to the same commands: `s3:GetObject` and `s3:ListBucket` both need `/content/retrieve`, and `s3:PutObject` grants `/blob/remove` alongside `s3:DeleteObject`. A chain probe alone could not refuse one action of such a pair, or honor a policy that grants one without the other; the set does. A request for a bucket with no cached set goes to Hilt.
 
-Operations that map to no Forge command are authorized at Hilt on every request: `ListBuckets`, `CreateBucket`, `DeleteBucket`, and the two bucket-configuration reads. No per-request delegation carries the key's expiry for them, so a cached set alone would outlive an expired key. Ingot serves the two configuration reads from its registry once Hilt answers.
+Operations that map to no Forge command are authorized at Hilt on every request: `ListBuckets`, `CreateBucket`, and `DeleteBucket`. No per-request delegation carries the key's expiry for them, so a cached set alone would outlive an expired key.
 
 **The firehose consumer needs no change.** It drops every per-key store containing a revoked CID, and clears the key's derived signing key and tenant with it. Ingot adds every delegation an authorize response carries to the key's store, chain member or not, so each store for a principal-bound key contains the key's marker and a revocation of the marker drops the store. Ingot MUST keep adding every delegation the container carries. A store holding only chain members would hold nothing a rotation could name. The handler is idempotent and a revocation matching nothing is a no-op. A service key's store is cleared by the same path it uses today.
 
@@ -342,7 +342,7 @@ Error mapping gains two rows: `TemporarilyUnavailable` renders as `ServiceUnavai
 
 ## Action vocabulary
 
-The policy vocabulary is Hilt's S3 permission set without the three bucket-level actions, plus the two bucket-configuration reads the console already offers on a key, plus a wildcard:
+The policy vocabulary is Hilt's S3 permission set without the three bucket-level actions, plus a wildcard:
 
 | S3 action                             | Forge commands                                                                                 | Note                                   |
 | ------------------------------------- | ---------------------------------------------------------------------------------------------- | -------------------------------------- |
@@ -360,13 +360,11 @@ The policy vocabulary is Hilt's S3 permission set without the three bucket-level
 | `s3:ListBucketMultipartUploads`       | `/content/retrieve`                                                                            |                                        |
 | `s3:ListMultipartUploadParts`         | `/content/retrieve`                                                                            |                                        |
 | `s3:AbortMultipartUpload`             | `/blob/abort`, `/blob/remove`                                                                  |                                        |
-| `s3:GetBucketVersioning`              | none                                                                                           | new; served by Ingot from its registry |
-| `s3:GetBucketObjectLockConfiguration` | none                                                                                           | new; served by Ingot from its registry |
 | `s3:*`                                | every row above                                                                                | policy documents only                  |
 
 Excluded from policies: `s3:CreateBucket` and `s3:DeleteBucket`, because a principal holding them would act outside the policy that granted it, and `s3:ListAllMyBuckets`, which every principal holds. `s3:*` never expands to any of the three. A service key still holds the two bucket actions through its own permissions, which is how the console creates and deletes buckets.
 
-The two bucket-configuration reads are new to Hilt. Its operation classifier MUST recognize `GET /{bucket}?versioning` as `GetBucketVersioning` and `GET /{bucket}?object-lock` as `GetBucketObjectLockConfiguration`; today both classify as `ListBucket`. The management API's action enum, now used by policy statements, gains both, along with `s3:AbortMultipartUpload` and `s3:ListMultipartUploadParts`, which Hilt already accepts.
+Bucket-configuration reads (`GET /{bucket}?versioning`, `GET /{bucket}?object-lock`) classify as `ListBucket`, as they do today, so `s3:ListBucket` covers them and Ingot's fast path applies. The management API's action enum, now used by policy statements, gains `s3:AbortMultipartUpload` and `s3:ListMultipartUploadParts`, which Hilt already accepts.
 
 Retention and legal-hold writes pass through the API like any other action. The rule that only an Owner may grant them is the console's, and Hilt does not know it.
 
