@@ -376,7 +376,7 @@ Every existing key becomes a service key, because a key with no principal is exa
 
 1. Deploy Ingot with the two new error mappings. Ingot already enforces the cached effective action set, and Swarf's service needs no deployment; Hilt takes the client library with the nonce option.
 2. Deploy Hilt. Its schema migration adds the principal and policy tables and the `principal` column on keys. Tenants, buckets, keys, vault entries, and delegations are untouched, and every key keeps authorizing through the parent RFC's path. Principal-bound keys are new, so every one is created with its marker and nothing is backfilled.
-3. The console creates a principal for each existing member with `PUT /tenants/{tenantId}/principals/{principalId}`, then writes a policy per bucket naming the org's Owners and Admins.
+3. The console creates a principal for each existing org member in every existing org with `PUT /tenants/{tenantId}/principals/{principalId}`, then writes a policy per bucket naming the org's Owners and Admins.
 4. The console flips the registry entry to `iam`, starts signing each member's traffic with a key bound to their principal, and sends `x-bucket-policy` on every bucket it creates. The service key it already holds keeps signing traffic with no member actor.
 5. The console deletes the keys the tenant no longer uses, through the existing delete route.
 
