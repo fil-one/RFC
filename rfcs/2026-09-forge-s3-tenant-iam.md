@@ -45,7 +45,7 @@ The parent RFC's roles apply. Swarf is added:
 - **Bucket policy.** A bucket's own document of statements. Each statement has an effect, a list of principals, and a list of S3 actions. A bucket has at most one policy, and the policy is deleted with the bucket.
 - **Effective actions.** The S3 actions a principal may perform on a bucket, computed from that bucket's policy.
 - **Service key.** The parent RFC's access key: it has no principal and carries the permissions and buckets it was created with. It signs traffic that has no member actor, such as tenant setup, bucket create and delete, and background workers. A tenant may hold several.
-- **Principal-bound key.** An S3 access key that authenticates a request and names a principal. It holds no authority of its own: what it may do is whatever the bucket policies give its principal at the time of the request. Everything a member does in the console, from listing buckets and objects to deleting objects and redeeming presigned URLs, is signed with a key bound to that member's principal.
+- **Principal-bound key.** An S3 access key that authenticates a request and names a principal. It holds no authority of its own: what it may do is whatever the bucket policies give its principal at the time of the request.
 - **Marker.** A delegation Hilt issues to each principal-bound key. It names a command no service handles and grants nothing. Hilt returns it in every `/s3/request/authorize` response, so the store Ingot caches for the key always contains it, and revoking it through Swarf is how a policy change clears that store.
 
 ## Hilt - Tenant API
@@ -186,7 +186,7 @@ where `s3:*` stands for every action in the policy vocabulary. Hilt returns the 
 
 ### Bucket creation
 
-Buckets are created and deleted over S3 with a service key, and only with a service key. A bucket policy grants actions on the bucket it is stored on; `CreateBucket` acts on a bucket that does not exist yet and `DeleteBucket` on the bucket whose policy would have to grant it, so no policy can carry either. A principal-bound key receives `AccessDenied` from both. `aws s3 mb` with a member's key therefore fails, and members create buckets through the console.
+Buckets are created and deleted over S3 with a service key, and only with a service key. A bucket policy grants actions on the bucket it is stored on; `CreateBucket` acts on a bucket that does not exist yet and `DeleteBucket` on the bucket whose policy would have to grant it, so no policy can carry either. A principal-bound key receives `AccessDenied` from both. `aws s3 mb` with a member's key therefore fails, and members create buckets through the console. This is a limit of the policy model, and the ADR accepts it: `CreateBucket` and `DeleteBucket` come off member keys in every region. The user-facing S3 documentation needs to state it.
 
 A new bucket's policy travels on the create request, in the `x-bucket-policy` header: the policy document as JSON, base64-encoded. Ingot forwards the S3 request to Hilt in `/s3/bucket/create` as it does today, headers included, so the header needs nothing from Ingot. Hilt decodes it, validates it exactly as `PUT .../policy` would, creates the bucket, and writes the policy. If the policy write fails, Hilt deletes the bucket. No bucket outlives a failed write of the policy its create request carried. The header MUST be among the request's `SignedHeaders`; Hilt refuses a create whose policy header is present and unsigned, since otherwise anything on the path could replace the document. A document that fails validation refuses the create with `InvalidBucketPolicy`, which Ingot renders as `InvalidArgument` (400). Ingot caps a request head at 8 KB, which leaves roughly 5 KB of JSON for the document.
 
@@ -204,7 +204,7 @@ The console sends the header on every bucket it creates. The document names the 
 }
 ```
 
-`principalId` is provided in the request body rather than as a path parameter so that `POST /tenants/{tenantId}/access-keys` can create both service keys and principal-bound keys. This preserves the console's existing calls, while the key type is inferred from the fields supplied in the request body. A separate `POST /tenants/{tenantId}/principals/{principalId}/access-keys` route is discussed in [Alternatives considered](#separate-creation-routes-per-kind).
+`principalId` travels in the body rather than the path so that one route, `POST /tenants/{tenantId}/access-keys`, creates both kinds of key and the console's existing calls keep working. The shape of the body decides the kind. A second route, `POST /tenants/{tenantId}/principals/{principalId}/access-keys`, is discussed under [alternatives](#separate-creation-routes-per-kind).
 
 Hilt MUST generate and store the key exactly as the parent RFC specifies, MUST record the principal on the key row, and MUST store `NULL` for its permissions and its bucket list. 422 on a `principalId` that is not a live principal of the tenant, and 409 on a duplicate name for that principal. The response is the parent RFC's `CreatedAccessKey` with a `principal` field carrying the `principalId`, and no `permissions` or `buckets`.
 
@@ -224,8 +224,6 @@ The marker grants nothing. No service handles its command and it is a hop in no 
 
 A service key's name stays unique within the tenant, as today. A principal-bound key's name is unique within its principal, so two members may each hold a key named `laptop`.
 
-The console holds two kinds of key. Its service keys sign traffic that has no member actor. For each member it holds one principal-bound key, minted on the member's first request, and signs that member's bucket listing, object listing, object reads and deletes, and presigned URLs with it. Hilt does not distinguish that key from one the member created themselves: both are bound to the same principal, authorized against the same policies, and deleted with the principal. A presigned URL signed with it is authorized against the member's policies when it is redeemed, with the parent RFC's signature time bounds and the key's own expiry applying as for any request.
-
 `GET /tenants/{tenantId}/access-keys` and `GET /tenants/{tenantId}/access-keys/{accessKeyId}` return the `principal` field. A key without it is a service key and carries its own `permissions` and `buckets`. The key list does not carry each key's effective actions; the console reads them once per principal through the principal route.
 
 `DELETE /tenants/{tenantId}/access-keys/{accessKeyId}` deletes either kind in the same sequence: a revocation for each of the key's delegations, then the delegations, the row, and the vault entry. For a principal-bound key the only delegation is the marker, so Ingot drops that key's store and no other.
@@ -240,9 +238,11 @@ The marker is what makes the rotation possible. Ingot's store for a key holds th
 
 **Locking.** Hilt takes no row locks today; this RFC adds them on two paths. A policy write runs in one Postgres transaction that locks the policy row with `SELECT ... FOR UPDATE` and takes a transaction-scoped advisory lock on the bucket. Each marker rotation runs in a transaction that holds an advisory lock on that key's delegation set. Hilt publishes the revocations while those locks are held and commits afterwards. `/s3/request/authorize` reads the key row, the principal row, and the policy row with `SELECT ... FOR SHARE`, and reads the key's marker before the policy. An authorize request that arrives between the publish and the commit therefore waits for the commit and is answered from the new policy with the new marker. Without the locks, an Ingot that had consumed the revocation could refill its cache from the old policy, holding a marker already revoked, and keep it until midnight.
 
-Authorize requests for a bucket wait one Swarf round trip per rotated key during a write to that bucket's policy; the publishes MAY run concurrently. Waits are bounded. A reader or writer that cannot take its lock within 10 seconds fails, and the publishes of one write are given 8 seconds together, so a slow Swarf releases the locks before the readers time out. A management write that times out is 409 `ConcurrentChange`; an authorize that times out is `TemporarilyUnavailable`, which Ingot renders as `ServiceUnavailable` (503). The locks do not cover an authorize answered before the write took its locks whose response reaches Ingot after the revocation does. Swarf polls its store once a second before it emits a record, so that response would have to be in flight for longer than that.
+Authorize requests for a bucket wait one Swarf round trip per rotated key during a write to that bucket's policy; the publishes MAY run concurrently. A write holds its transaction open while it waits on Swarf, for at most 8 seconds: the publishes of one write share that budget, and a write that has not finished them by then fails and rolls back. A reader or writer that cannot take its lock within 10 seconds fails as well, so a slow Swarf releases the locks before any reader times out. A management write that times out is 409 `ConcurrentChange`; an authorize that times out is `TemporarilyUnavailable`, which Ingot renders as `ServiceUnavailable` (503). The locks do not cover an authorize answered before the write took its locks whose response reaches Ingot after the revocation does. Swarf polls its store once a second before it emits a record, so that response would have to be in flight for longer than that.
 
-**Failure.** If Swarf refuses or fails a publish, Hilt answers 500 and commits nothing. The old policy stays in force, and the principal never holds more than it did. The old marker is now revoked at Swarf while still in service at Hilt, so Ingot drops the key's store and, on the key's next request, refills it from the old policy with the old marker. The console retries the write. The retry revokes the old marker again, and Swarf records the repeat as a new event because every revocation Hilt publishes carries a fresh nonce (see [Swarf](#swarf)), so Ingot clears the store once more. A console that stops retrying leaves the old policy in force and nothing half-applied; the next write to that policy, from any caller, rotates the markers again.
+**Failure.** If Swarf refuses or fails a publish, Hilt answers 500 and commits nothing. The old policy stays in force, and the principal never holds more than it did. The old marker is now revoked at Swarf while still in service at Hilt, so Ingot drops the key's store and, on the key's next request, refills it from the old policy with the old marker. The console retries the write. The retry revokes the old marker again, and Swarf records the repeat as a new event because every revocation Hilt publishes carries a fresh nonce (see [Swarf](#swarf)), so Ingot clears the store once more. A console that stops retrying leaves the old policy in force and nothing half-applied. The next write to that policy, from any caller, rotates the markers again.
+
+**Recovery.** Hilt runs no reconciliation, because a failed write leaves nothing to reconcile: every write that publishes runs in one transaction, and the state Hilt stores is always the state it enforces. What a failed call leaves behind is the caller's unmet intent. The console owns completing it and SHOULD retry from a durable job rather than from the member's request, so that a member who gives up after one attempt does not leave a removal or a policy change unapplied.
 
 Deleting a key revokes only that key's marker. The principal's other keys keep their cached proofs.
 
@@ -250,24 +250,26 @@ The staleness bound for a change is the time from Hilt's acknowledgement to Ingo
 
 ### Principal removal
 
-`DELETE /tenants/{tenantId}/principals/{principalId}` locks the principal row with `SELECT ... FOR UPDATE` for the whole removal and, in order:
+`DELETE /tenants/{tenantId}/principals/{principalId}` locks the principal row with `SELECT ... FOR UPDATE` and, in one transaction and in order:
 
 1. Publishes a revocation for the marker of each of the principal's keys.
-2. Removes the principal from every statement naming it, writing each policy with its current `ETag`. A statement left with no principal is deleted, and a policy left with no statement is deleted.
+2. Removes the principal from every statement naming it. A statement left with no principal is deleted, and a policy left with no statement is deleted.
 3. Deletes the principal's keys: rows, then vault entries.
 4. Sets `deleted_at` on the principal row and commits, releasing the lock.
 
 The row stays as a tombstone. A removed principal is absent from `GET` and the list, is refused with 422 as the `principalId` of a new key, and is skipped by evaluation should a statement still name it. An authorize request for one of its keys waits on the lock until the removal commits or rolls back, then is refused with `UnknownAccessKey` because the key is gone.
 
-A failure before step 4 rolls back the transaction and leaves the principal with narrower access. The revocations already published stand, and Ingot refills from the unchanged policies on the key's next request. The console retries; the call answers 204 once the principal is removed, and 204 for an id that is removed or never existed.
+A failure at any step rolls the transaction back. The principal keeps every key and every statement it had, so a failed removal changes nothing at Hilt. The revocations already published stand and cost Ingot one refill from the unchanged policies. The console retries (see [recovery](#policy-changes-and-marker-rotation)); the call answers 204 once the principal is removed, and 204 for an id that is removed or never existed.
 
 A `PUT` for a removed principal's id clears `deleted_at`. The principal returns with no keys and named in no statement, so nothing of its earlier access survives, whether the id belongs to the same member re-invited or to a different member given the same id.
 
 ### Bucket deletion
 
-`/s3/bucket/delete` deletes the bucket's delegations, its policy, and the bucket row. Hilt revokes a service key's delegations over the bucket and publishes nothing for principal-bound keys: a marker names no bucket, and per-request delegations are not stored. Ingot removes the bucket from its registry on the same request. The registry is a Postgres table shared by every Ingot instance serving the network, and Ingot's local authorization refuses any bucket the registry does not know, so cached chains for the deleted bucket cannot be used on any instance once the row is gone.
+`/s3/bucket/delete` deletes the bucket's delegations, its policy, and the bucket row. Hilt revokes a service key's delegations over the bucket and publishes nothing for principal-bound keys: a marker names no bucket, and per-request delegations are not stored. Ingot removes the bucket from its local database on the same request, and its local authorization refuses any bucket not found there, so cached chains for a deleted bucket cannot be used.
 
-Deleting a tenant cascades over principals, policies, and access keys. As today, it publishes no revocations and deactivates the tenant's `did:plc`.
+### Tenant removal
+
+`DELETE /tenants/{tenantId}` deletes a disabled tenant. It MUST publish a revocation for every delegation the tenant's keys hold, a service key's grants and a principal-bound key's marker alike, before it deactivates the tenant's `did:plc`, because the tenant signs the revocations and Swarf verifies them against the tenant's DID. It then deletes the tenant's principals, policies, keys, buckets, and delegations. Ingot drops every store of the tenant's keys when the records arrive. Today the deletion publishes nothing, and a warm key keeps serving from Ingot's cache until the next UTC midnight.
 
 ## Hilt - UCAN API
 
@@ -338,9 +340,24 @@ Ingot caches, per access key, what Hilt's authorize response carries: the delega
 
 Operations that map to no Forge command are authorized at Hilt on every request: `ListBuckets`, `CreateBucket`, and `DeleteBucket`. No per-request delegation carries the key's expiry for them, so a cached set alone would outlive an expired key.
 
-**The firehose consumer needs no change.** It drops every per-key store containing a revoked CID, and clears the key's derived signing key and tenant with it. Ingot adds every delegation an authorize response carries to the key's store, chain member or not, so each store for a principal-bound key contains the key's marker and a revocation of the marker drops the store. Ingot MUST keep adding every delegation the container carries. A store holding only chain members would hold nothing a rotation could name. The handler is idempotent and a revocation matching nothing is a no-op. A service key's store is cleared by the same path it uses today.
+**The firehose consumer needs no change.** When Swarf reports a revoked CID, Ingot drops every per-key store holding a delegation with that CID, together with the key's cached signing key and tenant. Ingot MUST keep storing every delegation an authorize response carries, chain member or not: the marker is in no chain, and a store without it holds nothing a rotation could name. A revocation that matches no store is a no-op.
 
 Error mapping gains two rows: `TemporarilyUnavailable` renders as `ServiceUnavailable` (503) and `InvalidBucketPolicy` as `InvalidArgument` (400). `UnknownBucket` is already 404 and `OperationNotPermitted` already 403.
+
+## Fil One console
+
+The console holds two kinds of key per tenant.
+
+Its service key is the tenant-wide credential it signs with today, created with no bucket list and holding `s3:CreateBucket` and `s3:DeleteBucket`. It signs every request that has no member actor and every request no policy can authorize: tenant setup, bucket creation with the policy header, bucket deletion, and background workers. For that traffic the console's own role check is the whole of the enforcement, as today.
+
+For each member it holds one principal-bound key, created at the tenant's access-key route on the member's first request in the region. It signs everything the member does through the console: listing buckets and objects, reading, writing and deleting objects, and presigned URLs. Hilt and Ingot authorize that traffic against the member's policies, so bucket access is enforced at the storage system and the console's role checks stay in front of it.
+
+Consequences:
+
+- A member's key cannot create or delete a bucket, whether the console or the member created the key. The console signs those two operations with its service key after its own role check, so the tenant-wide credential stays in service.
+- Hilt does not distinguish the console's key for a member from a key the member created themselves. Both are bound to the same principal, are authorized against the same policies, and are deleted with the principal.
+- A presigned URL is authorized against the member's policies when it is redeemed, under the parent RFC's signature time bounds and the key's own expiry.
+- A policy change reaches the member's console traffic the way it reaches every key of theirs: through the marker rotation.
 
 ## Action vocabulary
 
@@ -372,15 +389,20 @@ Retention and legal-hold writes pass through the API like any other action. The 
 
 ## Migration
 
-Every existing key becomes a service key, because a key with no principal is exactly the parent RFC's key. Per Forge network:
+Every existing key becomes a service key, because a key with no principal is exactly the parent RFC's key. Existing keys are kept: they are embedded in customers' workflows, they keep working unchanged, and customers rotate them when they choose.
 
-1. Deploy Ingot with the two new error mappings. Ingot already enforces the cached effective action set, and Swarf's service needs no deployment; Hilt takes the client library with the nonce option.
+**Once per Forge network.**
+
+1. Deploy Ingot with the two new error mappings. Ingot already enforces the cached effective action set. Swarf's service needs no deployment; Hilt takes the client library with the nonce option.
 2. Deploy Hilt. Its schema migration adds the principal and policy tables and the `principal` column on keys. Tenants, buckets, keys, vault entries, and delegations are untouched, and every key keeps authorizing through the parent RFC's path. Principal-bound keys are new, so every one is created with its marker and nothing is backfilled.
-3. The console creates a principal for each existing org member in every existing org with `PUT /tenants/{tenantId}/principals/{principalId}`, then writes a policy per bucket naming the org's Owners and Admins.
-4. The console flips the registry entry to `iam`, starts signing each member's traffic with a key bound to their principal, and sends `x-bucket-policy` on every bucket it creates. The service key it already holds keeps signing traffic with no member actor.
-5. The console deletes the keys the tenant no longer uses, through the existing delete route.
 
-No step takes the network's keys out of service. Until the console moves a member to a principal-bound key, that member's access is whatever their old key carries and no policy applies to it. A policy edit reaches a member only after step 4 has run for them.
+**Once per organization.** The console creates a principal for each member with `PUT /tenants/{tenantId}/principals/{principalId}`, then writes a policy per bucket naming the organization's Owners and Admins. This changes nothing for members yet: the console still signs their traffic with its service key, and no policy is evaluated for a service key.
+
+**Once per region.** When every organization in the region has its principals and policies, the console switches the region's access model from `scoped-keys` to `iam`. The access model is a per-region setting in the console; its policy routes, its policy fan-out, and its per-member keys are active only in a region whose model is `iam`. From then on the console sends `x-bucket-policy` on every bucket it creates.
+
+**Once per member.** On the member's first request after the switch, the console creates a key bound to their principal and signs their traffic with it from then on. Until then the member's console traffic is signed with the service key, which reaches every bucket of the tenant, and no policy applies to it. A policy edit reaches a member only once they hold a principal-bound key.
+
+No step takes a key out of service.
 
 ## Alternatives considered
 
@@ -527,14 +549,14 @@ The `delegation` table keeps its schema; a principal-bound key's one row in it i
 2. Fil One calls `PUT /tenants/{tenantId}/principals/{principalId}` for every member.
 3. Hilt stores each principal.
 4. Fil One writes each bucket's policy.
-5. On a member's next request, Fil One calls `POST /tenants/{tenantId}/access-keys` with that member's `principalId`, signs their traffic with the returned key, and deletes the key they held before.
+5. On a member's next request, Fil One calls `POST /tenants/{tenantId}/access-keys` with that member's `principalId` and signs their traffic with the returned key.
 
 #### Create a bucket
 
 1. A member creates `photos` in the console. Fil One builds the policy naming the member and the org's Owners and Admins, and sends `PUT /photos` to Ingot signed with its service key, with the document base64-encoded in the signed `x-bucket-policy` header.
 2. Ingot invokes `/s3/bucket/create` with the request.
 3. Hilt verifies the signature, checks that the header is signed, decodes and validates the document, and creates the bucket and its policy in one transaction.
-4. Ingot adds the bucket to its registry and answers the member. Their next request on `photos` reaches Hilt and is authorized against the policy.
+4. Ingot adds the bucket to its local database and answers the member. Their next request on `photos` reaches Hilt and is authorized against the policy.
 
 #### Grant a member a bucket
 
