@@ -186,6 +186,7 @@ Pros:
 Cons:
 
 - Requires work to implement region decommissioning, both in FilOne Console and Hilt/Sprue.
+- Requires work in Forge to implement region hiding behind a feature flag
 - We cannot ship changes to central services for pilot regions only.
 - Changes to central services may break production.
 - A run-away load test in a pilot region may affect production clients.
