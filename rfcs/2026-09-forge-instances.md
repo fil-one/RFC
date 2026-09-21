@@ -78,14 +78,12 @@ How many regions and in which geographic location?
 
 ## Proposal
 
-Provision the following three Forge instances:
+Provision the following N+three Forge instances:
 
 - production
 - dev
 - staging
-
-Additionally, to support customer pilots, implement support for short-lived pilot regions available
-to selected customers in the production Forge instance.
+- N pilot instances
 
 ### 1. Production
 
@@ -102,12 +100,46 @@ This is the instance our paying customers use.
   all users.
 - **Real vs test money:** Real money, Filecoin mainnet.
 - **Data resets:** none
-- **RPC API:** Lotus node running in each region.
 
 Note: we need to define the process for shipping hotfixes outside of the regular update schedule.
 The longer the interval between regular updates, the higher the chance that we need a hotfix.
 
-#### Pilot Regions
+### 2. Dev
+
+This is the instance where we continuously ship all changes.
+
+- **Update frequency:** Every change is deployed as soon as feasible.
+- **Stability & acceptable outages:** No stability guarantees.
+- **Infrastructure:** The Appliance is running on a relatively small AWS EC2 instance. We support
+  light testing, but not performance/load testing. Light monitoring if any at all.
+- **FilOne integration**: Available via the staging console at https://staging.fil.one as the region
+  `us-east-9`. Available to all users.
+- **Real vs test money:** Stripe test cards, Filecoin calibnet.
+- **Data retention:** Weekly network reset on Sunday morning UTC.
+- **Regions:** Single region (`us-east-9`).
+
+### 3. Staging
+
+This is a stable "preview" instance showing the latest & greatest features, suitable for customer
+demos. Not used for load/performance testing to avoid degraded performance during demos.
+
+- **Update frequency:** Manually triggered updates. Schedule will be determined later (see open
+  questions below).
+- **Stability & acceptable outages:** Reasonable stability and minimum unplanned downtime. Full
+  monitoring with alerts routed to the person on pager duty, with capped severity (no incident is
+  critical).
+- **Infrastructure:** The servers.com baremetal box in Amsterdam where Filecoin Foundation operates
+  a Calibnet SP.
+- **FilOne integration**: Available via the staging console at https://staging.fil.one as the region
+  `eu-central-3`. Available to all users.
+- **Real vs test money:** Stripe test cards, Filecoin calibnet.
+- **Data resets:** TBD. Monthly resets?
+- **Regions:** eu-central-3, potentially more in the future.
+
+Important: S3 access keys are scoped to a single Forge instance. It won't be possible to create one
+S3 access key with access to both dev & staging regions.
+
+### 4. Pilot instances
 
 We need the ability to quickly stand up new regions to allow potential customers evaluate FilOne in
 pilot/proof-of-concept settings. These regions must be production-grade deployment matching the real
@@ -131,69 +163,29 @@ We will _not_ offer data migration from pilot regions to production.
 - **Data resets:** None during the pilot duration. Data will be removed after the pilot has
   finished.
 - **Regions:** Created on demand.
-- **RPC API:** TBD. Ideally, each region should run a local Lotus node instance. Can we afford the
-  cost and maintenance overhead of that?
-
-Important: by adding pilot regions to the production Forge instance, we allow customers to create S3
-access keys with access to both dev & staging regions.
-
-### 2. Dev
-
-This is the instance where we continuously ship all changes.
-
-- **Update frequency:** Every change is deployed as soon as feasible.
-- **Stability & acceptable outages:** No stability guarantees.
-- **Infrastructure:** The Appliance is running on a relatively small AWS EC2 instance. We support
-  light testing, but not performance/load testing. Light monitoring if any at all.
-- **FilOne integration**: Available via the staging console at https://staging.fil.one as the region
-  `us-east-9`. Available to all users.
-- **Real vs test money:** Stripe test cards, Filecoin calibnet.
-- **Data retention:** Weekly network reset on Sunday morning UTC.
-- **Regions:** Single region (`us-east-9`).
-- **RPC API:** Chain.Love.
-
-### 3. Staging
-
-This is a stable "preview" instance showing the latest & greatest features, suitable for customer
-demos. Not used for load/performance testing to avoid degraded performance during demos.
-
-- **Update frequency:** Manually triggered updates. Schedule will be determined later (see open
-  questions below).
-- **Stability & acceptable outages:** Reasonable stability and minimum unplanned downtime. Full
-  monitoring with alerts routed to the person on pager duty, with capped severity (no incident is
-  critical).
-- **Infrastructure:** The servers.com baremetal box in Amsterdam where Filecoin Foundation operates
-  a Calibnet SP.
-- **FilOne integration**: Available via the staging console at https://staging.fil.one as the region
-  `eu-central-3`. Available to all users.
-- **Real vs test money:** Stripe test cards, Filecoin calibnet.
-- **Data resets:** TBD. Monthly resets?
-- **Regions:** eu-central-3, potentially more in the future.
-- **RPC API:** Local Lotus node in `eu-central-3`. To be determined for future regions.
-
-Important: S3 access keys are scoped to a single Forge instance. It won't be possible to create one
-S3 access key with access to both dev & staging regions.
 
 ## Open questions
 
 - Update frequency for production and staging environments. Do we upgrade regularly (e.g. every
   week, biweekly on sprint end, monthly), more often or less frequently?
 - How often we reset data & state in the staging environment.
-- How many Lotus nodes we want to run (per-region vs one central instance)? Where can we outsource
-  this to Chain.Love/Protofire?
+- Do we want to run our own Lotus nodes instead of using a hosted RPC API service like Chain.Love?
+  How many nodes we want to run (per-region vs one central instance)?
 
 ## Alternatives considered
 
-### Dedicated Forge instance for pilot regions
+### Short-lived pilot regions in the production Forge instance
 
-Pros: Pilots are isolated from production.
+Pros:
 
-- A run-away load test in pilot region does not affect production customers.
-- We can ship changes to central services without risks of breaking production.
+- A single S3 access key can be scoped to access buckets for both production and pilot regions.
+- Different S3 endpoint URL format for production (`s3.{region}.filonecontent.com`) vs pilots (`s3.{region}.{pilot-id}.filonecontent.com`).
+- Cheaper to operate (no need to run another set of central services).
+- Easier to maintain (no need to update & monitor another set of central services).
 
 Cons:
 
-- Worse user experience, including feature limitations:
-  - A single S3 access key cannot be scoped to access buckets in both production and pilot regions.
-  - Different S3 endpoint hostname format production vs pilot regions.
-- Maintenance overhead - we need to maintain & monitor another set of central services.
+- Requires work to implement region decommissioning, both in FilOne Console and Hilt/Sprue.
+- We cannot ship changes to central services for pilot regions only.
+- Changes to central services may break production.
+- A run-away load test in a pilot region may affect production clients.
