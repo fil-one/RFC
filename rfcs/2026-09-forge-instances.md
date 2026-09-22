@@ -157,7 +157,7 @@ We will _not_ offer data migration from pilot regions to production.
   or servers.com.
 - **FilOne integration**: Available via the production console at https://app.fil.one, with region
   names suffixed with `-pilot`, e.g. `uk-1-pilot`. Available only to selected users via a feature
-  flag.
+  flag. Each pilot region is integrated as a new service orchestrator.
 - **Real vs test money:** Real money, Filecoin mainnet. We can apply a discount coupon on Stripe to
   give the customer a free pilot.
 - **Data resets:** None during the pilot duration. Data will be removed after the pilot has
@@ -182,6 +182,8 @@ Pros:
 - Different S3 endpoint URL format for production (`s3.{region}.filonecontent.com`) vs pilots (`s3.{region}.{pilot-id}.filonecontent.com`).
 - Cheaper to operate (no need to run another set of central services).
 - Easier to maintain (no need to update & monitor another set of central services).
+- Less changes needed in FilOne Console - adding a region in the existing Forge network is less work
+  than adding a new Forge network (service orchestrator)
 
 Cons:
 
