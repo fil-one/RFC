@@ -239,21 +239,33 @@ Ingot's per-key cache contains the proof chains, effective action sets, derived 
 
 **Locking.** Hilt takes no row locks today; this RFC introduces them on three paths. A policy write runs in a single Postgres transaction. It locks the policy row with `SELECT ... FOR UPDATE`, takes a transaction-scoped advisory lock on the bucket, and locks each affected principal row with `SELECT ... FOR UPDATE` before enumerating that principal's keys. Rotating a key also takes an advisory lock on that key's delegation set. Hilt publishes revocations while these locks are held and commits only afterwards.
 
-`/s3/request/authorize` reads the key, principal, and policy rows with `SELECT ... FOR SHARE`, and reads the key's delegations before reading the policy. Key creation reads the principal row with `SELECT ... FOR SHARE` and materializes delegations from the policies visible to that transaction. An authorize request arriving after revocation publication but before commit therefore waits for the commit and is answered from the new policy with the new delegations. Likewise, a key created while a policy write is in flight is either included in the rotation or created from the committed policy. Without these locks, Ingot could consume a revocation and then refill its cache from the old policy, retaining already-revoked delegations until midnight.
+`/s3/request/authorize` reads the key, principal, and policy rows with `SELECT ... FOR SHARE`, and reads the key's delegations before reading the policy. Key creation reads the principal row with `SELECT ... FOR SHARE` and materializes delegations from the policies visible to that transaction. An authorize request arriving after revocation publication but before commit therefore waits for the commit and is answered from the new policy with the new delegations. Likewise, a key created while a policy write is in flight is either included in the rotation or created from the committed policy. Without these locks, an authorize request during a write would be answered from the old policy with delegations Ingot has seen revoked, and every request from the key would reach Hilt until the commit (see [error recovery](#error-recovery)).
 
 During a write to a bucket's policy, authorize requests for that bucket may wait for one Swarf round trip because all revocations from the write are sent in one request. The write keeps its transaction open while waiting for Swarf, up to 8 seconds; if it has not completed by then, it fails and rolls back. Readers and writers also fail if they cannot acquire their locks within 10 seconds, ensuring that a slow Swarf releases the locks before waiting readers time out. A timed-out management write returns 409 `ConcurrentChange`. A timed-out authorize returns `TemporarilyUnavailable`, which Ingot renders as `ServiceUnavailable` (503).
 
-The locks do not cover an authorize request that completed before the policy write acquired its locks but whose response reaches Ingot after the revocation. Swarf polls its store once per second before emitting a record, so such a response would need to remain in flight for longer than that interval.
+The locks do not cover an authorize request that completed before the policy write acquired its locks but whose response reaches Ingot after the revocation. [Error recovery](#error-recovery) covers that response.
 
-**Failure.** If Swarf rejects the publish or the publish fails, Hilt returns 500 and commits nothing. The old policy remains in force, so the principal never receives authority beyond the committed state.
-
-If Swarf accepts the revocations but the subsequent database commit fails, the delegations are revoked at Swarf but remain stored in Hilt. Ingot drops the key's per-key cache once; on the key's next request, it refills that cache from the unchanged policy and receives the same stored delegations. The member therefore retains exactly the access granted by the old policy. The console retries the write. Because the retry republishes the same revocation invocations, Swarf records them as duplicates and emits no second event, so Ingot keeps the refilled cache. The intended change reaches Ingot on a later write that revokes a different set, or when the cache expires at midnight. If the console stops retrying, the old policy remains in force and Hilt has no partially applied state.
-
-**Recovery.** Hilt performs no reconciliation because a failed write leaves no partially committed Hilt state to reconcile: every publishing write runs in one transaction, and Hilt always enforces the state it stores. What a failed call leaves behind is the caller's unmet intent. The console owns completing it and SHOULD retry from a durable job rather than from the member's request, so that a member who gives up after one attempt does not leave a removal or a policy change unapplied.
+**Failure.** A write that fails at any step, before or after publishing its revocations, is covered in [error recovery](#error-recovery).
 
 Deleting a key revokes only that key's delegations. The principal's other keys keep their cached proofs.
 
 The staleness bound for a policy change is the interval between Hilt acknowledging the change and Ingot consuming the corresponding firehose record. It is bounded by firehose latency and is independent of the midnight cache horizon. A revocation clears only Ingot's caches. Sprue and Piri do not consult Swarf, so a per-request delegation already issued by Ingot remains valid there until it expires. That does not extend usable access beyond Ingot: Ingot is the delegation's audience and signs every invocation that carries it. Once revocation clears Ingot's cache, the next request returns to Hilt and is evaluated against the new policy.
+
+### Error recovery
+
+Every write that publishes revocations (a policy change, a key's deletion, a principal's removal, a bucket's deletion, a tenant's removal) runs in one transaction and publishes before it commits. Hilt enforces exactly the state it stores, so a failed write leaves nothing at Hilt to reconcile. What it leaves is the caller's unmet intent. The console owns completing it and SHOULD retry from a durable job rather than from the member's request, so that a member who gives up after one attempt does not leave a removal or a policy change unapplied.
+
+**Swarf rejects the publish, or the publish fails.** Hilt returns 500 and commits nothing. The old state remains in force, so no principal receives authority beyond the committed state.
+
+**Swarf accepts the revocations and the commit fails.** The delegations are revoked at Swarf and still stored in Hilt. Ingot consumes the revocations, drops each affected key's per-key cache, and records each revoked CID in an in-memory set kept until the next UTC midnight plus clock skew, the same horizon as the cache. On the key's next request Ingot misses the cache, calls Hilt, and receives the same stored delegations. Their CIDs are in the set, so Ingot authorizes the request from the response and caches nothing. Every request from that key reaches Hilt until a committed write returns delegations with new CIDs. The member holds exactly the access the committed state grants, at one Hilt round trip per request.
+
+The console's retry republishes the same revoke invocations, which Swarf records as duplicates and does not emit again. The committed write stores fresh delegations, and ucantone's random nonce gives them new CIDs. The key's next request caches them. The change reaches Ingot one request after the commit.
+
+If the console stops retrying, the old state stays in force and Hilt holds nothing partially applied. The key pays a Hilt round trip per request until midnight, when Ingot drops the set and caches the stored delegations again. A retry that commits after that point reaches Ingot at the following midnight.
+
+**A response that outran a write.** An authorize response that left Hilt before a write took its locks can arrive at Ingot after the write's revocations. Its delegations are in the set, so Ingot serves that one request under the old state and caches nothing. Swarf polls its store once per second before emitting a record, so the response must stay in flight longer than that interval for this to occur.
+
+**Restart.** Ingot keeps the set in memory and a restart clears it together with the cache. A restart between a failed commit and its successful retry refills the cache from the stored delegations, and the retry's duplicate revocations emit nothing, so that key sees the change at midnight.
 
 ### Principal removal
 
@@ -266,7 +278,7 @@ The staleness bound for a policy change is the interval between Hilt acknowledgi
 
 The principal row remains as a tombstone. A removed principal is absent from `GET` and the list, is refused with 422 as the `principalId` of a new key, and is skipped by evaluation should a statement still name it. An authorize request for one of its keys waits on the lock until the removal commits or rolls back, then is refused with `UnknownAccessKey` because the key is gone.
 
-A failure at any step rolls back the transaction. The principal keeps every key and every statement it had, so a failed removal changes nothing at Hilt. The revocations already published stand and cost Ingot one refill from the unchanged policies. The console retries (see [recovery](#policy-changes-and-delegation-rotation)); the call answers 204 once the principal is removed, and 204 for an id that is removed or never existed.
+A failure at any step rolls back the transaction. The principal keeps every key and every statement it had, so a failed removal changes nothing at Hilt. The revocations already published stand, and the console retries (see [error recovery](#error-recovery)). The call answers 204 once the principal is removed, and 204 for an id that is removed or never existed.
 
 A `PUT` for a removed principal's id clears `deleted_at`. The principal returns with no keys and named in no statement, so nothing of its earlier access survives, whether the id belongs to the same member re-invited or to a different member given the same id.
 
@@ -349,7 +361,7 @@ The cached effective set is what makes `deny` enforceable. Several S3 actions ma
 
 Operations that map to no Forge command are authorized at Hilt on every request: `ListBuckets`, `CreateBucket`, and `DeleteBucket`. No per-request delegation carries the key's expiry for them, so a cached set alone would outlive an expired key.
 
-**The firehose consumer needs no change.** When Swarf reports a revoked CID, Ingot drops every per-key cache whose proof chains contain a delegation with that CID, including the cached effective action sets, signing key, and tenant. Every cached proof chain for a principal-bound key contains one of the key's stored delegations, so a rotation always names something the cache contains. A revocation that matches no cache is a no-op.
+**The firehose consumer records what it revokes.** When Swarf reports a revoked CID, Ingot drops every per-key cache whose proof chains contain a delegation with that CID, including the cached effective action sets, signing key, and tenant, and adds the CID to an in-memory set kept until the next UTC midnight plus clock skew. Every cached proof chain for a principal-bound key contains one of the key's stored delegations, so a rotation always names something the cache contains. A revocation that matches no cache still enters the set. On a cache miss, Ingot checks the delegations in Hilt's response against the set. If any is present, Ingot authorizes the request from the response and caches nothing, so a key whose revocations were published without a commit reaches Hilt on every request until a committed write issues fresh delegations (see [error recovery](#error-recovery)).
 
 Error mapping gains two rows: `TemporarilyUnavailable` renders as `ServiceUnavailable` (503) and `InvalidBucketPolicy` as `InvalidArgument` (400). `UnknownBucket` is already 404 and `OperationNotPermitted` already 403.
 
@@ -402,7 +414,7 @@ Every existing key becomes a service key because a key without a principal is ex
 
 **Once per Forge network.**
 
-1. Deploy Ingot with the two new error mappings. Ingot already enforces the cached effective action set. Swarf's service needs no deployment; Hilt takes the client library with the batch publish.
+1. Deploy Ingot with the two new error mappings and the revoked set. Ingot already enforces the cached effective action set. Swarf's service needs no deployment; Hilt takes the client library with the batch publish.
 2. Deploy Hilt. Its schema migration adds the principal and policy tables and the `principal_id` column on keys. Tenants, buckets, keys, vault entries, and delegations are untouched, and every key keeps authorizing through the parent RFC's path. Principal-bound keys are new, so every one is created with its delegations and nothing is backfilled.
 
 **Once per organization.** The console creates one principal per member with `PUT /tenants/{tenantId}/principals/{principalId}`, then writes a policy for each bucket naming the organization's Owners and Admins. This step does not yet change member behavior: the console continues to sign member traffic with its service key, and service keys are not evaluated against bucket policies.
@@ -472,7 +484,7 @@ Hilt PR #48 proposed scoping `/s3/bucket/list` to the buckets reachable by a pri
 - No existing key stops working at any point in the rollout.
 - The console's in-memory IAM fake and Hilt pass the same contract tests.
 - A policy `PUT` costs one Swarf revocation and one replacement stored delegation for each affected Forge-command delegation on each key whose principal's effective actions changed.
-- Swarf's service and Ingot's firehose consumer need no changes.
+- Swarf's service needs no changes. Ingot's firehose consumer adds only the revoked set.
 
 ## References
 
