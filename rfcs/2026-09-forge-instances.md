@@ -34,11 +34,11 @@ At the moment, we support two options:
 
 ### Stability & acceptable outages
 
-The dev instance provides no guarantees at all.
+A dev instance provides no guarantees at all.
 
-The production instance must minimise outages.
+A production instance must minimise outages.
 
-However, we need also instances on the spectrum between those two options - e.g. an instance running
+However, we also need instances on the spectrum between those two options - e.g. an instance running
 the latest known-good version where we can perform extensive load testing, an instance running the
 latest known-good version which we use for customer demos.
 
@@ -60,7 +60,7 @@ Each Forge instance is tied to one Filecoin chain (mainnet or calibration). Inst
 mainnet must deal with real funds - periodically top up the wallets paying for storage and for gas,
 using real FIL.
 
-On the FilOne side, we use Stripe sandbox in non-production environments, which gives use "test"
+On the FilOne side, we use the Stripe sandbox in non-production environments, which gives us "test"
 money and test credit card numbers we can use to pay for storage. This makes it easy to test FilOne
 & Forge for free, with no real credit card needed.
 
@@ -141,7 +141,7 @@ S3 access key with access to both dev & staging regions.
 
 ### 4. Pilot instances
 
-We need the ability to quickly stand up new regions to allow potential customers evaluate FilOne in
+We need the ability to quickly stand up new regions to allow potential customers to evaluate FilOne in
 pilot/proof-of-concept settings. These regions must be production-grade deployment matching the real
 production nodes as much as possible.
 
