@@ -143,7 +143,7 @@ The document follows the shape of an AWS bucket policy, limited to the fields Fo
 {
   "statement": [
     {
-      "sid": "owners",                              // optional label; Hilt stores and returns it, nothing evaluates it
+      "sid": "filone-owners",                       // optional label; Hilt stores and returns it, nothing evaluates it
       "effect": "allow",                            // "allow" | "deny"
       "principal": ["8f2c...", "a91e..."],          // principal IDs, or the string "*" for every principal of the tenant
       "action": ["s3:GetObject", "s3:ListBucket"]   // policy vocabulary, or ["s3:*"] for all of it
@@ -156,6 +156,8 @@ The document follows the shape of an AWS bucket policy, limited to the fields Fo
   ]
 }
 ```
+
+Fil One writes its default statements under the labels `filone-owners`, `filone-admins` and `filone-creator`, and finds them again by those labels when a member's role changes. To Hilt they are ordinary labels: any statement may carry any `sid`.
 
 Hilt MUST reject with 422:
 
