@@ -60,6 +60,8 @@ All management API additions and changes defined by this RFC MUST be reflected i
 
 Hilt MUST return 422 when a request includes `principalId` together with `permissions` or `buckets`. A principal-bound key has no permissions of its own, so accepting those fields would imply authority that the key does not carry. The management API requirement that `permissions` be present applies only to the service-key shape.
 
+The body carries no type field. The console already sends `{ name, permissions, buckets? }` to this route, and a required field would break that call.
+
 The existing `GET`, `DELETE`, and tenant key-list operations apply to both key types.
 
 ### Tenant creation
