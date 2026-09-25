@@ -24,7 +24,7 @@ For Forge, the ADR defines the principal-bound authorization path: each member i
 
 1. The storage system computes a principal's effective actions on a bucket from that bucket's policy alone: `allow` minus `deny`, with explicit `deny` taking precedence.
 2. A policy edit changes the authority of every key bound to an affected principal without reissuing any key.
-3. Before Hilt acknowledges a policy change, it publishes to Swarf every revocation required by a narrowing of a principal's effective actions or by a widening on a bucket the key already reaches. Ingot's existing firehose consumer then clears the affected caches within firehose latency.
+3. Before Hilt acknowledges a policy change, it publishes to Swarf every revocation required by a narrowing of a principal's effective actions or by a widening on a bucket the key already reaches.
 4. The console signs member traffic, including presigned URLs, with a key bound to that member's principal, while retaining service keys for traffic with no member actor.
 5. One policy model governs every principal. Existing keys continue to work, and a tenant can migrate to principals without reissuing keys or introducing a window in which the network rejects requests.
 
