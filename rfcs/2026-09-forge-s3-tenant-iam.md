@@ -20,14 +20,6 @@ Today, a Hilt access key stores a fixed set of permissions and bucket names at c
 
 For Forge, the ADR defines the principal-bound authorization path: each member is represented as a principal in the storage system; a bucket's policy is the source of that principal's access to the bucket; and every key bound to the principal carries the authority those policies grant. Service keys remain outside this model and continue to use the permissions and bucket scope they were created with.
 
-## Goals
-
-1. The storage system computes a principal's effective actions on a bucket from that bucket's policy alone: `allow` minus `deny`, with explicit `deny` taking precedence.
-2. A policy edit changes the authority of every key bound to an affected principal without reissuing any key.
-3. Before Hilt acknowledges a policy change, it publishes to Swarf every revocation required by a narrowing of a principal's effective actions or by a widening on a bucket the key already reaches.
-4. The console signs member traffic, including presigned URLs, with a key bound to that member's principal, while retaining service keys for traffic with no member actor.
-5. One policy model governs every principal. Existing keys continue to work, and a tenant can migrate to principals without reissuing keys or introducing a window in which the network rejects requests.
-
 ## Concepts
 
 ### Roles
@@ -46,6 +38,14 @@ The parent RFC's roles apply. Swarf is added:
 - **Effective actions.** The S3 actions a principal may perform on a bucket, computed from that bucket's policy.
 - **Service key.** The parent RFC's access key. It has no principal and retains the permissions and buckets supplied at creation. It signs traffic with no member actor, such as tenant setup, bucket creation and deletion, and background work. A tenant may hold several service keys.
 - **Principal-bound key.** An S3 access key that authenticates a request and identifies a principal. For each bucket the principal can access, the key holds a tenant delegation for every Forge command implied by that bucket's policy. Hilt updates those delegations when the policy changes. At request time, the key's effective permissions on a bucket are exactly those granted to its principal by the bucket's current policy.
+
+## Goals
+
+1. The storage system computes a principal's effective actions on a bucket from that bucket's policy alone: `allow` minus `deny`, with explicit `deny` taking precedence.
+2. A policy edit changes the authority of every key bound to an affected principal without reissuing any key.
+3. Before Hilt acknowledges a policy change, it publishes to Swarf every revocation required by a narrowing of a principal's effective actions or by a widening on a bucket the key already reaches.
+4. The console signs member traffic, including presigned URLs, with a key bound to that member's principal, while retaining service keys for traffic with no member actor.
+5. One policy model governs every principal. Existing keys continue to work, and a tenant can migrate to principals without reissuing keys or introducing a window in which the network rejects requests.
 
 ## Hilt - Tenant API
 
