@@ -178,7 +178,9 @@ where `s3:*` expands to every action in the policy vocabulary. Hilt returns the 
 
 `s3:ListAllMyBuckets` sits outside the per-bucket action set and is granted to every principal. The S3 `ListBuckets` operation therefore requires no policy lookup. This is distinct from listing objects within a bucket, which requires `s3:ListBucket` and is granted through the bucket policy like any other action.
 
-**Compare-and-set.** `GET` returns an `ETag` computed over Hilt's canonical encoding of the stored document. `PUT` and `DELETE` MUST carry exactly one precondition: `If-Match` with that value, or, on a `PUT` that creates the first policy, `If-None-Match: *`. A request with neither, with both, or with another `If-None-Match` value is 400. A mismatch, or `If-None-Match: *` when a policy exists, is 412 and nothing is written. A successful `PUT` answers 201 when it created the policy and 200 when it replaced one, with the new `ETag` in the response header and no body. Callers treat the ETag as opaque.
+**Canonical form.** The `statement`, `principal`, and `action` lists are sets. Hilt removes duplicates and sorts them on write, and stores and returns the sorted document. The ETag is the CID of the DAG-CBOR encoding of that document. Two documents that differ only in order or in duplicates have the same ETag.
+
+**Compare-and-set.** `GET` returns the `ETag`. `PUT` and `DELETE` MUST carry exactly one precondition: `If-Match` with that value, or, on a `PUT` that creates the first policy, `If-None-Match: *`. A request with neither, with both, or with another `If-None-Match` value is 400. A mismatch, or `If-None-Match: *` when a policy exists, is 412 and nothing is written. A successful `PUT` answers 201 when it created the policy and 200 when it replaced one, with the new `ETag` in the response header and no body. Callers treat the ETag as opaque.
 
 **Storage.** Hilt stores the document with its bucket and maintains an index from each principal to the buckets whose statements name that principal, making the two principal reads above index lookups. Statements naming `"*"` are indexed at the tenant level. The policy row is deleted with the bucket.
 
