@@ -81,7 +81,7 @@ Deleting a service key follows the parent RFC: Hilt publishes a revocation for e
 
 ### Principals
 
-Routes, all under `/tenants/{tenantId}/principals` and authenticated with the partner key:
+Routes, all under `/tenants/{tenantId}` and authenticated with the partner key:
 
 | Method | Path                                    | Purpose                                                                          |
 | ------ | --------------------------------------- | -------------------------------------------------------------------------------- |
