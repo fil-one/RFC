@@ -122,7 +122,7 @@ The principal's effective actions are read through `GET /principals/{principalId
 
 Buckets with an empty effective set are omitted. Hilt computes the result from its own tables on every call and does not consult another service, so the read reflects Hilt's latest committed write.
 
-A removed principal remains as a tombstone (see [removal](#principal-removal)). It is absent from `GET` and list results, holds no keys, and is named in no statement. A `PUT` for the same ID revives it with no attached state.
+A removed principal remains as a tombstone (see [removal](#principal-removal)). It is absent from `GET` and list results, holds no keys, and is named in no statement. A `PUT` for the same ID revives it with no attached state. The row stays so that a removed id keeps its `createdAt` and a second `DELETE` or a later `PUT` finds it.
 
 ### Bucket policies
 
