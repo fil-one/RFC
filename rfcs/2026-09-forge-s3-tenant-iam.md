@@ -16,7 +16,7 @@ An access key gains an optional principal. A key created with a principal derive
 
 ## Motivation
 
-Today, a Hilt access key stores a fixed set of permissions and bucket names at creation. Its authority cannot change afterwards, and there is no object between the tenant and its keys to which a later access change can attach. The console therefore cannot grant a member access to a subset of buckets and later widen or narrow that access without reissuing every key the member holds.
+Today, a Hilt access key stores a fixed set of permissions and bucket names at creation. Its authority cannot change afterwards, and there is no object between the tenant and its keys to which a later access change can attach. The console therefore cannot grant a member access to a set of buckets and later widen or narrow that access without reissuing every key the member holds.
 
 For Forge, the ADR defines the principal-bound authorization path: each member is represented as a principal in the storage system; a bucket's policy is the source of that principal's access to the bucket; and every key bound to the principal carries the authority those policies grant. Service keys remain outside this model and continue to use the permissions and bucket scope they were created with.
 
