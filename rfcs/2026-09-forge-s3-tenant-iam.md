@@ -91,9 +91,8 @@ Routes, all under `/tenants/{tenantId}` and authenticated with the partner key:
 | DELETE | `/principals/{principalId}`             | Remove the principal (see [removal](#principal-removal)). 204 if already gone.   |
 | GET    | `/principals/{principalId}/policies`    | Every bucket policy with a statement naming the principal or `*`.                |
 | GET    | `/principals/{principalId}/access`      | The principal's effective actions per bucket.                                    |
-| GET    | `/principals/{principalId}/access-keys` | List the principal's keys.                                                       |
 
-A principal-bound key is created through the tenant access-key route with `principalId` set (see [principal-bound access keys](#principal-bound-access-keys)).
+A principal-bound key is created through the tenant access-key route with `principalId` set, and listed through the same route with a `principalId` filter (see [principal-bound access keys](#principal-bound-access-keys)).
 
 `principalId` is an opaque caller-supplied string that is unique within the tenant. Hilt returns 422 for an empty ID, an ID longer than 255 characters, or the reserved ID `*`.
 
@@ -203,7 +202,7 @@ The console includes this header on every bucket it creates. The document names 
 }
 ```
 
-`principalId` is carried in the request body rather than the path so that the existing `POST /tenants/{tenantId}/access-keys` route can create both key types without breaking the console's current calls. The request body shape determines the key type. A second route, `POST /tenants/{tenantId}/principals/{principalId}/access-keys`, is discussed under [alternatives](#separate-creation-routes-per-kind).
+`principalId` is carried in the request body rather than the path so that the existing `POST /tenants/{tenantId}/access-keys` route can create both key types without breaking the console's current calls. The request body shape determines the key type. Listing follows the same rule: the tenant key-list route serves both kinds, filtered by principal when asked. A second route, `POST /tenants/{tenantId}/principals/{principalId}/access-keys`, is discussed under [alternatives](#separate-creation-routes-per-kind).
 
 Hilt MUST generate and store the key exactly as the parent RFC specifies, record the principal on the key row, and store `NULL` for both permissions and bucket list. It returns 422 when `principalId` does not identify a live principal of the tenant and 409 when the name is already used by another key of that principal. The response is the parent RFC's `CreatedAccessKey` with a `principal` field carrying the `principalId`, and no `permissions` or `buckets`.
 
@@ -223,7 +222,7 @@ For example, if a member's policies grant `s3:PutObject` on `photos` and `s3:Get
 
 A service key name remains unique within the tenant, as today. A principal-bound key name is unique only within its principal, so two members may each hold a key named `laptop`.
 
-`GET /tenants/{tenantId}/access-keys` and `GET /tenants/{tenantId}/access-keys/{accessKeyId}` return the `principal` field. A key without it is a service key and carries its own `permissions` and `buckets`. The key list does not carry each key's effective actions; the console reads them once per principal through the principal route.
+`GET /tenants/{tenantId}/access-keys` and `GET /tenants/{tenantId}/access-keys/{accessKeyId}` return the `principal` field. A key without it is a service key and carries its own `permissions` and `buckets`. The list accepts a `principalId` query parameter and then returns only that principal's keys. The key list does not carry each key's effective actions; the console reads them once per principal through the principal route.
 
 `DELETE /tenants/{tenantId}/access-keys/{accessKeyId}` deletes either kind in the same sequence: a revocation for each of the key's delegations, published in one Swarf request, then the delegations, the row, and the vault entry. Ingot drops that key's per-key cache and no other.
 
