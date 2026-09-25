@@ -160,7 +160,7 @@ Hilt MUST reject with 422:
 
 - an action outside the [policy vocabulary](#action-vocabulary); in particular `s3:CreateBucket`, `s3:DeleteBucket`, and `s3:ListAllMyBuckets`. `s3:*` is accepted and stands for the whole vocabulary,
 - a `principal` that is neither the string `"*"` nor a non-empty list of ids of live principals of the tenant. `"*"` inside a list is rejected; the wildcard has one spelling,
-- an empty `statement` list or a statement with an empty `action` list. The caller deletes the policy instead,
+- an empty `statement` list or a statement with an empty `action` list. To remove a policy, the caller sends `DeleteBucketPolicy`,
 - a field the schema does not define. There is no `resource` field: the policy governs the bucket it is stored on.
 
 A bucket that does not exist or belongs to another tenant is 404 on all three routes. `GET` and `DELETE` on a bucket that has no policy are 404 as well, with a `PolicyNotFound` body that tells the two cases apart.
