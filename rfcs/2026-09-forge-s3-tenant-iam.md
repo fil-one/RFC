@@ -64,10 +64,6 @@ The body carries no type field. The console already sends `{ name, permissions, 
 
 The existing `GET`, `DELETE`, and tenant key-list operations apply to both key types.
 
-### Tenant creation
-
-`PUT /tenants/{tenantId}` is unchanged. Its body currently names the region, and Hilt binds the tenant to the provider that serves it. This RFC does not change Hilt's tenant-to-region model; changes that allow a tenant to span multiple Forge regions are tracked separately in [FIL-1133](https://linear.app/filecoin-foundation/issue/FIL-1133). As today, the console creates the tenant and then creates a service key with no bucket list for bucket provisioning. Nothing in the IAM model below depends on a tenant serving exactly one region.
-
 ### Service keys
 
 A service key is the parent RFC's access key, unchanged: an ed25519 `did:key` whose private key is stored at `/tenant/{tenantDID}/access-key/{accessKeyDID}` in the vault. Hilt stores one delegation for each bucket and Forge command derived from the key's permissions. When the key has no bucket list, Hilt instead stores the corresponding powerline delegations with an undefined subject.
@@ -497,7 +493,6 @@ Hilt PR #48 proposed scoping `/s3/bucket/list` to the buckets reachable by a pri
 - [Organizations, membership, and roles](https://github.com/fil-one/fil-one/blob/main/docs/architectural-decisions/2026-08-organizations-roles-m1.md), for roles and the permission registry the console applies before calling Hilt.
 - [Service Orchestrator Management API](https://github.com/fil-one/fil-one/blob/main/docs/service-orchestrator-integration/management-openapi.yaml), the contract the HTTP additions land in.
 - [UCAN revocation](https://github.com/ucan-wg/revocation), for path witnesses.
-- [FIL-1133](https://linear.app/filecoin-foundation/issue/FIL-1133), multiple Forge regions per tenant.
 - Hilt PR #48, the closed proposal for a scoped bucket listing.
 
 ## Appendix
