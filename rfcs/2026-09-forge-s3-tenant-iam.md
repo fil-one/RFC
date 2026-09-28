@@ -372,7 +372,7 @@ Hilt verifies the signature as `/s3/request/authorize` does and requires a servi
 
 #### Result
 
-`GET` returns the stored document and its `ETag`. `PUT` returns the new `ETag`. `DELETE` returns a unit result (`{}`).
+`GET` returns the stored document and its `ETag`. `PUT` returns the new `ETag`. `DELETE` returns the result with both empty.
 
 ```jsonc
 {
