@@ -18,19 +18,19 @@ This RFC proposes a method where the hash of the data can be agreed on by both p
 
 ### Changes to `/blob/add`
 
-In the invocation arguments, `blob.digest` becomes optional, and an optional `blob.codec` field is added. The codec is the [multicodec](https://github.com/multiformats/multicodec/blob/master/table.csv) corresponding to the [multihash](https://github.com/multiformats/multihash) hashing function that should be used to hash the data.
+In the invocation arguments, `blob.digest` becomes optional, and an optional `blob.digestCode` field is added: the [multicodec](https://github.com/multiformats/multicodec/blob/master/table.csv) code of the [multihash](https://github.com/multiformats/multihash) function that should be used to hash the data, which is the code the computed digest will carry.
 
-Exactly one of `blob.digest` or `blob.codec` MUST be provided. A multihash already names its hash function, so a digest needs no codec alongside it.
+Exactly one of `blob.digest` or `blob.digestCode` MUST be provided. A multihash already carries its code, so a digest needs no `digestCode` alongside it.
 
-When `blob.codec` is provided, the invocation MUST contain a unique _nonce_: two or more blobs of the same size may be added with the same codec, and the `/http/put` principal is derived from the task link (see [Changes to `/http/put`](#changes-to-httpput)), so the task link must be unique to the upload.
+When `blob.digestCode` is provided, the invocation MUST contain a unique _nonce_: two or more blobs of the same size may be added with the same digest code, and the `/http/put` principal is derived from the task link (see [Changes to `/http/put`](#changes-to-httpput)), so the task link must be unique to the upload.
 
-The invocation MUST fail if the executor does not support adding a blob by codec, or does not support the specified codec, so that the client can fall back to computing the digest before adding the blob. Implementations MUST support SHA2-256.
+The invocation MUST fail if the executor does not support adding a blob by digest code, or does not support the specified digest code, so that the client can fall back to computing the digest before adding the blob. Implementations MUST support SHA2-256.
 
 ### Changes to `/blob/allocate`
 
-As above, the invocation argument `blob.digest` becomes optional, and an optional `blob.codec` field is added. Exactly one of `blob.digest` or `blob.codec` MUST be provided and MUST be set to the value from the `/blob/add` invocation arguments.
+As above, the invocation argument `blob.digest` becomes optional, and an optional `blob.digestCode` field is added. Exactly one of `blob.digest` or `blob.digestCode` MUST be provided and MUST be set to the value from the `/blob/add` invocation arguments.
 
-The invocation MUST fail if the storage node does not support the specified codec. Implementations MUST support SHA2-256. The upload service SHOULD allocate on a storage node that supports the codec, and SHOULD try another candidate rather than fail the `/blob/add` when one does not.
+The invocation MUST fail if the storage node does not support the specified digest code. Implementations MUST support SHA2-256. The upload service SHOULD allocate on a storage node that supports the digest code, and SHOULD try another candidate rather than fail the `/blob/add` when one does not.
 
 Since the blob digest is unknown, a successful receipt MUST always contain a size field that is equal to the size of the blob and MUST always contain an address field. The storage node cannot recognise content it already holds, so the data is always transferred, even when the storage node already has it.
 
@@ -38,7 +38,7 @@ The size is the only property of the data that is known in advance, so when the 
 
 ### Changes to `/http/put`
 
-The invocation argument `body.digest` becomes optional, and an optional `body.codec` field is added. Each MUST be set to its value in the `/blob/allocate` invocation arguments, and omitted when those arguments omit it.
+The invocation argument `body.digest` becomes optional, and an optional `body.digestCode` field is added. Each MUST be set to its value in the `/blob/allocate` invocation arguments, and omitted when those arguments omit it.
 
 The subject of the invocation is normally derived from the blob digest. When no digest is specified, the subject MUST instead be the [`did:key`] of the Ed25519 key whose seed is the last 32 bytes of the multihash of the `/blob/add` task link. As before, the key is embedded in the invocation `meta` field, is a public, single-purpose token, and MUST NOT be granted any other authority.
 
@@ -50,7 +50,7 @@ The storage node that receives the data MUST compute the digest per the agreed a
 
 ### Changes to `/blob/accept`
 
-As above, the invocation argument `blob.digest` becomes optional, and an optional `blob.codec` field is added. Each MUST be set to its value in the `/blob/allocate` invocation arguments, and omitted when those arguments omit it.
+As above, the invocation argument `blob.digest` becomes optional, and an optional `blob.digestCode` field is added. Each MUST be set to its value in the `/blob/allocate` invocation arguments, and omitted when those arguments omit it.
 
 When the corresponding `/blob/allocate` task did not specify a digest, the `/blob/add` executor cannot know the digest when it creates the `/blob/accept` task, so the digest is instead taken from the result the `_put` promise resolves to: the `blob.digest` field of the `/http/put` receipt. In this case the `/http/put` receipt MUST be transmitted in the container with the `/blob/accept` invocation.
 
@@ -60,11 +60,11 @@ A `/blob/accept` invocation MUST fail with the error name `BlobDigestMismatch` i
 
 The client in this example is an S3 gateway (`did:web:s3.example.com`) proxying an S3 `PUT`: it adds a 2MiB blob to Alice's space without knowing its digest. The gateway knows the size in advance: it follows from the object's `Content-Length` and the encryption overhead. Both the client and the storage node hash the bytes as they stream, and `/blob/accept` succeeds only if the two digests match.
 
-Examples follow the conventions of the [blob protocol] specification: they show invocation payloads with the signed envelope elided, `// "/": "bafy.."` comments denote task links, and receipts show only their salient fields. Values are [DAG-JSON]: bytes are unpadded standard base64 with no multibase prefix, and links and bytes are elided with `...`. The codec `18` is the multicodec for SHA2-256 (`0x12`).
+Examples follow the conventions of the [blob protocol] specification: they show invocation payloads with the signed envelope elided, `// "/": "bafy.."` comments denote task links, and receipts show only their salient fields. Values are [DAG-JSON]: bytes are unpadded standard base64 with no multibase prefix, and links and bytes are elided with `...`. The digest code `18` is the multicodec code for SHA2-256 (`0x12`).
 
 ### 1. Client invokes `/blob/add`
 
-The invocation names the hashing algorithm instead of a digest. Its nonce makes the task unique, since other blobs of the same size and codec can be added the same way.
+The invocation names the hashing algorithm instead of a digest. Its nonce makes the task unique, since other blobs of the same size and digest code can be added the same way.
 
 ```jsonc
 { // "/": "bafy..add"
@@ -74,8 +74,8 @@ The invocation names the hashing algorithm instead of a digest. Its nonce makes 
   "cmd": "/blob/add",
   "args": {
     "blob": {
-      // multicodec of the hashing function to use (sha2-256)
-      "codec": 18,
+      // multihash function code for the digest to come (sha2-256)
+      "digestCode": 18,
       "size": 2097152
     }
   },
@@ -96,7 +96,7 @@ The invocation names the hashing algorithm instead of a digest. Its nonce makes 
   "args": {
     "space": "did:key:zAliceSpace",
     "blob": {
-      "codec": 18,
+      "digestCode": 18,
       "size": 2097152
     },
     "cause": { "/": "bafy..add" }
@@ -145,7 +145,7 @@ With no digest available, the upload service derives the `/http/put` principal f
   "cmd": "/http/put",
   "args": {
     "body": {
-      "codec": 18,
+      "digestCode": 18,
       "size": 2097152
     },
     "destination": { "await/ok": { "/": "bafy..alloc" } }
@@ -175,7 +175,7 @@ The `/blob/accept` task keeps its empty nonce, so its link can still be derived 
   "args": {
     "space": "did:key:zAliceSpace",
     "blob": {
-      "codec": 18,
+      "digestCode": 18,
       "size": 2097152
     },
     // resolves to the /http/put result, which carries the digest
