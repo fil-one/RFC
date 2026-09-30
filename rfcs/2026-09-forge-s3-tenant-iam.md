@@ -36,7 +36,7 @@ The parent RFC's roles apply. Swarf is added:
 - **Principal.** Hilt's representation of a member defined as `(tenant, principalId)`. The console creates one principal per member. A principal carries no permissions, role, or key material.
 - **Bucket policy.** A document attached to a bucket. Each statement has an effect, a set of principals, and a set of S3 actions. A bucket has at most one policy, which is deleted with the bucket.
 - **Effective actions.** The S3 actions a principal may perform on a bucket, computed from that bucket's policy.
-- **Service key.** The parent RFC's access key. It has no principal and retains the permissions and buckets supplied at creation. It signs traffic with no member actor, such as tenant setup, bucket creation and deletion, and background work. A tenant may hold several service keys.
+- **Service key.** The parent RFC's access key. It has no principal and retains the permissions and buckets supplied at creation. The console signs all of its traffic with one, member traffic and presigned URLs included. A tenant may hold several service keys.
 - **Principal-bound key.** An S3 access key that authenticates a request and identifies a principal. For each bucket the principal can access, the key holds a tenant delegation for every Forge command implied by that bucket's policy. Hilt updates those delegations when the policy changes. At request time, the key's effective permissions on a bucket are exactly those granted to its principal by the bucket's current policy.
 
 ## Goals
@@ -44,7 +44,7 @@ The parent RFC's roles apply. Swarf is added:
 1. The storage system computes a principal's effective actions on a bucket from that bucket's policy alone: `allow` minus `deny`, with explicit `deny` taking precedence.
 2. A policy edit changes the authority of every key bound to an affected principal without reissuing any key.
 3. Before Hilt acknowledges a policy change, it publishes to Swarf every revocation required by a narrowing of a principal's effective actions or by a widening on a bucket the key already reaches.
-4. The console signs member traffic, including presigned URLs, with a key bound to that member's principal, while retaining service keys for traffic with no member actor.
+4. The console signs every request, presigned URLs included, with a service key, and refuses a scoped member's request itself from the principal's effective actions. A member's own keys are bound to their principal.
 5. One policy model governs every principal. Existing keys continue to work, and a tenant can migrate to principals without reissuing keys or introducing a window in which the network rejects requests.
 
 ## Hilt - Tenant API
@@ -75,7 +75,7 @@ A service key:
 - Appears in `GET /tenants/{tenantId}/access-keys`, counts toward `accessKeyCount`, and is deleted through the access-key delete route, as today.
 - Keeps the parent RFC's optional `expiresAt`. Rotation consists of minting a new key, moving the caller to it, and deleting the old key.
 
-Because its bucket list is fixed at creation, a service key scoped to named buckets cannot reach buckets created later. Tenant setup, bucket creation, and bucket deletion therefore use a service key with no bucket list.
+Because its bucket list is fixed at creation, a service key scoped to named buckets cannot reach buckets created later. The console therefore holds a service key with no bucket list.
 
 Deleting a service key follows the parent RFC: Hilt publishes a revocation for each delegation, then deletes the delegations, key row, and vault entry.
 
@@ -424,18 +424,16 @@ Error mapping gains the rows listed under [failures](#failures). `UnknownBucket`
 
 ## Fil One console
 
-The console maintains two key types per tenant.
+The console holds one service key per tenant, the tenant-wide credential it uses today. The key is created without a bucket list and holds `s3:CreateBucket`, `s3:DeleteBucket`, and the three policy actions. It signs every request the console sends: tenant setup, bucket creation with the policy header, bucket deletion, policy reads and writes, background workers, and every member's bucket and object traffic, presigned URLs included.
 
-The service key is the tenant-wide credential the console uses today. It is created without a bucket list and holds `s3:CreateBucket`, `s3:DeleteBucket`, and the three policy actions. It signs every request that has no member actor and every request no policy can authorize: tenant setup, bucket creation with the policy header, bucket deletion, policy reads and writes, and background workers. For that traffic the console's own role check is the whole of the enforcement, as today.
-
-For each member, the console stores one principal-bound key for the tenant. It creates the key through the tenant access-key route on that member's first request in the region, persists the returned credential, and reuses it for subsequent traffic from that member rather than minting a new key per request. The console uses that key for all member traffic: listing buckets and objects, reading, writing and deleting objects, and creating presigned URLs. Hilt and Ingot authorize this traffic against the member's bucket policies, so bucket access is enforced by the storage system while the console's role checks remain an additional front-end guard.
+Bucket policies are never evaluated for a service key, so on a region serving the `iam` model the console enforces a scoped member's access itself. Before it signs a request on a member's behalf, it reads the member's effective actions through `GET /principals/{principalId}/access`, filters bucket listings and the activity feed to the buckets in that result, and refuses a bucket-addressed request whose bucket is absent from it or whose action the bucket's effective set does not include. Owners and Admins are named on every bucket's policy and are served without the check.
 
 Consequences:
 
-- A member's key cannot create or delete a bucket, whether the console or the member created the key. The console signs those two operations with its service key after its own role check, so the tenant-wide credential stays in service.
-- Hilt does not distinguish the console's key for a member from a key the member created themselves. Both are bound to the same principal, are authorized against the same policies, and are deleted with the principal.
-- A presigned URL is authorized against the member's policies when it is redeemed, under the parent RFC's signature time bounds and the key's own expiry.
-- A policy change reaches the member's console traffic the way it reaches every key of theirs: through the rotation of the key's delegations.
+- The console's own check is the whole of the enforcement for console traffic, as today. Hilt and Ingot enforce the policies directly for keys bound to a principal, which members mint for their own use.
+- A presigned URL is authorized when the console issues it and redeems under the service key until it expires. A member removed from a bucket keeps a link they already hold for its remaining life.
+- A policy change reaches a member's console traffic on their next request, because the console reads the effective actions from Hilt's committed state. It reaches the member's own keys through the rotation of those keys' delegations.
+- The console mints nothing on a member's first request and deletes nothing with the principal beyond the keys the member minted.
 
 ## Action vocabulary
 
@@ -474,11 +472,9 @@ Every existing key becomes a service key because a key without a principal is ex
 1. Deploy Ingot with the policy operations, the new error mappings, and the revoked set. Ingot already enforces the cached effective action set. Swarf's service needs no deployment; Hilt takes the client library with the batch publish.
 2. Deploy Hilt. Its schema migration adds the principal and policy tables and the `principal_id` column on keys. Tenants, buckets, keys, vault entries, and delegations are untouched, and every key keeps authorizing through the parent RFC's path. Principal-bound keys are new, so every one is created with its delegations and nothing is backfilled.
 
-**Once per organization.** The console creates one principal per member with `PUT /tenants/{tenantId}/principals/{principalId}`, then writes a policy for each bucket naming the organization's Owners and Admins. This step does not yet change member behavior: the console continues to sign member traffic with its service key, and service keys are not evaluated against bucket policies.
+**Once per organization.** The console creates one principal per member with `PUT /tenants/{tenantId}/principals/{principalId}`, then writes a policy for each bucket naming the organization's Owners and Admins. The console signs member traffic with its service key throughout, and service keys are not evaluated against bucket policies, so this step changes no member's access.
 
-**Once per region.** After every organization in the region has principals and policies, the console switches that region's access model from `scoped-keys` to `iam`. The access model is configured per region; policy operations, policy fan-out, and per-member keys are active only where the model is `iam`. From that point forward, the console includes `x-bucket-policy` on every bucket it creates.
-
-**Once per member.** On the member's first request after the regional switch, the console creates a key bound to that member's principal, persists the returned credential, and reuses it for subsequent member traffic. Until that happens, the console continues to sign the member's traffic with the service key, which reaches every bucket in the tenant and is not subject to bucket policies. Policy changes therefore affect a member's console traffic only after the member has a principal-bound key.
+**Once per region.** After every organization in the region has principals and policies, the console switches that region's access model from `scoped-keys` to `iam`. The access model is configured per region; policy operations, the policy fan-out, and the console's check of member traffic against effective actions are active only where the model is `iam`. From that point forward, the console includes `x-bucket-policy` on every bucket it creates and refuses a scoped member's request outside their effective actions.
 
 No migration step takes an existing key out of service.
 
@@ -510,7 +506,7 @@ Ingot embeds versitygw, whose policy engine is currently disabled by assigning t
 
 ### An access model flag per tenant
 
-A tenant could carry an access-model flag, `scoped-keys` or `iam`, and Hilt could apply that model to every key the tenant holds. Each request would then read one model from the tenant row rather than branching on the key. A tenant cannot hold a worker key and a member key at once under that rule, and the console holds both from the moment it creates its first principal.
+A tenant could carry an access-model flag, `scoped-keys` or `iam`, and Hilt could apply that model to every key the tenant holds. Each request would then read one model from the tenant row rather than branching on the key. A tenant cannot hold a service key and a member key at once under that rule, and a tenant holds both as soon as a member mints a key beside the console's.
 
 ### A permission list on a principal-bound key
 
@@ -534,7 +530,7 @@ Hilt PR #48 proposed scoping `/s3/bucket/list` to the buckets reachable by a pri
 
 ## Open questions
 
-1. What latency target does `GET /principals/{principalId}/access` carry? The console resolves it per request for its bucket list and activity feed. It is an index lookup at Hilt; the number is unmeasured.
+1. What latency target does `GET /principals/{principalId}/access` carry? The console resolves it on every request it serves for a scoped member on an `iam` region. It is an index lookup at Hilt; the number is unmeasured.
 2. A policy edit naming `"*"` rewrites the delegations of every key of every live principal of the tenant over that bucket: rows and tenant-key signatures inside the write, and one Swarf request whose size grows with the fan-out. A key's rows number its buckets times the commands its actions map to, up to seven per bucket. There is no figure for principals per tenant or keys per principal on Forge. If the product is large, that write amplification is the cost to watch.
 3. Limits on statements per policy and principals per statement. None are specified here. The create header is bound by Ingot's 8 KB request head; `PutBucketPolicy` has no stated limit (AWS caps a bucket policy at 20 KB).
 
@@ -621,8 +617,7 @@ The `delegation` table is unchanged. For a principal-bound key, its rows represe
 1. The tenant's keys keep working as service keys. Fil One changes nothing about them and keeps using the service key it holds.
 2. Fil One calls `PUT /tenants/{tenantId}/principals/{principalId}` for every member.
 3. Hilt stores each principal.
-4. Fil One writes each bucket's policy with `PutBucketPolicy`, signed with its service key.
-5. On a member's next request, Fil One calls `POST /tenants/{tenantId}/access-keys` with that member's `principalId`, persists the returned credential, and signs that member's subsequent traffic with it.
+4. Fil One writes each bucket's policy with `PutBucketPolicy`, signed with its service key. From then on it checks each member's console traffic against their effective actions before signing it with that key.
 
 #### Create a bucket
 
@@ -636,7 +631,7 @@ The `delegation` table is unchanged. For a principal-bound key, its rows represe
 1. Fil One sends `GetBucketPolicy` for `photos` with its service key and keeps the `ETag`.
 2. Fil One sends `PutBucketPolicy` with an added `allow` statement and `If-Match`.
 3. Hilt compares effective sets before and after for every named principal. The added member gained actions on a bucket their keys held nothing over, so Hilt locks the policy row and the member's principal row, stores the new delegations for each of the member's keys, publishes nothing, and commits the document. The response carries the new `ETag`.
-4. Ingot holds no cached set for `photos` under the member's keys, so their next request on it reaches Hilt and is authorized against the new policy.
+4. Ingot holds no cached set for `photos` under the member's keys, so their next request on it reaches Hilt and is authorized against the new policy. The console lists `photos` for the member on their next request.
 
 #### Put an object with a principal-bound key
 
