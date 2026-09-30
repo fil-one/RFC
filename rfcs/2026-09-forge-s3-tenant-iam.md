@@ -10,7 +10,7 @@ Extends: [Forge S3 tenant management](./2026-06-forge-s3-tenant-management.md)
 
 ## Introduction
 
-Hilt gains principals, bucket policies, and principal-bound access keys, while Ingot enforces the actions those policies grant. Together, they let the Fil One console grant each member access to a subset of an organization's buckets, as decided in the [bucket access by region](https://github.com/fil-one/fil-one/blob/main/docs/architectural-decisions/2026-08-bucket-policies-m2.md) ADR.
+Hilt gains principals, bucket policies, and principal-bound access keys, while Ingot enforces the actions those policies grant. Together, they let the Fil One console grant each member access to a set of an organization's buckets, as decided in the [bucket access by region](https://github.com/fil-one/fil-one/blob/main/docs/architectural-decisions/2026-08-bucket-policies-m2.md) ADR.
 
 An access key gains an optional principal. A key created with a principal derives its authority from the bucket policies that apply to that principal. A key created without one keeps the [parent RFC's](./2026-06-forge-s3-tenant-management.md) behavior and is authorized from the permissions and buckets supplied at creation. The parent RFC's tenant, bucket, delegation, and access-key route mechanics remain unchanged.
 
@@ -18,7 +18,7 @@ An access key gains an optional principal. A key created with a principal derive
 
 Today, a Hilt access key stores a fixed set of permissions and bucket names at creation. Its authority cannot change afterwards, and there is no object between the tenant and its keys to which a later access change can attach. The console therefore cannot grant a member access to a set of buckets and later widen or narrow that access without reissuing every key the member holds.
 
-For Forge, the ADR defines the principal-bound authorization path: each member is represented as a principal in the storage system; a bucket's policy is the source of that principal's access to the bucket; and every key bound to the principal carries the authority those policies grant. Service keys remain outside this model and continue to use the permissions and bucket scope they were created with.
+For Forge, the ["Bucket access by region: scoped keys on Aurora and FTH, IAM on Forge" ADR](https://github.com/fil-one/fil-one/blob/main/docs/architectural-decisions/2026-08-bucket-policies-m2.md) defines the principal-bound authorization path: each member is represented as a principal in the storage system; a bucket's policy is the source of that principal's access to the bucket; and every key bound to the principal carries the authority those policies grant. Service keys remain outside this model and continue to use the permissions and bucket scope they were created with.
 
 ## Concepts
 
@@ -33,7 +33,7 @@ The parent RFC's roles apply. Swarf is added:
 ### Terms
 
 - **Member.** A user in a Fil One organization. Fil One assigns each member one of the roles Owner, Admin, Member, or ReadOnly. Hilt is unaware of these roles.
-- **Principal.** Hilt's representation of a member: `(tenant, principalId)` and nothing more. The console creates one principal per member. A principal carries no permissions, role, or key material.
+- **Principal.** Hilt's representation of a member defined as `(tenant, principalId)`. The console creates one principal per member. A principal carries no permissions, role, or key material.
 - **Bucket policy.** A document attached to a bucket. Each statement has an effect, a set of principals, and a set of S3 actions. A bucket has at most one policy, which is deleted with the bucket.
 - **Effective actions.** The S3 actions a principal may perform on a bucket, computed from that bucket's policy.
 - **Service key.** The parent RFC's access key. It has no principal and retains the permissions and buckets supplied at creation. It signs traffic with no member actor, such as tenant setup, bucket creation and deletion, and background work. A tenant may hold several service keys.
@@ -252,7 +252,7 @@ The locks do not cover an authorize request that completed before the policy wri
 
 Deleting a key revokes only that key's delegations. The principal's other keys keep their cached proofs.
 
-The staleness bound for a policy change is the interval between Hilt acknowledging the change and Ingot consuming the corresponding firehose record. It is bounded by firehose latency and is independent of the midnight cache horizon. A revocation clears only Ingot's caches. Sprue and Piri do not consult Swarf, so a per-request delegation already issued by Ingot remains valid there until it expires. That does not extend usable access beyond Ingot: Ingot is the delegation's audience and signs every invocation that carries it. Once revocation clears Ingot's cache, the next request returns to Hilt and is evaluated against the new policy.
+The staleness bound for a policy change is the interval between Hilt acknowledging the change and Ingot consuming the corresponding record via Swarf. It is bounded by Swarf latency and is independent of the midnight cache horizon. A revocation clears only Ingot's caches. Sprue and Piri do not consult Swarf, so a per-request delegation already issued by Ingot remains valid there until it expires. That does not extend usable access beyond Ingot: Ingot is the delegation's audience and signs every invocation that carries it. Once revocation clears Ingot's cache, the next request returns to Hilt and is evaluated against the new policy.
 
 ### Error recovery
 
