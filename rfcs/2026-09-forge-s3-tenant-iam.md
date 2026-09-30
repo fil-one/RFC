@@ -431,6 +431,7 @@ Bucket policies are never evaluated for a service key, so on a region serving th
 Consequences:
 
 - The console's own check is the whole of the enforcement for console traffic, as today. Hilt and Ingot enforce the policies directly for keys bound to a principal, which members mint for their own use.
+- An Owner or Admin can also create a service key through the console. It is the parent RFC's key, authorized from the permissions and buckets given at creation and never from a policy, and the console caps it at its creator's role.
 - A presigned URL is authorized when the console issues it and redeems under the service key until it expires. A member removed from a bucket keeps a link they already hold for its remaining life.
 - A policy change reaches a member's console traffic on their next request, because the console reads the effective actions from Hilt's committed state. It reaches the member's own keys through the rotation of those keys' delegations.
 - The console mints nothing on a member's first request and deletes nothing with the principal beyond the keys the member minted.
