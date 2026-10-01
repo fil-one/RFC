@@ -240,9 +240,9 @@ A principal's first grant on a bucket publishes no revocation because the key pr
 
 Ingot's per-key cache contains the proof chains, effective action sets, derived signing key, and tenant, and every proof chain includes one of the key's stored delegations. When Ingot consumes a revocation for any delegation in those proof chains, it drops all cached state for that access key. As a result, revoking a key's delegations for one bucket also clears that key's cache for every other bucket; the next request returns to Hilt and refills the cache from the current policy. Revocation remains exact at Hilt and Swarf, while Ingot pays the broader cost of a cache refill.
 
-**Locking.** Hilt takes no row locks today; this RFC introduces them on three paths. A policy write runs in a single Postgres transaction. It locks the policy row with `SELECT ... FOR UPDATE`, takes a transaction-scoped advisory lock on the bucket, and locks each affected principal row with `SELECT ... FOR UPDATE` before enumerating that principal's keys. Rotating a key also takes an advisory lock on that key's delegation set. Hilt publishes revocations while these locks are held and commits only afterwards.
+**Locking.** Hilt takes no row locks today; this RFC introduces them on four paths. A policy write runs in a single Postgres transaction and takes its locks in this order: the principal rows the new policy names, with `SELECT ... FOR KEY SHARE`; a transaction-scoped advisory lock on the bucket; the bucket row, with `FOR KEY SHARE`; and the policy row, with `FOR UPDATE`. It then locks each affected principal row with `SELECT ... FOR NO KEY UPDATE` before enumerating that principal's keys, and rotating a key takes an advisory lock on that key's delegation set. Hilt publishes revocations while these locks are held and commits only afterwards. The two principal lock modes do not conflict with each other, so a write never waits on its own locks, and both conflict with the `FOR UPDATE` a principal removal takes. A removal locks the principal row only after it has rewritten the policies naming the principal (see [principal removal](#principal-removal)), so no path holds a principal row while it waits for a bucket.
 
-`/s3/request/authorize` reads the key, principal, and policy rows with `SELECT ... FOR SHARE`, and reads the key's delegations before reading the policy. Key creation reads the principal row with `SELECT ... FOR SHARE` and materializes delegations from the policies visible to that transaction. An authorize request arriving after revocation publication but before commit therefore waits for the commit and is answered from the new policy with the new delegations. Likewise, a key created while a policy write is in flight is either included in the rotation or created from the committed policy. Without these locks, an authorize request during a write would be answered from the old policy with delegations Ingot has seen revoked, and every request from the key would reach Hilt until the commit (see [error recovery](#error-recovery)).
+`/s3/request/authorize` reads the key, principal, and policy rows with `SELECT ... FOR SHARE`, each in a short transaction of its own, and reads the key's delegations before reading the policy. A reader therefore holds at most one lock at a time and waits for at most one write. Key creation reads the principal row with `SELECT ... FOR SHARE` and materializes delegations from the policies visible to that transaction. An authorize request arriving after revocation publication but before commit therefore waits for the commit and is answered from the new policy with the new delegations. Likewise, a key created while a policy write is in flight is either included in the rotation or created from the committed policy. Without these locks, an authorize request during a write would be answered from the old policy with delegations Ingot has seen revoked, and every request from the key would reach Hilt until the commit (see [error recovery](#error-recovery)).
 
 During a write to a bucket's policy, authorize requests for that bucket may wait for one Swarf round trip because all revocations from the write are sent in one request. The write keeps its transaction open while waiting for Swarf, up to 8 seconds; if it has not completed by then, it fails and rolls back. Readers and writers also fail if they cannot acquire their locks within 10 seconds, ensuring that a slow Swarf releases the locks before waiting readers time out. A timed-out policy write returns `ConcurrentChange`, which Ingot renders as `OperationAborted` (409). A timed-out authorize returns `TemporarilyUnavailable`, which Ingot renders as `ServiceUnavailable` (503).
 
@@ -256,7 +256,7 @@ The staleness bound for a policy change is the interval between Hilt acknowledgi
 
 ### Error recovery
 
-Every write that publishes revocations (a policy change, a key's deletion, a principal's removal, a bucket's deletion, a tenant's removal) runs in one transaction and publishes before it commits. Hilt enforces exactly the state it stores, so a failed write leaves nothing at Hilt to reconcile. What it leaves is the caller's unmet intent. The console owns completing it and SHOULD retry from a durable job rather than from the member's request, so that a member who gives up after one attempt does not leave a removal or a policy change unapplied.
+Every write that publishes revocations (a policy change, a key's deletion, a bucket's deletion, a tenant's removal) runs in one transaction and publishes before it commits. A principal's removal runs in steps that are each idempotent (see [principal removal](#principal-removal)). Hilt enforces exactly the state it stores, so a failed write leaves nothing at Hilt to reconcile. What it leaves is the caller's unmet intent. The console owns completing it and SHOULD retry from a durable job rather than from the member's request, so that a member who gives up after one attempt does not leave a removal or a policy change unapplied.
 
 **Swarf rejects the publish, or the publish fails.** Hilt returns 500 and commits nothing. The old state remains in force, so no principal receives authority beyond the committed state.
 
@@ -272,16 +272,18 @@ If the console stops retrying, the old state stays in force and Hilt holds nothi
 
 ### Principal removal
 
-`DELETE /tenants/{tenantId}/principals/{principalId}` locks the principal row with `SELECT ... FOR UPDATE` and, in one transaction and in order:
+`DELETE /tenants/{tenantId}/principals/{principalId}`, in order:
 
 1. Publishes a revocation for every delegation of each of the principal's keys, in one Swarf request.
-2. Removes the principal from every statement naming it. A statement left with no principal is deleted, and a policy left with no statement is deleted.
-3. Deletes the principal's keys: rows, then vault entries.
-4. Sets `deleted_at` on the principal row and commits, releasing the lock.
+2. Removes the principal from every statement naming it. A statement left with no principal is deleted, and a policy left with no statement is deleted. Each rewrite is a policy write that carries the ETag it read.
+3. Locks the principal row with `SELECT ... FOR UPDATE`. From here a policy write naming the principal waits for the outcome. A policy that names the principal again was written after step 2, and the removal returns `ConcurrentChange`.
+4. Publishes a revocation for any delegation the principal's keys gained since step 1, deletes the keys (rows, then vault entries), sets `deleted_at` on the principal row, and commits, releasing the lock.
+
+Steps 1 and 2 run before the lock because a policy write holds its bucket while it locks the principals it changes. A removal that held the principal row while it rewrote that bucket's policy would wait on the write while the write waited on it.
 
 The principal row remains as a tombstone. A removed principal is absent from `GET` and the list, is refused with 422 as the `principalId` of a new key, and is skipped by evaluation should a statement still name it. An authorize request for one of its keys waits on the lock until the removal commits or rolls back, then is refused with `UnknownAccessKey` because the key is gone.
 
-A failure at any step rolls back the transaction. The principal keeps every key and every statement it had, so a failed removal changes nothing at Hilt. The revocations already published stand, and the console retries (see [error recovery](#error-recovery)). The call answers 204 once the principal is removed, and 204 for an id that is removed or never existed.
+A failure stops the removal at that step, and the console retries (see [error recovery](#error-recovery)). A failed publish in step 1 changes nothing at Hilt. A failure after step 2 leaves the principal with its keys, whose delegations are revoked, and without the statements already rewritten; the retry finishes the removal. The revocations already published stand. The call answers 204 once the principal is removed, and 204 for an id that is removed or never existed.
 
 A `PUT` for a removed principal's id clears `deleted_at`. The principal returns with no keys and named in no statement, so nothing of its earlier access survives, whether the id belongs to the same member re-invited or to a different member given the same id.
 
@@ -652,6 +654,6 @@ The `delegation` table is unchanged. For a principal-bound key, its rows represe
 #### Remove a member
 
 1. Fil One calls `DELETE /tenants/{t}/principals/{principalId}`.
-2. Hilt locks the principal row, publishes a revocation for every delegation of the member's keys in one Swarf request, strips the principal from every statement, deletes its keys, sets `deleted_at`, and commits.
+2. Hilt publishes a revocation for every delegation of the member's keys in one Swarf request and strips the principal from every statement. It then locks the principal row, deletes its keys, sets `deleted_at`, and commits.
 3. Ingot drops each key's per-key cache when it consumes the revocation. The keys no longer resolve at Hilt.
 4. If the member is re-invited, Fil One calls `PUT` for the same `principalId`. The tombstone clears and the principal starts with no keys and no statements.
