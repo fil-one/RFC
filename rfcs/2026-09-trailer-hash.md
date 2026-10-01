@@ -322,13 +322,13 @@ If the bytes were corrupted in transit, the storage node's digest differs from t
 
 ## Cancelling an upload
 
-An upload is cancelled with `/blob/abort`, which the upload service translates into `/blob/reject` on the storage node (see the [blob removal] RFC). Both identify the upload by `(digest, space)`, but an upload without a digest has none until its data has been received, so the storage node, `/blob/abort` and `/blob/reject` need another way to identify it until then.
+An upload is cancelled with `/blob/abort`, which the upload service translates into `/blob/reject` on the storage node (see the [blob removal] RFC). Both identify the upload by `(digest, space)`, but an upload without a digest has none until its data has been received. This RFC identifies every upload by the tasks that started it instead, whether or not it specified a digest.
 
-### Allocations without a digest
+### Identifying allocations
 
-A storage node MUST identify an allocation made without a digest by the link of the `/blob/allocate` task that created it, since the node issued the receipt for that task.
+A storage node MUST identify each allocation by the link of the `/blob/allocate` task that created it, since the node issued the receipt for that task. This applies to allocations made with a digest as well as without one.
 
-When the data has been received, the storage node MUST also record the allocation against `(computed digest, space)`, so that the checks the [blob removal] RFC requires before physical deletion count it as a claim on the digest.
+When the data for an allocation made without a digest has been received, the storage node MUST also record the allocation against `(computed digest, space)`, so that the checks the [blob removal] RFC requires before physical deletion count it as a claim on the digest.
 
 Data from an upload that never completes has no computed digest and never counts as a claim on any digest. The storage node deletes it when the allocation is rejected or expires.
 
@@ -336,19 +336,35 @@ If the computed digest matches data the storage node already holds, for this spa
 
 ### Changes to `/blob/abort`
 
-The invocation argument `digest` becomes optional. It MUST be set if the `/blob/add` task linked by `cause` specified a digest.
+The invocation arguments `digest` and `cause` are replaced by a single required field, `add`: the link to the `/blob/add` task that started the upload. It is the `cause` field under a name that says what it links.
 
-When `digest` is omitted, `cause` alone identifies the upload. The upload service recovers the `/blob/allocate` task from the `/blob/add` task's receipt chain, and forwards its link to the storage node in `/blob/reject`.
+The upload service recovers the `/blob/allocate` task and the storage node from the `/blob/add` task's receipt chain, and forwards the allocation link to the storage node in `/blob/reject`. Since `/blob/reject` no longer carries the space, the upload service MUST check that the `/blob/add` task's subject is the subject of the abort, and fail with `MissingCause` if it is not. Otherwise any space could abort another space's upload by its task link.
 
-A client MUST NOT set `digest` to a digest it computed for an upload that did not specify one: an upload that failed part way through has no agreed digest, and the digest of the data sent so far identifies nothing.
+A missing or unknown `add` task fails with `MissingCause`, as a missing or unknown `cause` does today.
+
+```go
+type AbortArguments struct {
+	// Add links the /blob/add task that started the upload.
+	Add cid.Cid `cborgen:"add" dagjsongen:"add"`
+}
+```
 
 ### Changes to `/blob/reject`
 
-The invocation argument `digest` becomes optional, and an optional `allocation` field is added: the link to the `/blob/allocate` task whose allocation is dropped. Exactly one of `digest` or `allocation` MUST be provided.
+The invocation arguments `space` and `digest` are replaced by a single required field, `allocation`: the link to the `/blob/allocate` task whose allocation is dropped. The allocation records its space, so the storage node does not need to be told it.
 
-When `allocation` is provided, the storage node drops that allocation only. It MUST refuse with `BlobAccepted` only if that allocation was itself accepted. An acceptance of the same computed digest by the same space through a different allocation MUST NOT block the reject, for the same reason the [blob removal] RFC scopes the guard to the invoking space: otherwise one upload's acceptance would strand another upload's allocation until it expires.
+The storage node drops that allocation only. It MUST refuse with `BlobAccepted` only if that allocation was itself accepted. An acceptance of the same computed digest by the same space through a different allocation MUST NOT block the reject, for the same reason the [blob removal] RFC scopes the guard to the invoking space: otherwise one upload's acceptance would strand another upload's allocation until it expires. For the same reason, if a later `/blob/allocate` of the same digest by the same space has replaced the allocation, the reject MUST leave the later allocation in place.
 
-The `cause` of the abort is still not forwarded. The `/blob/allocate` task link is forwarded instead because, unlike `cause`, it identifies something the storage node holds.
+Rejecting an unknown or already-rejected allocation MUST succeed.
+
+```go
+type RejectArguments struct {
+	// Allocation links the /blob/allocate task whose allocation is dropped.
+	Allocation cid.Cid `cborgen:"allocation" dagjsongen:"allocation"`
+}
+```
+
+The `/blob/add` task link is still not forwarded. The `/blob/allocate` task link is forwarded instead because it identifies something the storage node holds.
 
 ### Accepted blobs are unaffected
 
@@ -367,8 +383,7 @@ The client abandons the upload from the end-to-end example above before sending 
   "sub": "did:key:zAliceSpace",
   "cmd": "/blob/abort",
   "args": {
-    // no digest: the /blob/add task did not specify one
-    "cause": { "/": "bafy..add" }
+    "add": { "/": "bafy..add" }
   },
   "prf": [{ "/": "bafy..dlgAliceSpace" }],
   "nonce": { "/": { "bytes": "YWJvcnQ" } },
@@ -385,8 +400,6 @@ The upload service finds the `/blob/allocate` task and the storage node from the
   "sub": "did:key:zStorageNode",
   "cmd": "/blob/reject",
   "args": {
-    "space": "did:key:zAliceSpace",
-    // identifies the allocation in place of a digest
     "allocation": { "/": "bafy..alloc" }
   },
   "prf": [{ "/": "bafy..dlgStorageNode" }],
