@@ -24,13 +24,13 @@ Exactly one of `blob.digest` or `blob.digestCode` MUST be provided. A multihash 
 
 When `blob.digestCode` is provided, the invocation MUST contain a unique _nonce_: two or more blobs of the same size may be added with the same digest code, and the `/http/put` principal is derived from the task link (see [Changes to `/http/put`](#changes-to-httpput)), so the task link must be unique to the upload. An invocation that provides `blob.digestCode` without a nonce MUST fail with the error name `MissingNonce`.
 
-The invocation MUST fail with the error name `UnsupportedDigestCode` if the executor does not support adding a blob by digest code, or does not support the specified digest code, so that the client can fall back to computing the digest before adding the blob. Implementations MUST support SHA2-256.
+The invocation MUST fail with the error name `UnsupportedDigestCode` if the executor does not support adding a blob by digest code, or does not support the specified digest code, so that the client can fall back to computing the digest before adding the blob. Implementations MUST support SHA2-256 (`0x12`).
 
 ### Changes to `/blob/allocate`
 
 As above, the invocation argument `blob.digest` becomes optional, and an optional `blob.digestCode` field is added. Exactly one of `blob.digest` or `blob.digestCode` MUST be provided and MUST be set to the value from the `/blob/add` invocation arguments.
 
-The invocation MUST fail with the error name `UnsupportedDigestCode` if the storage node does not support the specified digest code. Implementations MUST support SHA2-256. The upload service SHOULD allocate on a storage node that supports the digest code, and SHOULD try another candidate rather than fail the `/blob/add` when one does not.
+The invocation MUST fail with the error name `UnsupportedDigestCode` if the storage node does not support the specified digest code. Implementations MUST support SHA2-256 (`0x12`). The upload service SHOULD allocate on a storage node that supports the digest code, and SHOULD try another candidate rather than fail the `/blob/add` when one does not.
 
 Since the blob digest is unknown, a successful receipt MUST always contain a size field that is equal to the size of the blob and MUST always contain an address field. The storage node cannot recognise content it already holds, so the data is always transferred, even when the storage node already has it.
 
@@ -60,7 +60,7 @@ A `/blob/accept` invocation MUST fail with the error name `BlobDigestMismatch` i
 
 The client in this example is an S3 gateway (`did:web:s3.example.com`) proxying an S3 `PUT`: it adds a 2MiB blob to Alice's space without knowing its digest. The gateway knows the size in advance: it follows from the object's `Content-Length` and the encryption overhead. Both the client and the storage node hash the bytes as they stream, and `/blob/accept` succeeds only if the two digests match.
 
-Examples follow the conventions of the [blob protocol] specification: they show invocation payloads with the signed envelope elided, `// "/": "bafy.."` comments denote task links, and receipts show only their salient fields. Values are [DAG-JSON]: bytes are unpadded standard base64 with no multibase prefix, and links and bytes are elided with `...`. The digest code `18` is the multicodec code for SHA2-256 (`0x12`).
+Examples follow the conventions of the [blob protocol] specification: they show invocation payloads with the signed envelope elided, `// "/": "bafy.."` comments denote task links, and receipts show only their salient fields. Values are [DAG-JSON]: bytes are unpadded standard base64 with no multibase prefix, and links and bytes are elided with `...`. The digest code `18` (`0x12`) is the multicodec code for SHA2-256.
 
 ### 1. Client invokes `/blob/add`
 
