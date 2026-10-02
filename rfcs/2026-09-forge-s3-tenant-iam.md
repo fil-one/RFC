@@ -107,7 +107,7 @@ A principal is represented as:
 
 Creating a principal stores only the principal row. A principal has no DID, vault entry, or delegation and appears in no UCAN. Policy authority reaches the storage system through the principal's keys: each key holds tenant delegations over the buckets its principal may access, and on each request Hilt evaluates the bucket policy for that principal and re-delegates from the key to Ingot. As with a service key, the proof chain runs from the bucket to the tenant to the key to Ingot.
 
-Ingot caches a principal-bound key exactly as it caches a service key: proof chains, the effective actions on the addressed bucket, the derived signing key, and the tenant, all until the next UTC midnight (see [Ingot](#ingot---s3-api)). Ingot consults Hilt on a cache miss and after a revocation. Requests from a warm key proceed from Ingot to Sprue and Piri without a Hilt round trip. Designs that give a principal key material or clear Ingot's cache without a stored grant are covered in [alternatives considered](#alternatives-considered).
+Ingot caches a principal-bound key exactly as it caches a service key: proof chains, the effective actions on the addressed bucket, the derived signing key, and the tenant, all until the next UTC midnight (see [Ingot](#ingot---s3-api)). Ingot consults Hilt on a cache miss and after a revocation. Requests from a warm key proceed from Ingot to Sprue and Piri without a Hilt round trip. [Alternative designs were considered](#alternatives-considered).
 
 The principal's effective actions are read through `GET /principals/{principalId}/access`:
 
