@@ -19,7 +19,7 @@ Blob addressing on the Forge network stays SHA-256. This RFC adds an object-leve
 - Every object has a whole-object BLAKE3 digest, computed in the same streaming pass that writes its blobs.
 - A multipart object's digest is assembled at `Complete` from values recorded per part. Re-reading part data is a fallback for unusual clients, never the common path.
 - A client can verify a whole-object read with the digest alone and a standard BLAKE3 implementation.
-- A client can verify a ranged read by fetching the object's leaf list once: a few hundred bytes for a small object, growing with the square root of the size.
+- A client can verify a ranged read with an off-the-shelf Bao library by fetching the object's outboard once: under a KiB for a small object, growing with the square root of the size.
 - The S3 data path is unchanged. Bodies are raw bytes, ETags and S3 checksums behave as they do today, and a client that ignores the extension sees nothing new.
 - Manifest growth stays small for ordinary objects and under 1 MiB for the largest. The leaf list grows with the square root of the object size and is capped.
 
@@ -31,7 +31,7 @@ The tree shape is fixed by the input length. For an input of more than one chunk
 
 Two further consequences follow. A contiguous byte range that starts on a chunk boundary decomposes into a short sequence of such aligned blocks, at most two per tree level, and its CVs can be computed knowing only the bytes and the starting offset. And the hash of the whole input can be computed from the CVs of any set of aligned blocks that partition it, with one parent compression per merge and the root flag applied at the last.
 
-This is the structure that [Bao] and iroh's [bao-tree] use for verified streaming. Their "outboard" is the list of parent nodes, which lets a reader holding only the root verify any range. This RFC stores a reduced form of that outboard and leaves the Bao wire format for a possible later mode.
+This is the structure that [Bao] and iroh's [bao-tree] use for verified streaming. Their "outboard" is the list of parent nodes, which lets a reader holding only the root verify any range. This RFC stores the bottom of that outboard at a coarse block size, serves the outboard itself to clients, and leaves the Bao streaming encoding for a possible later mode.
 
 ## Design
 
@@ -145,23 +145,20 @@ x-amz-object-attributes: ETag,Blake3
   <Blake3>
     <CID>bafkr4i...</CID>
     <Group>22</Group>
-    <Leaves>
-      <Leaf>base64 of 32 bytes</Leaf>
-      ...
-    </Leaves>
+    <Outboard>base64</Outboard>
   </Blake3>
 </GetObjectAttributesOutput>
 ```
 
-`CID` is the object digest as returned in `x-cid`, `Group` is the group exponent and each `Leaf` is a leaf CV in order, encoded in base64 like the checksums in `ObjectParts`. The element is a few hundred bytes for a small object, about 12 KiB at 1 GiB and up to 1.6 MiB at the leaf cap. A tree belongs to one version. An overwrite can never pair an old tree with new bytes, because both live in the same manifest, and the response carries the ETag of the version the tree describes for the client's `If-Match`.
+`CID` is the object digest as returned in `x-cid` and `Group` is the group exponent, which is the Bao block size: a Bao library's chunk log is `Group` minus 10. `Outboard` is the standard pre-order Bao outboard at that block size, base64-encoded: the object size as 8 little-endian bytes, then the chaining-value pair of every parent node above the leaves, root first and left subtree before right. It is built from the stored leaves on request, one compression per parent, and is byte-identical to what the Bao libraries produce for the same object and block size. It is about 64 bytes per leaf: under 100 bytes for a small object, 16 KiB at 1 GiB, 1.4 MiB at the leaf cap, plus a third for base64. A tree belongs to one version. An overwrite can never pair an old tree with new bytes, because both live in the same manifest, and the response carries the ETag of the version the tree describes for the client's `If-Match`.
 
 AWS rejects an attribute name it does not know with `InvalidArgument`, so accepting `Blake3` is a visible divergence. SDKs whose typed response omits unknown elements cannot read the tree, but the same SDKs could not call a custom endpoint either, and a raw HTTP client parses this XML with what it already has for every other S3 response.
 
 #### Client procedure
 
-1. Fetch the tree once with `GetObjectAttributes`. Compute the parents from the leaf CVs up to the root and compare with the CID. This is at most 255 compressions. When the tree holds a single leaf the object is at most one group long, and the client verifies by hashing the whole object instead.
-2. Read ranges with ordinary S3 `Range` requests aligned to group boundaries, sending `If-Match` with the ETag so the bytes cannot change between the tree fetch and the reads.
-3. Hash each group received as a non-root BLAKE3 subtree at its chunk offset and compare with its leaf CV.
+1. Fetch the attribute once with `GetObjectAttributes`, and load the CID's digest, the block size and the outboard into a Bao library (bao-tree in Rust, the Go BLAKE3 library's `bao` package). The library checks the outboard against the root as it goes; no merge code of our own is needed, and no BLAKE3 API beyond what a Bao library already wraps.
+2. Read ranges with ordinary S3 `Range` requests aligned to block boundaries, sending `If-Match` with the ETag so the bytes cannot change between the attribute fetch and the reads. A Bao library can name the byte ranges needed for the blocks a client wants.
+3. Verify each block received against the outboard. An object of one block has an empty outboard, and the client verifies by hashing the whole object against the CID.
 
 Every byte of data travels as a plain S3 body. SDKs, caches and CDNs behave as they do today.
 
@@ -209,7 +206,7 @@ bao-tree's default gives 16 KiB verification granularity at any size, with the o
 
 ### Returning the Bao encoded stream
 
-iroh serves data interleaved with the parent nodes so a client verifies as bytes arrive. S3 SDKs cannot consume such a body, so it would be a separate mode rather than the S3 `GET`. At the groups this RFC uses a client must buffer a whole group before verifying anything, so interleaving saves only the one tree request. The server can expand the stored leaf CVs into a pair-form outboard on the fly, so the encoded stream can be added later as its own subresource without changing what is stored.
+iroh serves data interleaved with the parent nodes so a client verifies as bytes arrive. S3 SDKs cannot consume such a body, so it would be a separate mode rather than the S3 `GET`. At the groups this RFC uses a client must buffer a whole group before verifying anything, so interleaving saves only the one tree request. The outboard served by `GetObjectAttributes` is already the Bao form, so the encoded stream can be added later as its own subresource without changing what is stored.
 
 ### Carrying the digest in an S3 checksum header
 
@@ -219,9 +216,13 @@ The `x-amz-checksum-*` headers have a fixed set of algorithms and SDKs validate 
 
 A `?blake3` subresource returning a CBOR document would keep `GetObjectAttributes` identical to AWS. It costs a new endpoint, a second place that must honour `versionId`, and a body format no S3 client parses today. No SDK can call it, so it has no advantage over an attribute for SDK users, and a raw HTTP client is better served by the XML it already handles.
 
+### Returning the leaf list instead of the outboard
+
+The stored leaves are half the size of the outboard, and a client could merge them to the root itself. But checking a block against its leaf means hashing the block as a non-root subtree at its chunk offset, which standard BLAKE3 APIs do not expose, so every client would carry custom tree code. Serving the Bao outboard costs twice the bytes and lets any Bao library do the verification.
+
 ### Sending the leaf CVs in a header
 
-Base64 of a 1 GiB object's 8 KiB leaf list is about 11 KiB, over the 8 KiB per-header default of common proxies, larger objects have far more, and splitting it across numbered headers is a hack. The root fits in a header; the tree does not.
+Base64 of a 1 GiB object's 16 KiB outboard is about 22 KiB, over the 8 KiB per-header default of common proxies, larger objects have far more, and splitting it across numbered headers is a hack. The root fits in a header; the tree does not.
 
 ## Open questions
 
