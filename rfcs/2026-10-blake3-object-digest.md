@@ -19,9 +19,9 @@ Blob addressing on the Forge network stays SHA-256. This RFC adds an object-leve
 - Every object has a whole-object BLAKE3 digest, computed in the same streaming pass that writes its blobs.
 - A multipart object's digest is assembled at `Complete` from values recorded per part. Re-reading part data is a fallback for unusual clients, never the common path.
 - A client can verify a whole-object read with the digest alone and a standard BLAKE3 implementation.
-- A client can verify a ranged read by fetching at most a few KiB of tree data once per object.
+- A client can verify a ranged read by fetching the object's leaf list once: a few hundred bytes for a small object, growing with the square root of the size.
 - The S3 data path is unchanged. Bodies are raw bytes, ETags and S3 checksums behave as they do today, and a client that ignores the extension sees nothing new.
-- Manifest growth is bounded at a few KiB regardless of object size.
+- Manifest growth stays small for ordinary objects and under 1 MiB for the largest. The leaf list grows with the square root of the object size and is capped.
 
 ## Background: the BLAKE3 tree
 
@@ -63,7 +63,7 @@ Each part record gains:
 
 - `TreeOffset`: the byte offset the part was hashed at.
 - `TreeNodes`: the CVs of the part's aligned subtrees, in order. A part of any length starting on a chunk boundary decomposes into at most two aligned power-of-two blocks per tree level, so this list holds a few dozen 32-byte entries at most.
-- `TreeLeaves`: the part's leaf CVs at the part's own group (see [Range verification](#range-verification)), at most 256 entries.
+- `TreeLeaves`: the part's leaf CVs at the part's own group (see [Range verification](#range-verification)), a few hundred entries at most for a 5 GiB part.
 - For part 1 only, `TreeRoot`: the BLAKE3 hash of the part on its own. Part 1 is always at offset 0, so its standalone hash falls out of the same pass with a root-flagged final compression.
 
 A part that supersedes an earlier upload of the same part number replaces its record, as today.
@@ -93,26 +93,29 @@ The leaf CVs for the object are built from the parts' `TreeLeaves` and `TreeNode
 
 A client that reads ranges needs more than the root. It needs the CVs of the tree nodes covering the bytes it read, and enough of the rest of the tree to connect them to the root. The full Bao outboard provides this at 1 KiB granularity and costs about 6% of the object size. Storing it is out of the question in a manifest, and even at bao-tree's 16 KiB default it costs 4 MiB per GiB.
 
-This RFC bounds the cost by fixing the number of leaves rather than the leaf size.
+This RFC scales the leaf size with the object. The group is the geometric mean of the object size and 16 KiB, so the number of leaves grows with the square root of the size. A small object keeps a leaf list of a few hundred bytes, and the smallest verifiable read on a large object stays a small fraction of it.
 
 #### The group
 
-The **group** is the leaf size of the stored tree: a power of two, at least 16 KiB, and the smallest such value that gives the object at most 256 leaves. The manifest records the group as a base-2 exponent. The group affects only what is stored and what granularity a client can verify at. The object digest is the same whatever group is chosen.
+The **group** is the leaf size of the stored tree: a power of two, at least 16 KiB, and the smallest such value that is at least the square root of the object size times 16 KiB. The group doubles each time the object quadruples. A hard cap of 32,768 leaves, 1 MiB of CVs, applies beyond about 32 TB, where the group grows with the size instead. The manifest records the group as a base-2 exponent. The group affects only what is stored and what granularity a client can verify at. The object digest is the same whatever group is chosen.
 
 | Object size | Group | Leaves | Manifest bytes |
 |---|---|---|---|
 | 1 KiB | 16 KiB | 1 | 32 B |
-| 1 MiB | 16 KiB | 64 | 2 KiB |
-| 4 MiB | 16 KiB | 256 | 8 KiB |
-| 5 MiB | 32 KiB | 160 | 5 KiB |
-| 100 MiB | 512 KiB | 200 | 6.25 KiB |
+| 64 KiB | 32 KiB | 2 | 64 B |
+| 1 MiB | 128 KiB | 8 | 256 B |
+| 4 MiB | 256 KiB | 16 | 512 B |
+| 100 MiB | 2 MiB | 50 | 1.6 KiB |
 | 1 GiB | 4 MiB | 256 | 8 KiB |
-| 50 GiB | 256 MiB | 200 | 6.25 KiB |
-| 5 TiB | 32 GiB | 160 | 5 KiB |
+| 10 GiB | 16 MiB | 640 | 20 KiB |
+| 100 GiB | 64 MiB | 1,600 | 50 KiB |
+| 1 TiB | 128 MiB | 8,192 | 256 KiB |
+| 5 TiB | 512 MiB | 10,240 | 320 KiB |
+| 50 TB | 2 GiB | 23,283 | 728 KiB |
 
-Below 4 MiB the cost is 1/512 of the object size. Above 4 MiB it stays between 4 KiB and 8 KiB: each time the size crosses a power of two the group doubles and the leaf count halves.
+An object of 16 KiB or less is one leaf. From there the manifest cost grows with the square root of the size: a quarter of a KiB at 1 MiB, 8 KiB at 1 GiB, 256 KiB at 1 TiB. The cap applies past about 32 TB and holds a 50 TB object to 728 KiB.
 
-The smallest range a client can verify independently is one group. A 1 GiB object verifies in 4 MiB pieces. A multi-TiB object verifies in pieces of tens of GiB, which is coarse, and an object of that size with a need for fine-grained verification would want the outboard-as-blob design under [Alternatives](#alternatives-considered). The cap of 256 is a tuning constant: halving it halves the manifest cost and doubles the smallest verifiable read.
+The smallest range a client can verify independently is one group: 256 KiB on a 4 MiB object, 4 MiB on a 1 GiB object, 128 MiB on a 1 TiB object, 2 GiB on a 50 TB object. Two constants tune the rule. The 16 KiB floor sets where the scaling starts, and the cap bounds the manifest. An object needing finer verification than its group would want the outboard-as-blob design under [Alternatives](#alternatives-considered).
 
 #### Leaf CVs
 
@@ -150,7 +153,7 @@ x-amz-object-attributes: ETag,Blake3
 </GetObjectAttributesOutput>
 ```
 
-`CID` is the object digest as returned in `x-cid`, `Group` is the group exponent and each `Leaf` is a leaf CV in order, encoded in base64 like the checksums in `ObjectParts`. At the 256-leaf cap the element is 15 to 20 KiB. A tree belongs to one version. An overwrite can never pair an old tree with new bytes, because both live in the same manifest, and the response carries the ETag of the version the tree describes for the client's `If-Match`.
+`CID` is the object digest as returned in `x-cid`, `Group` is the group exponent and each `Leaf` is a leaf CV in order, encoded in base64 like the checksums in `ObjectParts`. The element is a few hundred bytes for a small object, about 12 KiB at 1 GiB and up to 1.6 MiB at the leaf cap. A tree belongs to one version. An overwrite can never pair an old tree with new bytes, because both live in the same manifest, and the response carries the ETag of the version the tree describes for the client's `If-Match`.
 
 AWS rejects an attribute name it does not know with `InvalidArgument`, so accepting `Blake3` is a visible divergence. SDKs whose typed response omits unknown elements cannot read the tree, but the same SDKs could not call a custom endpoint either, and a raw HTTP client parses this XML with what it already has for every other S3 response.
 
@@ -175,7 +178,7 @@ type Body struct {
 	// TreeGroup is the base-2 exponent of the leaf size of TreeLeaves (one byte).
 	TreeGroup uint8 `cborgen:"tg"`
 	// TreeLeaves holds the chaining values of the group-aligned blocks of the
-	// body, 32 bytes each, in order (at most 8 KiB).
+	// body, 32 bytes each, in order (8 KiB at 1 GiB, at most 1 MiB).
 	TreeLeaves []byte `cborgen:"tl"`
 }
 ```
@@ -188,7 +191,7 @@ Ingest adds one BLAKE3 pass per body or part, alongside the SHA-256 and MD5 pass
 
 `CompleteMultipartUpload` adds a few hundred compressions in the common path. The re-hash path reads the affected parts back through the plaintext opener, which decrypts in an encrypting deployment, and is bounded by the size of the mis-guessed parts.
 
-The manifest grows by at most 8 KiB plus the 34-byte multihash and a few bytes of framing. The part record grows by at most about 10 KiB for the life of the upload.
+The manifest grows by the leaf list, 8 KiB at 1 GiB and at most 1 MiB, plus the 34-byte multihash and a few bytes of framing. The part record grows by at most about 15 KiB for the life of the upload.
 
 ## Alternatives considered
 
@@ -218,12 +221,12 @@ A `?blake3` subresource returning a CBOR document would keep `GetObjectAttribute
 
 ### Sending the leaf CVs in a header
 
-Base64 of 8 KiB is about 11 KiB, over the 8 KiB per-header default of common proxies, and splitting it across numbered headers is a hack. The root fits in a header; the tree does not.
+Base64 of a 1 GiB object's 8 KiB leaf list is about 11 KiB, over the 8 KiB per-header default of common proxies, larger objects have far more, and splitting it across numbered headers is a hack. The root fits in a header; the tree does not.
 
 ## Open questions
 
 - Names: `x-cid` and the `Blake3` attribute are placeholders.
-- The leaf cap of 256. A lower cap is cheaper and coarser.
+- The scaling constants: the 16 KiB floor and the 32,768-leaf cap. The exponent is a knob too; cube-root scaling would give a 50 TB object 1,456 leaves at a 32 GiB group.
 - Whether a `GET` with `?partNumber` should also return the leaf CVs covering that part, so a client that already reads by part need not align to groups.
 - Whether the object CID should reach the Forge network, for example in the upload index, or remain an Ingot-level value until blob addressing is revisited.
 - Whether to expose the digest on `ListObjects` responses.
