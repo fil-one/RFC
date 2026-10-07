@@ -220,6 +220,18 @@ The manifest grows by the block list, 8 KiB at 1 GiB and at most 1 MiB, plus the
 
 Keeping the existing SHA-256 and computing it for multipart objects means re-reading every part at `Complete`. For a 5 GiB object that is a 5 GiB read, decrypting where encryption is on, inside a request a client expects to return promptly. It also offers no range verification. BLAKE3 removes the re-read and adds range verification with the same stored bytes.
 
+### A root SHA-256 over per-part SHA-256 hashes
+
+S3 already defines this for uploads made with `--checksum-algorithm SHA256`: a SHA-256 per part and a composite over the list, which `GetObjectAttributes` returns. The alternative is to compute that for every multipart upload, server side, whatever the client asked for, and treat the composite as the object's digest. It needs no new primitive, and for a client that already understands S3 composite checksums it is familiar. It falls short of this RFC in several ways.
+
+- **The root is not a hash of the bytes.** A composite depends on where the part boundaries fell, so the same bytes uploaded with 8 MiB parts, with 16 MiB parts, or as a single `PUT` get three different roots. It identifies an upload, not an object: two copies of the same data cannot be recognised as equal, nothing can be addressed by it, and a single-`PUT` object has a plain SHA-256 while a multipart object has a hash of hashes, so a client needs two code paths and two meanings for "the digest".
+- **Verifying a download takes a list, not a value.** The verifier must fetch the per-part hash list and the part sizes, up to 10,000 of each, keep them for the whole download, and apply the right one to the right byte range. The BLAKE3 digest is one 32-byte value that a standard library verifies against a stream. Walking a 10,000-entry list is custom code in every client, and the list itself is hundreds of KiB of XML on every fetch, with no compact form.
+- **The granularity is the uploader's, and often too coarse.** Verification happens per part, so a client cannot check anything until it has a whole part, 5 GiB on large uploads, and a single-`PUT` object cannot be range-verified at all. The Bao tree verifies 16 KiB on small objects, and a server-chosen block on large ones, with proofs that are logarithmic in the object rather than linear in the part count.
+- **No standard verifies it.** There is no library that takes a composite SHA-256 and a part list and verifies a stream or a range, so every consumer writes its own; the Bao outboard is loadable by existing libraries in Rust and Go.
+- **It costs about the same.** A SHA-256 pass per part is no cheaper than the BLAKE3 pass, which is faster per byte, and the composite still has to be assembled at `Complete` from recorded values, as the tree is.
+
+What it does offer over the current state is universality within multipart uploads: every multipart object would have a verifiable per-part list rather than only those uploaded with SHA checksums. BLAKE3 gives that and the rest.
+
 ### Re-addressing blobs to BLAKE3
 
 Making BLAKE3 the network's content address would let storage nodes serve verified ranges directly. It touches every component that handles a multihash, the proof-tree assumptions of PDP, public gateway resolvability, and every stored byte. This RFC is independent of that decision. The object digest proposed here is the same value such a migration would use, so nothing here is thrown away if it happens.
