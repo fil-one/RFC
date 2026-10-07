@@ -202,13 +202,15 @@ type Body struct {
 }
 ```
 
-Objects written before this change have none of these fields, and neither does a multipart object whose completion exceeded the re-hash budget. A read of such an object returns no `x-cid` header and `GetObjectAttributes` omits the `Blake3` element. A client can tell an object without a digest from a server without the feature by asking for the `Blake3` attribute by name: a server without the feature rejects the name with `InvalidArgument`, as AWS does, while a server with it returns the response without the element.
+Some objects have no digest: those written before this change, and a multipart object whose completion exceeded the re-hash budget. For them, GET and HEAD return no `x-cid` header and `GetObjectAttributes` returns its response without the `Blake3` element.
+
+That makes two situations look alike from a GET or HEAD: an object without a digest, and a server that does not implement this RFC. `GetObjectAttributes` tells them apart. The request names the attributes it wants in `x-amz-object-attributes`, and a server validates the names: one that implements this RFC accepts `Blake3` and answers, with or without the element depending on the object, while one that does not, AWS included, rejects the request with `InvalidArgument`. So a client that wants to know whether verification is available at all asks for `Blake3` once; an error means the server cannot provide it for any object, and a success without the element means it cannot provide it for this one.
 
 ### Cost
 
 Ingest adds one BLAKE3 pass per body or part, alongside the MD5 pass already there. BLAKE3 with vector instructions is faster than SHA-256, so it costs less than the whole-body SHA-256 pass it makes redundant.
 
-`CompleteMultipartUpload` adds one compression per recorded subtree for the digest and one per block for the consistency check, a few tens of thousands at most for the largest uploads, which is milliseconds. The re-hash path reads the affected parts back through the plaintext opener, which decrypts in an encrypting deployment, and is bounded by the budget, one maximum part by default. The price of the bound is that a variable-size parallel upload beyond it gets no digest.
+`CompleteMultipartUpload` adds one compression per recorded subtree for the digest and one per block for the consistency check, a few tens of thousands at most for the largest uploads, which is milliseconds. The re-hash path reads the affected parts back through the plaintext opener, which decrypts in an encrypting deployment. The parts are read from the local spool: a part's blobs stay there until the object is deleted, since nothing evicts spool copies today, so no re-hash fetches from a storage node. The work is bounded by the final part plus the budget, about 10 GiB of local reading at most with the default, which is seconds to tens of seconds. The price of the bound is that a variable-size parallel upload beyond it gets no digest.
 
 The manifest grows by the block list, 8 KiB at 1 GiB and at most 1 MiB, plus the 34-byte multihash and a few bytes of framing. The part record grows by at most about 15 KiB for the life of the upload.
 
