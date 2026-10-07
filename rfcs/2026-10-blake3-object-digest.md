@@ -67,7 +67,7 @@ Each part record gains:
 
 - `TreeOffset`: the byte offset the part was hashed at.
 - `TreeNodes`: the CVs of the part's aligned subtrees, in order, covering the whole chunks between the part's first and last chunk boundaries. A span of whole chunks decomposes into at most two aligned power-of-two blocks per tree level, so this list holds a few dozen 32-byte entries at most.
-- `TreeBlocks`: the part's block CVs at the part's own block size (see [Range verification](#range-verification)), a few hundred entries at most for a 5 GiB part.
+- `TreeBlocks`: the part's block CVs at the part's own block size (see [Range verification](#range-verification)), at most 10,240 entries (320 KiB) for a 5 GiB part.
 - `TreeHead` and `TreeTail`: the part's bytes before its first chunk boundary and after its last one, under 1 KiB each. They are empty for a part whose offset and length are 1 KiB multiples. Every mainstream client sizes its parts in MiB, so both spans are empty for nearly every part ever uploaded. The one known exception is the AWS SDKs for Go and Java above the 10,000-part limit, objects over about 48 GiB, where they size parts as the object size divided by 10,000, an arbitrary byte count; those uploads are a small minority, and these two spans are what let them complete without re-reading anything.
 - For part 1 only, `TreeRoot`: the BLAKE3 hash of the part on its own. Part 1 is always at offset 0, so its standalone hash falls out of the same pass with a root-flagged final compression.
 
@@ -106,36 +106,38 @@ Two terms, since BLAKE3 and Bao both have "leaves" and they are not the same thi
 
 A client that reads ranges needs more than the root. It needs the CVs of the tree nodes covering the bytes it read, and enough of the rest of the tree to connect them to the root. The full Bao outboard provides this at 1 KiB granularity and costs about 6% of the object size. Storing it is out of the question in a manifest, and even at bao-tree's 16 KiB default it costs 4 MiB per GiB.
 
-This RFC scales the block size with the object. The block is the geometric mean of the object size and 16 KiB, so the number of blocks grows with the square root of the size. A small object keeps a block list of a few hundred bytes, and the smallest verifiable read on a large object stays a small fraction of it.
+This RFC scales the block size with the object. Objects up to 8 MiB are recorded at 16 KiB blocks, bao-tree's own granularity, and above that the block grows with the square root of the size. The block list of a small object is a few KiB, and the smallest verifiable read on a large object stays a small fraction of it.
 
 #### The block
 
-The **block** is the unit of the stored tree. Its target is the geometric mean of the object size and 16 KiB, the square root of their product:
+The **block** is the unit of the stored tree. Its target is the square root of the object size times 32 bytes, the size of one CV:
 
 ```
-target = sqrt(size × 16 KiB)
+target = sqrt(size × 32 B)
 block  = the smallest power of two ≥ target, and at least 16 KiB
 ```
 
-For a 1 MiB object the target is sqrt(1 MiB × 16 KiB) = sqrt(2^34) = 128 KiB, so the block is 128 KiB and there are 8 blocks; for a 1 GiB object it is sqrt(2^44) = 4 MiB, 256 blocks. The block doubles each time the object quadruples. A hard cap of 32,768 blocks, 1 MiB of CVs, applies beyond about 32 TB, where the block grows with the size instead. The cap is a metadata-cost choice: the manifest is a catalog block rewritten on every version, so its size is storage the tenant pays for on each write, and 1 MiB leaves headroom under the 2 MiB byte-field limit of the catalog's CBOR encoding. A larger cap, up to that limit, buys finer verification on multi-TB objects at that cost. The manifest records the block size as a **chunk log**: a base-2 exponent of 1 KiB BLAKE3 chunks, the unit Bao libraries take as the block size, so 16 KiB is 4 and 4 MiB is 12. The block affects only what is stored and what granularity a client can verify at. The object digest is the same whatever block is chosen.
+The target reaches the 16 KiB floor at 8 MiB, so every object up to 8 MiB has 16 KiB blocks, 512 of them at 8 MiB. Above that the block doubles each time the object quadruples: for a 1 GiB object the target is sqrt(2^30 × 2^5) = sqrt(2^35), so the block is 256 KiB and there are 4,096 blocks. A hard cap of 32,768 blocks, 1 MiB of CVs, binds from 32 GiB, where the block grows with the size instead. The cap is a metadata-cost choice: the manifest is a catalog block rewritten on every version, so its size is storage the tenant pays for on each write, and 1 MiB leaves headroom under the 2 MiB byte-field limit of the catalog's CBOR encoding. A larger cap, up to that limit, buys finer verification on objects over 32 GiB at that cost. The manifest records the block size as a **chunk log**: a base-2 exponent of 1 KiB BLAKE3 chunks, the unit Bao libraries take as the block size, so 16 KiB is 4 and 1 MiB is 10. The block affects only what is stored and what granularity a client can verify at. The object digest is the same whatever block is chosen.
 
 | Object size | Block | Chunk log | Blocks | Manifest bytes |
 |---|---|---|---|---|
 | 1 KiB | 16 KiB | 4 | 1 | 32 B |
-| 64 KiB | 32 KiB | 5 | 2 | 64 B |
-| 1 MiB | 128 KiB | 7 | 8 | 256 B |
-| 4 MiB | 256 KiB | 8 | 16 | 512 B |
-| 100 MiB | 2 MiB | 11 | 50 | 1.6 KiB |
-| 1 GiB | 4 MiB | 12 | 256 | 8 KiB |
-| 10 GiB | 16 MiB | 14 | 640 | 20 KiB |
-| 100 GiB | 64 MiB | 16 | 1,600 | 50 KiB |
-| 1 TiB | 128 MiB | 17 | 8,192 | 256 KiB |
-| 5 TiB | 512 MiB | 19 | 10,240 | 320 KiB |
+| 64 KiB | 16 KiB | 4 | 4 | 128 B |
+| 1 MiB | 16 KiB | 4 | 64 | 2 KiB |
+| 8 MiB | 16 KiB | 4 | 512 | 16 KiB |
+| 16 MiB | 32 KiB | 5 | 512 | 16 KiB |
+| 100 MiB | 64 KiB | 6 | 1,600 | 50 KiB |
+| 1 GiB | 256 KiB | 8 | 4,096 | 128 KiB |
+| 10 GiB | 1 MiB | 10 | 10,240 | 320 KiB |
+| 32 GiB | 1 MiB | 10 | 32,768 | 1 MiB |
+| 100 GiB | 4 MiB | 12 | 25,600 | 800 KiB |
+| 1 TiB | 32 MiB | 15 | 32,768 | 1 MiB |
+| 5 TiB | 256 MiB | 18 | 20,480 | 640 KiB |
 | 50 TB | 2 GiB | 21 | 23,284 | 728 KiB |
 
-Sizes with binary prefixes are powers of two; the 50 TB row is decimal, 50 × 10¹² bytes, just under S3's current maximum object size of 48.8 TiB (10,000 parts of 5 GiB). Blocks is the size divided by the block size, rounded up, since a final partial block still has a CV. An object of 16 KiB or less is one block. From there the manifest cost grows with the square root of the size: a quarter of a KiB at 1 MiB, 8 KiB at 1 GiB, 256 KiB at 1 TiB. The cap applies past about 32 TB and holds a 50 TB object to 728 KiB.
+Sizes with binary prefixes are powers of two; the 50 TB row is decimal, 50 × 10¹² bytes, just under S3's current maximum object size of 48.8 TiB (10,000 parts of 5 GiB). Blocks is the size divided by the block size, rounded up, since a final partial block still has a CV. An object of 16 KiB or less is one block. Up to 8 MiB the manifest cost is 32 bytes per 16 KiB, 0.2% of the object. From there it grows with the square root of the size: 50 KiB at 100 MiB, 128 KiB at 1 GiB, 320 KiB at 10 GiB. The cap binds from 32 GiB and holds every larger object to 1 MiB or less, 728 KiB for a 50 TB object.
 
-The smallest range a client can verify independently is one block: 256 KiB on a 4 MiB object, 4 MiB on a 1 GiB object, 128 MiB on a 1 TiB object, 2 GiB on a 50 TB object. For a large object that is coarser than the per-part checksum list of a multipart upload made with SHA checksums: the block passes an 8 MiB part above 4 GiB, so on a 1 TiB object such a list verifies at 8 MiB where this tree verifies at 128 MiB. The tree's advantage is that it exists for every object, whatever the uploader did. Two constants tune the rule. The 16 KiB floor sets where the scaling starts, and the cap bounds the manifest. An object needing finer verification than its block would want the outboard-as-blob design under [Alternatives](#alternatives-considered).
+The smallest range a client can verify independently is one block: 16 KiB on anything up to 8 MiB, 256 KiB on a 1 GiB object, 32 MiB on a 1 TiB object, 2 GiB on a 50 TB object. For a large object that is coarser than the per-part checksum list of a multipart upload made with SHA checksums: the block passes an 8 MiB part above 256 GiB, so on a 1 TiB object such a list verifies at 8 MiB where this tree verifies at 32 MiB. The tree's advantage is that it exists for every object, whatever the uploader did. Three constants tune the rule. The 16 KiB floor and the 32 B factor set where the scaling starts, and the cap bounds the manifest. An object needing finer verification than its block would want the outboard-as-blob design under [Alternatives](#alternatives-considered).
 
 #### Block CVs
 
@@ -172,7 +174,7 @@ x-amz-object-attributes: ETag,Blake3
 
 - `CID` is the object digest as returned in `x-cid`
 - `ChunkLog` is the block size as a base-2 exponent of 1 KiB BLAKE3 chunks, the value a Bao library takes as its block size unchanged. iroh's fixed block is 4; the original Bao format is 0.
-- `Outboard` is the standard pre-order Bao outboard at that block size, base64-encoded: the object size as 8 little-endian bytes, then the chaining-value pair of every parent node above the blocks, root first and left subtree before right. It is built from the stored block CVs on request, one compression per parent, and is byte-identical to what the Bao libraries produce for the same object and block size. It is an 8-byte prefix plus 64 bytes per parent, one fewer than the blocks: under 100 bytes for a small object, 16 KiB at 1 GiB, 1.4 MiB for a 50 TB object and 2 MiB at the 32,768-block cap, about 2.7 MiB after base64. A tree belongs to one version. An overwrite can never pair an old tree with new bytes, because both live in the same manifest, and the response carries the ETag of the version the tree describes for the client's `If-Match`.
+- `Outboard` is the standard pre-order Bao outboard at that block size, base64-encoded: the object size as 8 little-endian bytes, then the chaining-value pair of every parent node above the blocks, root first and left subtree before right. It is built from the stored block CVs on request, one compression per parent, and is byte-identical to what the Bao libraries produce for the same object and block size. It is an 8-byte prefix plus 64 bytes per parent, one fewer than the blocks: a few hundred bytes for a small object, 32 KiB at 8 MiB, 256 KiB at 1 GiB, and 2 MiB at the 32,768-block cap from 32 GiB, about 2.7 MiB after base64. A tree belongs to one version. An overwrite can never pair an old tree with new bytes, because both live in the same manifest, and the response carries the ETag of the version the tree describes for the client's `If-Match`.
 
 AWS rejects an attribute name it does not know with `InvalidArgument`, so accepting `Blake3` is a visible divergence. SDKs whose typed response omits unknown elements cannot read the tree, but the same SDKs could not call a custom endpoint either, and a raw HTTP client parses this XML with what it already has for every other S3 response.
 
@@ -226,7 +228,7 @@ S3 already defines this for uploads made with `--checksum-algorithm SHA256`: a S
 
 - **The root is not a hash of the bytes.** A composite depends on where the part boundaries fell, so the same bytes uploaded with 8 MiB parts, with 16 MiB parts, or as a single `PUT` get three different roots. It identifies an upload, not an object: two copies of the same data cannot be recognised as equal, nothing can be addressed by it, and a single-`PUT` object has a plain SHA-256 while a multipart object has a hash of hashes, so a client needs two code paths and two meanings for "the digest".
 - **Verifying a download takes a list, not a value.** The verifier must fetch the per-part hash list and the part sizes, up to 10,000 of each, keep them for the whole download, and apply the right one to the right byte range. The BLAKE3 digest is one 32-byte value that a standard library verifies against a stream. Walking a 10,000-entry list is custom code in every client, and the list itself is hundreds of KiB of XML on every fetch, with no compact form.
-- **The granularity is the uploader's, and often too coarse.** Verification happens per part, so a client cannot check anything until it has a whole part, 5 GiB on large uploads, and a single-`PUT` object cannot be range-verified at all. The Bao tree verifies 16 KiB on small objects, and a server-chosen block on large ones, with proofs that are logarithmic in the object rather than linear in the part count.
+- **The granularity is the uploader's, and often too coarse.** Verification happens per part, so a client cannot check anything until it has a whole part, 5 GiB on large uploads, and a single-`PUT` object cannot be range-verified at all. The Bao tree verifies 16 KiB on objects up to 8 MiB, and a server-chosen block on large ones, with proofs that are logarithmic in the object rather than linear in the part count.
 - **No standard verifies it.** There is no library that takes a composite SHA-256 and a part list and verifies a stream or a range, so every consumer writes its own; the Bao outboard is loadable by existing libraries in Rust and Go.
 - **It costs about the same.** A SHA-256 pass per part is no cheaper than the BLAKE3 pass, which is faster per byte, and the composite still has to be assembled at `Complete` from recorded values, as the tree is.
 
@@ -258,7 +260,7 @@ The stored block CVs are half the size of the outboard, and a client could merge
 
 ### Sending the block CVs in a header
 
-Base64 of a 1 GiB object's 16 KiB outboard is about 22 KiB, over the 8 KiB per-header default of common proxies, larger objects have far more, and splitting it across numbered headers is a hack. The root fits in a header; the tree does not.
+Base64 of an 8 MiB object's 32 KiB outboard is about 43 KiB, over the 8 KiB per-header default of common proxies, larger objects have far more, and splitting it across numbered headers is a hack. The root fits in a header; the tree does not.
 
 ## Dependencies
 
@@ -269,7 +271,7 @@ The Go implementation uses `lukechampine.com/blake3` for the hash, its `guts` pa
 - The re-hash budget's default for non-final parts. The final part is exempt, so the budget only governs variable-size parallel uploads; a larger default trades `Complete` latency for digests on more of them.
 
 - Names: `x-cid` and the `Blake3` attribute are placeholders.
-- The scaling constants: the 16 KiB floor and the 32,768-block cap. The exponent is a knob too; cube-root scaling would give a 50 TB object 1,456 blocks at a 32 GiB block.
+- The scaling constants: the 16 KiB floor, the 32 B factor that holds it to 8 MiB, and the 32,768-block cap. The exponent is a knob too; cube-root scaling would hold manifests smaller at the cost of coarser blocks on large objects.
 - Whether a `GET` with `?partNumber` should also return the block CVs covering that part, so a client that already reads by part need not align to blocks.
 - Whether the object CID should reach the Forge network, for example in the upload index, or remain an Ingot-level value until blob addressing is revisited.
 - Whether to expose the digest on `ListObjects` responses.
