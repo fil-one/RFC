@@ -8,7 +8,7 @@ Status: Experimental
 
 ## Motivation
 
-An Ingot object has no digest a client can verify against. A single `PUT` records a whole-object SHA-256 in the manifest, but it is internal and never returned. A multipart object records no whole-object digest at all, because SHA-256 cannot be assembled from the parts and re-reading every part at `CompleteMultipartUpload` is too slow. A client that wants to check what it downloaded has the S3 ETag, which for a multipart object is a hash of part MD5s and verifies nothing about the bytes, and the optional S3 checksums, which for multipart are composite values with the same limitation. Nothing lets a client verify a byte range.
+An Ingot object has no digest a client can verify against. A single `PUT` records a whole-object SHA-256 in the manifest, but it is internal and never returned. A multipart object records no whole-object digest at all, because SHA-256 cannot be assembled from the parts and re-reading every part at `CompleteMultipartUpload` is too slow. A client that wants to check what it downloaded has the S3 ETag, which for a multipart object is a hash of part MD5s and verifies nothing about the bytes, and the optional S3 checksums. Of those, the SHA family are composite values for a multipart object, a checksum of the parts' checksums with the same limitation. The CRC family (CRC32, CRC32C, CRC64NVME) can be a full-object value, which Ingot derives at `CompleteMultipartUpload` by combining the parts' CRCs, but a CRC detects accidental corruption and nothing more: it is not a cryptographic digest, it does not identify the object, and it offers no range verification. Nothing lets a client verify a byte range.
 
 This RFC proposes a whole-object BLAKE3 digest for every object, single `PUT` or multipart, returned to clients as a CID, plus a small tree of chaining values stored in the manifest that lets a client verify ranged reads. BLAKE3 is a Merkle tree, so the digest of a multipart object is assembled from per-part subtrees at `Complete` with no re-read of the data, and the same tree structure gives range verification for free.
 
@@ -55,7 +55,7 @@ The body already streams through a SHA-256 hasher and an MD5 hasher as it is spl
 
 ### Multipart upload
 
-Parts arrive in any order and the server learns a part's true byte offset only once every lower-numbered part exists. Each `UploadPart` therefore hashes its body at a guessed offset and records what `CompleteMultipartUpload` needs to finish the tree. `CompleteMultipartUpload` checks the guesses against the true offsets and re-hashes only the parts whose guess was wrong.
+Parts arrive in any order and the server learns a part's true byte offset only once every lower-numbered part exists. Each `UploadPart` therefore hashes its body at an assumed offset and records what `CompleteMultipartUpload` needs to finish the tree. `CompleteMultipartUpload` checks each assumed offset against the true one and re-hashes only the parts whose assumption was wrong.
 
 #### What `UploadPart` records
 
@@ -68,26 +68,28 @@ Each part record gains:
 
 A part that supersedes an earlier upload of the same part number replaces its record, as today.
 
-#### Guessing the offset
+#### Assuming the offset
 
 - Part 1 is at offset 0.
 - Part _n_ when every part below _n_ is already recorded: the sum of their sizes. This is exact.
 - Part _n_ when some lower part is recorded: assume a uniform part size and use (_n_ − 1) times the size of the lowest-numbered recorded part.
 - Part _n_ when no lower part is recorded: (_n_ − 1) times this part's own size.
 
-Clients upload parts of one size in parallel, with a shorter final part. The rules above guess right for every part of a uniform-size upload except a final part that lands before any of its predecessors, which is re-hashed at `Complete` and is the smallest part of the upload.
+Clients upload parts of one size in parallel, with a shorter final part. The rules above give the true offset for every part of a uniform-size upload except a final part that lands before any of its predecessors, which is re-hashed at `Complete` and is the smallest part of the upload.
 
 A part created by copy is hashed as its bytes are read, like an uploaded part. Where the copy does not read the bytes, the part records no tree and takes the re-hash path.
 
 #### What `CompleteMultipartUpload` does
 
-`CompleteMultipartUpload` already walks the requested parts in order and computes each part's true offset. For each part it checks that the true offset is a multiple of 1 KiB and equals `TreeOffset`. A part that fails either check is re-hashed at its true offset by reading its blobs back, and its record is replaced before the merge proceeds. A part offset that is not a multiple of 1 KiB means some earlier part has a length that is not a multiple of 1 KiB, which places a chunk boundary inside a part. Such parts and every later part are re-hashed. This is rare: clients size parts in MiB.
+`CompleteMultipartUpload` already walks the requested parts in order and computes each part's true offset. A part's record is usable when its true offset equals `TreeOffset`. A part whose assumed offset was wrong is re-hashed at its true offset by reading its blobs back, and the result stands in for its record before the merge proceeds.
 
-With every part's `TreeNodes` at correct offsets, the object digest is computed by merging adjacent aligned subtrees into parents and applying the root flag at the final merge. This is one compression per node, a few hundred at most, and reads no data.
+A part whose length is not a multiple of 1 KiB, other than the last, puts a chunk boundary inside the next part. No record from that part onward can serve: its own tree treated its short final chunk as the object's end, and every later part was hashed at a chunk index its bytes do not start on. Re-hashing those parts one at a time would not help either, since the chunk straddling the boundary has bytes in both. The body from the first such part to its end is therefore re-hashed as one range, from an aligned offset, and that range replaces all of their records. This is rare: clients size parts in MiB.
 
-An upload completed with a single part has no merge. Its digest is part 1's `TreeRoot`.
+With every range at its correct offset, the object digest is computed by merging adjacent aligned subtrees into parents and applying the root flag at the final merge. This is one compression per recorded subtree and reads no data. The work scales with the number of parts: a part contributes at most two subtrees per tree level, so an upload of 10,000 parts merges a few tens of thousands of nodes, each one BLAKE3 compression, which is milliseconds.
 
-The leaf CVs for the object are built from the parts' `TreeLeaves` and `TreeNodes` as described in the next section. The root computed by merging the leaf CVs up must equal the root computed from the parts' subtrees. This is a free consistency check on the assembly.
+An upload completed with a single part has no merge, and its digest is that part's root as a body of its own. For part 1 that is the recorded `TreeRoot`. For any other part the recorded offset is not 0, so the offset check above re-hashes it at offset 0, and that re-hash yields the root directly. S3 requires the completed parts to be in ascending order, not to begin at part 1, so this case is legal and does occur.
+
+The leaf CVs for the object are built from the parts' `TreeLeaves` and `TreeNodes` as described in the next section. The root computed by merging the leaf CVs up must equal the root computed from the parts' subtrees. This is a consistency check on the assembly at the cost of one compression per leaf, 32,767 at the cap; should it ever fail, the whole body is re-hashed, so the result is correct even if a record is bad.
 
 ### Range verification
 
@@ -111,9 +113,9 @@ The **block** is the leaf size of the stored tree: a power of two, at least 16 K
 | 100 GiB | 64 MiB | 16 | 1,600 | 50 KiB |
 | 1 TiB | 128 MiB | 17 | 8,192 | 256 KiB |
 | 5 TiB | 512 MiB | 19 | 10,240 | 320 KiB |
-| 50 TB | 2 GiB | 21 | 23,283 | 728 KiB |
+| 50 TB | 2 GiB | 21 | 23,284 | 728 KiB |
 
-An object of 16 KiB or less is one leaf. From there the manifest cost grows with the square root of the size: a quarter of a KiB at 1 MiB, 8 KiB at 1 GiB, 256 KiB at 1 TiB. The cap applies past about 32 TB and holds a 50 TB object to 728 KiB.
+Sizes with binary prefixes are powers of two; the 50 TB row is decimal, 50 × 10¹² bytes, the largest object this RFC accounts for. Leaves is the size divided by the block, rounded up, since a final partial block still has a CV. An object of 16 KiB or less is one leaf. From there the manifest cost grows with the square root of the size: a quarter of a KiB at 1 MiB, 8 KiB at 1 GiB, 256 KiB at 1 TiB. The cap applies past about 32 TB and holds a 50 TB object to 728 KiB.
 
 The smallest range a client can verify independently is one block: 256 KiB on a 4 MiB object, 4 MiB on a 1 GiB object, 128 MiB on a 1 TiB object, 2 GiB on a 50 TB object. Two constants tune the rule. The 16 KiB floor sets where the scaling starts, and the cap bounds the manifest. An object needing finer verification than its block would want the outboard-as-blob design under [Alternatives](#alternatives-considered).
 
@@ -152,7 +154,7 @@ x-amz-object-attributes: ETag,Blake3
 
 - `CID` is the object digest as returned in `x-cid`
 - `ChunkLog` is the block size as a base-2 exponent of 1 KiB BLAKE3 chunks, the value a Bao library takes as its block size unchanged. iroh's fixed block is 4; the original Bao format is 0.
-- `Outboard` is the standard pre-order Bao outboard at that block size, base64-encoded: the object size as 8 little-endian bytes, then the chaining-value pair of every parent node above the leaves, root first and left subtree before right. It is built from the stored leaves on request, one compression per parent, and is byte-identical to what the Bao libraries produce for the same object and block size. It is about 64 bytes per leaf: under 100 bytes for a small object, 16 KiB at 1 GiB, 1.4 MiB at the leaf cap, plus a third for base64. A tree belongs to one version. An overwrite can never pair an old tree with new bytes, because both live in the same manifest, and the response carries the ETag of the version the tree describes for the client's `If-Match`.
+- `Outboard` is the standard pre-order Bao outboard at that block size, base64-encoded: the object size as 8 little-endian bytes, then the chaining-value pair of every parent node above the leaves, root first and left subtree before right. It is built from the stored leaves on request, one compression per parent, and is byte-identical to what the Bao libraries produce for the same object and block size. It is an 8-byte prefix plus 64 bytes per parent, one fewer than the leaves: under 100 bytes for a small object, 16 KiB at 1 GiB, 1.4 MiB for a 50 TB object and 2 MiB at the 32,768-leaf cap, about 2.7 MiB after base64. A tree belongs to one version. An overwrite can never pair an old tree with new bytes, because both live in the same manifest, and the response carries the ETag of the version the tree describes for the client's `If-Match`.
 
 AWS rejects an attribute name it does not know with `InvalidArgument`, so accepting `Blake3` is a visible divergence. SDKs whose typed response omits unknown elements cannot read the tree, but the same SDKs could not call a custom endpoint either, and a raw HTTP client parses this XML with what it already has for every other S3 response.
 
@@ -186,9 +188,9 @@ Objects written before this change have none of these fields. A read of such an 
 
 ### Cost
 
-Ingest adds one BLAKE3 pass per body or part, alongside the SHA-256 and MD5 passes already there. BLAKE3 with vector instructions is faster than SHA-256, so the added CPU cost is below the two hashes already paid.
+Ingest adds one BLAKE3 pass per body or part, alongside the MD5 pass already there. BLAKE3 with vector instructions is faster than SHA-256, so it costs less than the whole-body SHA-256 pass it makes redundant.
 
-`CompleteMultipartUpload` adds a few hundred compressions in the common path. The re-hash path reads the affected parts back through the plaintext opener, which decrypts in an encrypting deployment, and is bounded by the size of the mis-guessed parts.
+`CompleteMultipartUpload` adds one compression per recorded subtree for the digest and one per leaf for the consistency check, a few tens of thousands at most for the largest uploads, which is milliseconds. The re-hash path reads the affected parts back through the plaintext opener, which decrypts in an encrypting deployment, and is bounded by the size of the parts whose assumed offset was wrong, or of the body from an odd-length part to its end.
 
 The manifest grows by the leaf list, 8 KiB at 1 GiB and at most 1 MiB, plus the 34-byte multihash and a few bytes of framing. The part record grows by at most about 15 KiB for the life of the upload.
 
