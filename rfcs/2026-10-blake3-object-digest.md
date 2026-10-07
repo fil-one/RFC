@@ -8,7 +8,7 @@ Status: Experimental
 
 ## Motivation
 
-What a client can verify about an Ingot object today depends on how the object was uploaded, and for most objects it is nothing. A single `PUT` records a whole-object SHA-256 in the manifest, but it is internal and never returned. A multipart object records no whole-object digest at all, because SHA-256 cannot be assembled from the parts and re-reading every part at `CompleteMultipartUpload` is too slow.
+What a client can verify about an Ingot object today depends on how the object was uploaded, and for most objects it is nothing. A single `PUT` records a whole-object SHA-256 in the manifest, the per-object metadata record Ingot keeps in the bucket's catalog, but it is internal and never returned. A multipart object records no whole-object digest at all, because SHA-256 cannot be assembled from the parts and re-reading every part at `CompleteMultipartUpload` is too slow.
 
 The one verifiable value is the per-part checksum list, and it exists only if the uploader asked for it. A multipart object uploaded with a SHA checksum algorithm, `--checksum-algorithm SHA256` or its SDK equivalent, has a checksum per part and a composite over them, and `GetObjectAttributes` returns the list after the upload completes. That is a two-level tree the client can check part-aligned ranges against, and check against the composite. No client does this by default: the AWS SDKs and CLI now send a checksum unprompted, but it is a CRC, which gives a full-object value with no per-part list; rclone, s5cmd and the MinIO client send none. The list covers nothing else: not a single `PUT`, not an upload made without a SHA algorithm, and no range finer than the uploader's parts, whose size the reader did not choose. The part ETags the object ETag is built from are not returned once the upload completes, and a per-part MD5 is available only when the uploader chose MD5 as the checksum algorithm, an opt-in like SHA-256; the ETag itself, an MD5 or an MD5 of part MD5s, identifies the object loosely and gives a reader no cryptographic assurance. The CRC family (CRC32, CRC32C, CRC64NVME) can be a full-object value, which Ingot derives at `CompleteMultipartUpload` by combining the parts' CRCs, but a CRC detects accidental corruption and nothing more.
 
@@ -117,7 +117,7 @@ target = sqrt(size × 16 KiB)
 block  = the smallest power of two ≥ target, and at least 16 KiB
 ```
 
-For a 1 MiB object the target is sqrt(1 MiB × 16 KiB) = sqrt(2^34) = 128 KiB, so the block is 128 KiB and there are 8 blocks; for a 1 GiB object it is sqrt(2^44) = 4 MiB, 256 blocks. The block doubles each time the object quadruples. A hard cap of 32,768 blocks, 1 MiB of CVs, applies beyond about 32 TB, where the block grows with the size instead. The manifest records the block size as a **chunk log**: a base-2 exponent of 1 KiB BLAKE3 chunks, the unit Bao libraries take as the block size, so 16 KiB is 4 and 4 MiB is 12. The block affects only what is stored and what granularity a client can verify at. The object digest is the same whatever block is chosen.
+For a 1 MiB object the target is sqrt(1 MiB × 16 KiB) = sqrt(2^34) = 128 KiB, so the block is 128 KiB and there are 8 blocks; for a 1 GiB object it is sqrt(2^44) = 4 MiB, 256 blocks. The block doubles each time the object quadruples. A hard cap of 32,768 blocks, 1 MiB of CVs, applies beyond about 32 TB, where the block grows with the size instead. The cap is a metadata-cost choice: the manifest is a catalog block rewritten on every version, so its size is storage the tenant pays for on each write, and 1 MiB leaves headroom under the 2 MiB byte-field limit of the catalog's CBOR encoding. A larger cap, up to that limit, buys finer verification on multi-TB objects at that cost. The manifest records the block size as a **chunk log**: a base-2 exponent of 1 KiB BLAKE3 chunks, the unit Bao libraries take as the block size, so 16 KiB is 4 and 4 MiB is 12. The block affects only what is stored and what granularity a client can verify at. The object digest is the same whatever block is chosen.
 
 | Object size | Block | Chunk log | Blocks | Manifest bytes |
 |---|---|---|---|---|
@@ -178,7 +178,7 @@ AWS rejects an attribute name it does not know with `InvalidArgument`, so accept
 
 #### Client procedure
 
-1. Fetch the attribute once with `GetObjectAttributes`, and load the CID's digest, the block size and the outboard into a Bao library (bao-tree in Rust, the Go BLAKE3 library's `bao` package). The library checks the outboard against the root as it goes; no merge code of our own is needed, and no BLAKE3 API beyond what a Bao library already wraps.
+1. Fetch the attribute once with `GetObjectAttributes`, and load the CID's digest, the block size and the outboard into a Bao library (bao-tree in Rust, the Go BLAKE3 library's `bao` package). A client that uploaded the object itself can skip this step: the digest and the outboard are functions of the bytes alone, so it can compute both as it uploads (`ingot blake3 hash --bao` does exactly this) and never ask the server. The library checks the outboard against the root as it goes; no merge code of our own is needed, and no BLAKE3 API beyond what a Bao library already wraps.
 2. Read ranges with ordinary S3 `Range` requests aligned to block boundaries, sending `If-Match` with the ETag so the bytes cannot change between the attribute fetch and the reads. A Bao library can name the byte ranges needed for the blocks a client wants.
 3. Verify each block received against the outboard. An object of one block has an empty outboard, and the client verifies by hashing the whole object against the CID.
 
@@ -238,7 +238,7 @@ Making BLAKE3 the network's content address would let storage nodes serve verifi
 
 ### A fixed 16 KiB block with the outboard as a blob
 
-bao-tree's default gives 16 KiB verification granularity at any size, with the outboard stored as its own blob referenced from the manifest, about 0.4% of the object. It is the right design if fine-grained verified reads of very large objects are a requirement. It adds a blob per object to write, locate and clean up, and a second request to fetch something that is usually megabytes. The bounded manifest tree serves the common case with no new blob and can coexist with this design later: the stored block CVs are the top of the finer tree.
+bao-tree's default gives 16 KiB verification granularity at any size, with the outboard stored as its own blob referenced from the manifest, about 0.4% of the object. It is the right design if fine-grained verified reads of very large objects are a requirement. It adds a blob per object to write, locate and clean up. The client's extra request is the same either way, but it fetches megabytes instead of KiB. The bounded manifest tree serves the common case with no new blob and can coexist with this design later: the stored block CVs are the top of the finer tree.
 
 ### Returning the Bao encoded stream
 
@@ -259,6 +259,10 @@ The stored block CVs are half the size of the outboard, and a client could merge
 ### Sending the block CVs in a header
 
 Base64 of a 1 GiB object's 16 KiB outboard is about 22 KiB, over the 8 KiB per-header default of common proxies, larger objects have far more, and splitting it across numbered headers is a hack. The root fits in a header; the tree does not.
+
+## Dependencies
+
+The Go implementation uses `lukechampine.com/blake3` for the hash, its `guts` package for the tree primitives the hasher needs (chunk and parent compression at a given chunk index, which the standard BLAKE3 API does not expose), and its `bao` package in tests to check the outboard against an independent encoder. The library has two maintainers and releases infrequently. The exposure is small: the `bao` package is about 300 lines and the primitives a few hundred more, with no further dependencies, so a fork or a vendored copy is the fallback if a fix is ever needed faster than upstream provides it. The other maintained Go implementation, `zeebo/blake3`, exposes no tree internals and could replace only the plain hashing.
 
 ## Open questions
 
