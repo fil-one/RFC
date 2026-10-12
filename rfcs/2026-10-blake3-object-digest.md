@@ -21,7 +21,7 @@ Blob addressing on the Forge network stays SHA-256. This RFC adds an object-leve
 ## Goals
 
 - Every object has a whole-object BLAKE3 digest, computed in the same streaming pass that writes its blobs.
-- A multipart object's digest is assembled at `Complete` from values recorded per part. Re-reading part data is a bounded fallback for the few parts whose position was assumed wrongly, never the common path, and an upload that would need more than the bound gets no digest rather than a slow `Complete`.
+- A multipart object's digest is assembled at `Complete` from values recorded per part. Re-reading part data is a bounded fallback for the few parts whose position was assumed wrongly, never the common path. An upload that would need more than the bound is refused at `Complete`, so every object that commits has a digest.
 - A client can verify a whole-object read with the digest alone and a standard BLAKE3 implementation.
 - A client can verify a ranged read with an off-the-shelf Bao library by fetching the object's outboard once: under a KiB for a small object, growing with the square root of the size.
 - The S3 data path is unchanged. Bodies are raw bytes, ETags and S3 checksums behave as they do today, and a client that ignores the extension sees nothing new.
@@ -59,7 +59,7 @@ The body already streams through a SHA-256 hasher and an MD5 hasher as it is spl
 
 ### Multipart upload
 
-Parts arrive in any order and the server learns a part's true byte offset only once every lower-numbered part exists. Each `UploadPart` therefore hashes its body at an assumed offset and records what `CompleteMultipartUpload` needs to finish the tree. `CompleteMultipartUpload` checks each assumed offset against the true one and re-hashes only the parts whose assumption was wrong, within a budget.
+Parts arrive in any order and the server learns a part's true byte offset only once every lower-numbered part exists. Each `UploadPart` therefore hashes its body at an assumed offset and records what `CompleteMultipartUpload` needs to finish the tree. `CompleteMultipartUpload` checks each assumed offset against the true one and re-hashes only the parts whose assumption was wrong, within a budget; a completion that would need more is refused.
 
 #### What `UploadPart` records
 
@@ -90,7 +90,7 @@ A part created by copy is hashed as its bytes are read, like an uploaded part. W
 
 `CompleteMultipartUpload` already walks the requested parts in order and computes each part's true offset. A part's record is usable when its true offset equals `TreeOffset`.
 
-The parts whose assumed offset was wrong are re-hashed at their true offsets by reading their blobs back from the local spool, and the results stand in for their records. The final part is always re-hashed when wrong: in a uniform-size upload it is the only part whose assumption can fail, when it lands before any predecessor and its own size stands in, and the 5 GiB part maximum bounds the cost. The other parts are re-hashed within a **re-hash budget**, one maximum part, 5 GiB, by default, and configurable. An upload whose wrong non-final parts add up to more than the budget commits without a digest: the object's ETag is returned as always, GET and HEAD carry no `x-cid`, and `GetObjectAttributes` omits the `Blake3` element, the state defined below for an object without a digest. The budget keeps `Complete` to seconds of local reading at most. Exceeding it is an extreme edge case. No mainstream client varies its part size within an upload, the final part aside, and a uniform-size upload assumes every offset exactly in any arrival order. A sequential upload assumes every offset exactly whatever the sizes. What is left is a hand-rolled uploader sending variable-size parts in parallel, or a parallel compose-by-copy of differently sized source objects, and even there the cost is the absence of a digest, never a failed upload.
+The parts whose assumed offset was wrong are re-hashed at their true offsets by reading their blobs back from the storage node that holds them, and the results stand in for their records. The final part is always re-hashed when wrong: in a uniform-size upload it is the only part whose assumption can fail, when it lands before any predecessor and its own size stands in, and the 5 GiB part maximum bounds the cost. The other parts are re-hashed within a **re-hash budget**, one maximum part, 5 GiB, by default, and configurable. `Complete` adds up the wrong non-final parts before it accepts any part or reads anything. A sum over the budget is refused with a 400, `InvalidPartLayout`, whose message gives the bytes that would have to be read back, the server's limit, and the two ways out: parts of one size, or parts uploaded in part-number order. The upload stays open, so the client can resend parts and complete again. Every object that commits therefore has a digest. The budget bounds how long `Complete` spends reading from storage nodes and nothing else, so it can be set generously. Reaching it is rare. No mainstream client varies its part size within an upload, the final part aside, and a uniform-size upload assumes every offset exactly in any arrival order. A sequential upload assumes every offset exactly whatever the sizes, which covers the usual way objects are concatenated: each source object copied in as one part, in order. What is left is a parallel compose-by-copy of differently sized source objects, or a hand-rolled uploader sending variable-size parts in parallel, and those work up to the budget, about 5 GiB of such parts plus the final one with the default.
 
 A chunk that straddles a part boundary is rebuilt from the earlier part's `TreeTail` and the later part's `TreeHead` and compressed at its chunk index, one compression per boundary. The last part's `TreeTail` is the object's final chunk and is compressed as such. Part lengths that are not 1 KiB multiples therefore cost nothing.
 
@@ -98,7 +98,7 @@ With every part's nodes at their true offsets, the object digest is computed by 
 
 An upload completed with a single part has no merge, and its digest is that part's root as a body of its own. For part 1 that is the recorded `TreeRoot`. For any other part the recorded offset is not 0, so the offset check above re-hashes it at offset 0, and that re-hash yields the root directly. S3 requires the completed parts to be in ascending order, not to begin at part 1, so this case is legal and does occur.
 
-The block CVs for the object are built from the parts' `TreeBlocks` and `TreeNodes` as described in the next section. The root computed by merging the block CVs up must equal the root computed from the parts' subtrees. This is a consistency check on the assembly at the cost of one compression per block, 32,767 at the cap. Should it ever fail, the object commits without a digest rather than with a wrong one; nothing re-reads the body.
+The block CVs for the object are built from the parts' `TreeBlocks` and `TreeNodes` as described in the next section. The root computed by merging the block CVs up must equal the root computed from the parts' subtrees. This is a consistency check on the assembly at the cost of one compression per block, 32,767 at the cap. Should it ever fail, `Complete` returns a server error and the upload stays open; the object is never committed with a digest that might be wrong, and never without one. Nothing re-reads the body.
 
 ### Range verification
 
@@ -204,7 +204,7 @@ type Body struct {
 }
 ```
 
-Some objects have no digest: those written before this change, and a multipart object whose completion exceeded the re-hash budget. For them, GET and HEAD return no `x-cid` header and `GetObjectAttributes` returns its response without the `Blake3` element.
+Objects written before this change have no digest. For them, GET and HEAD return no `x-cid` header and `GetObjectAttributes` returns its response without the `Blake3` element.
 
 That makes two situations look alike from a GET or HEAD: an object without a digest, and a server that does not implement this RFC. `GetObjectAttributes` tells them apart. The request names the attributes it wants in `x-amz-object-attributes`, and a server validates the names: one that implements this RFC accepts `Blake3` and answers, with or without the element depending on the object, while one that does not, AWS included, rejects the request with `InvalidArgument`. So a client that wants to know whether verification is available at all asks for `Blake3` once; an error means the server cannot provide it for any object, and a success without the element means it cannot provide it for this one.
 
@@ -212,7 +212,7 @@ That makes two situations look alike from a GET or HEAD: an object without a dig
 
 Ingest adds one BLAKE3 pass per body or part, alongside the MD5 pass already there. BLAKE3 with vector instructions is faster than SHA-256, so it costs less than the whole-body SHA-256 pass it makes redundant.
 
-`CompleteMultipartUpload` adds one compression per recorded subtree for the digest and one per block for the consistency check, a few tens of thousands at most for the largest uploads, which is milliseconds. The re-hash path reads the affected parts back through the plaintext opener, which decrypts in an encrypting deployment. The parts are read from the local spool: a part's blobs stay there until the object is deleted, since nothing evicts spool copies today, so no re-hash fetches from a storage node. The work is bounded by the final part plus the budget, about 10 GiB of local reading at most with the default, which is seconds to tens of seconds. The price of the bound is that a variable-size parallel upload beyond it gets no digest.
+`CompleteMultipartUpload` adds one compression per recorded subtree for the digest and one per block for the consistency check, a few tens of thousands at most for the largest uploads, which is milliseconds. The re-hash path reads the affected parts back through the plaintext opener, which decrypts in an encrypting deployment. A part's local copy is removed as soon as the part is parked on its provider, so the re-hash fetches the part's blobs from the storage node with ranged retrievals, the same path a `GET` takes. The work is bounded by the final part plus the budget, about 10 GiB of retrieval at most with the default, so `Complete` on such an upload takes as long as fetching that much from the provider, under a minute and a half at a gigabit per second. A variable-size parallel upload beyond the bound is refused, as described above.
 
 The manifest grows by the block list, 8 KiB at 1 GiB and at most 1 MiB, plus the 34-byte multihash and a few bytes of framing. The part record grows by at most about 15 KiB for the life of the upload.
 
@@ -236,7 +236,7 @@ What it does offer over the current state is universality within multipart uploa
 
 ### Re-addressing blobs to BLAKE3
 
-Making BLAKE3 the network's content address would let storage nodes serve verified ranges directly. It touches every component that handles a multihash, the proof-tree assumptions of PDP, public gateway resolvability, and every stored byte. This RFC is independent of that decision. The object digest proposed here is the same value such a migration would use, so nothing here is thrown away if it happens.
+Making BLAKE3 the network's content address would let storage nodes serve verified ranges directly. It touches every component that handles a multihash, the proof-tree assumptions of PDP, public gateway resolvability, and every stored byte. This RFC is independent of that decision. The object digest proposed here is the same value such a change would use, so nothing here is thrown away if it happens. The [BLAKE3 shard digests](./2026-10-blake3-shard-digest.md) RFC explores it for new shards.
 
 ### A fixed 16 KiB block with the outboard as a blob
 
@@ -268,7 +268,7 @@ The Go implementation uses `lukechampine.com/blake3` for the hash, its `guts` pa
 
 ## Open questions
 
-- The re-hash budget's default for non-final parts. The final part is exempt, so the budget only governs variable-size parallel uploads; a larger default trades `Complete` latency for digests on more of them.
+- The re-hash budget's default for non-final parts. The final part is exempt, so the budget only governs variable-size parallel uploads; a larger default trades `Complete` latency for accepting more of them.
 
 - Names: `x-cid` and the `Blake3` attribute are placeholders.
 - The scaling constants: the 16 KiB floor, the 32 B factor that holds it to 8 MiB, and the 32,768-block cap. The exponent is a knob too; cube-root scaling would hold manifests smaller at the cost of coarser blocks on large objects.
