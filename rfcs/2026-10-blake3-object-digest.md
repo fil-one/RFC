@@ -102,7 +102,7 @@ The block CVs for the object are built from the parts' `TreeBlocks` and `TreeNod
 
 ### Range verification
 
-Two terms, since BLAKE3 and Bao both have "leaves" and they are not the same thing. A **chunk** is BLAKE3's 1 KiB unit; a chunk's CV is a leaf of BLAKE3's own tree. A **block** is 2^ChunkLog chunks, the unit a client verifies; a block's CV is an interior node of BLAKE3's tree and a leaf of the Bao tree at that block size. This RFC stores and serves block CVs and never stores chunk CVs. The word "leaf" is not used below.
+Two terms, since BLAKE3 and Bao both have "leaves" and they are not the same thing. A **chunk** is BLAKE3's 1 KiB unit; a chunk's CV is a leaf of BLAKE3's own tree. A **block** is $2^{\text{ChunkLog}}$ chunks, the unit a client verifies; a block's CV is an interior node of BLAKE3's tree and a leaf of the Bao tree at that block size. This RFC stores and serves block CVs and never stores chunk CVs. The word "leaf" is not used below.
 
 A client that reads ranges needs more than the root. It needs the CVs of the tree nodes covering the bytes it read, and enough of the rest of the tree to connect them to the root. The full Bao outboard provides this at 1 KiB granularity and costs about 6% of the object size. Storing it is out of the question in a manifest, and even at bao-tree's 16 KiB default it costs 4 MiB per GiB.
 
@@ -112,12 +112,11 @@ This RFC scales the block size with the object. Objects up to 8 MiB are recorded
 
 The **block** is the unit of the stored tree. Its target is the square root of the object size times 32 bytes, the size of one CV:
 
-```
-target = sqrt(size × 32 B)
-block  = the smallest power of two ≥ target, and at least 16 KiB
-```
+$$\text{target} = \sqrt{\text{size} \times 32\,\text{B}}$$
 
-The target reaches the 16 KiB floor at 8 MiB, so every object up to 8 MiB has 16 KiB blocks, 512 of them at 8 MiB. Above that the block doubles each time the object quadruples: for a 1 GiB object the target is sqrt(2^30 × 2^5) = sqrt(2^35), so the block is 256 KiB and there are 4,096 blocks. A hard cap of 32,768 blocks, 1 MiB of CVs, binds from 32 GiB, where the block grows with the size instead. The cap is a metadata-cost choice: the manifest is a catalog block rewritten on every version, so its size is storage the tenant pays for on each write, and 1 MiB leaves headroom under the 2 MiB byte-field limit of the catalog's CBOR encoding. A larger cap, up to that limit, buys finer verification on objects over 32 GiB at that cost. The manifest records the block size as a **chunk log**: a base-2 exponent of 1 KiB BLAKE3 chunks, the unit Bao libraries take as the block size, so 16 KiB is 4 and 1 MiB is 10. The block affects only what is stored and what granularity a client can verify at. The object digest is the same whatever block is chosen.
+$$\text{block} = \max\bigl(16\,\text{KiB},\ 2^{\lceil \log_2 \text{target} \rceil}\bigr)$$
+
+The target reaches the 16 KiB floor at 8 MiB, so every object up to 8 MiB has 16 KiB blocks, 512 of them at 8 MiB. Above that the block doubles each time the object quadruples: for a 1 GiB object the target is $\sqrt{2^{30} \times 2^{5}} = \sqrt{2^{35}}$, about 181 KiB, so the block is 256 KiB and there are 4,096 blocks. A hard cap of 32,768 blocks, 1 MiB of CVs, binds from 32 GiB, where the block grows with the size instead. The cap is a metadata-cost choice: the manifest is a catalog block rewritten on every version, so its size is storage the tenant pays for on each write, and 1 MiB leaves headroom under the 2 MiB byte-field limit of the catalog's CBOR encoding. A larger cap, up to that limit, buys finer verification on objects over 32 GiB at that cost. The manifest records the block size as a **chunk log**: a base-2 exponent of 1 KiB BLAKE3 chunks, the unit Bao libraries take as the block size, so 16 KiB is 4 and 1 MiB is 10. The block affects only what is stored and what granularity a client can verify at. The object digest is the same whatever block is chosen.
 
 | Object size | Block | Chunk log | Blocks | Manifest bytes |
 |---|---|---|---|---|
