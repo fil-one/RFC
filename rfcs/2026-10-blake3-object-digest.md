@@ -240,7 +240,17 @@ Making BLAKE3 the network's content address would let storage nodes serve verifi
 
 ### A fixed 16 KiB block with the outboard as a blob
 
-bao-tree's default gives 16 KiB verification granularity at any size, with the outboard stored as its own blob referenced from the manifest, about 0.4% of the object. It is the right design if fine-grained verified reads of very large objects are a requirement. It adds a blob per object to write, locate and clean up. The client's extra request is the same either way, but it fetches megabytes instead of KiB. The bounded manifest tree serves the common case with no new blob and can coexist with this design later: the stored block CVs are the top of the finer tree.
+bao-tree's default gives 16 KiB verification granularity at any size, with the outboard stored as a blob of its own on the Forge network and referenced from the manifest by digest. The manifest then stays a few dozen bytes however large the object, the tree is content-addressed so any node holding it can serve it and a client can check it against its SHA-256 digest, and the 2 MiB field limit of the catalog no longer bounds the tree. It is the right design if fine-grained verified reads of very large objects are a requirement.
+
+The client makes a second request in both designs. What differs is what the request returns and what the server manages behind it.
+
+- **The response is 0.4% of the object.** The outboard at 16 KiB is 64 bytes per block: 4 MiB for a 1 GiB object, 4 GiB for a 1 TiB object, about 190 GiB at the 48 TiB S3 maximum. The manifest tree is 256 KiB at 1 GiB and 2 MiB from 32 GiB up, and a client that wants one range needs only the proof slice for it, which `GetObjectAttributes` could extract from either.
+- **A blob per object.** Every `PUT` writes a second blob: allocate, upload, accept, a claim, replication to every replica, a PDP piece to prove, and a release on delete. Under one object, one piece, that doubles the on-chain piece count for small objects, which are most objects, to carry a tree of 32 bytes to a few KiB. The upload also sits on the commit path, since the tree is known only once the body is hashed and the manifest is written only after its blobs are accepted.
+- **Multipart grows with it.** A part's block list at 16 KiB is 10 MiB for a 5 GiB part, against about 15 KiB today, and `Complete` on the largest object reads them all back and writes the outboard out. The outboard passes the blob ceiling at about 60 GiB of object and becomes a multi-blob body of its own.
+- **Encryption removes the independence.** In an encrypting bucket the tree blob is encrypted like the body, so only Ingot can serve it and the client gains nothing over the manifest. A plaintext tree would publish block-level hashes of encrypted data, which lets anyone confirm guesses about low-entropy blocks.
+- **Two storage paths for one value.** A blob per 1 KiB object is a poor trade, so the blob would join the manifest path above some size rather than replace it, and both paths would be maintained for good.
+
+The bounded manifest tree serves the common case with no new blob and can coexist with this design later: the stored block CVs are the top of the finer tree, so an object that needs 16 KiB verification could gain a tree blob without changing what the manifest holds.
 
 ### Returning the Bao encoded stream
 
