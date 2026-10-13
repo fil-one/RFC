@@ -67,7 +67,7 @@ Each part record gains:
 
 - `TreeOffset`: the byte offset the part was hashed at.
 - `TreeNodes`: the CVs of the part's aligned subtrees, in order, covering the whole chunks between the part's first and last chunk boundaries. A span of whole chunks decomposes into at most two aligned power-of-two blocks per tree level, so this list holds a few dozen 32-byte entries at most.
-- `TreeBlocks`: the part's block CVs at the part's own block size (see [Range verification](#range-verification)), at most 10,240 entries (320 KiB) for a 5 GiB part.
+- `TreeBlocks`: the part's block CVs at the block size of an object that ends where the part ends (see [Range verification](#range-verification)). Part 1 of 5 GiB records 10,240 entries (320 KiB); each later part records fewer, down to 3 for part 10,000 of a 10,000 × 5 GiB upload.
 - `TreeHead` and `TreeTail`: the part's bytes before its first chunk boundary and after its last one, under 1 KiB each. They are empty for a part whose offset and length are 1 KiB multiples. Every mainstream client sizes its parts in MiB, so both spans are empty for nearly every part ever uploaded. The one known exception is the AWS SDKs for Go and Java above the 10,000-part limit, objects over about 48 GiB, where they size parts as the object size divided by 10,000, an arbitrary byte count; those uploads are a small minority, and these two spans are what let them complete without re-reading anything. The spans live in the part's record in the catalog database with the rest of its tree material, since the part's local copy is removed once the part is parked on its storage node; nothing is held in memory between requests.
 - For part 1 only, `TreeRoot`: the BLAKE3 hash of the part on its own. Part 1 is always at offset 0, so its standalone hash falls out of the same pass with a root-flagged final compression.
 
@@ -144,7 +144,7 @@ The manifest stores the CV of every block of the object, in object order from of
 
 A single `PUT` computes the block CVs in its hashing pass, since the object length is known from `Content-Length` and so is the block.
 
-A multipart upload does not know the object length until `CompleteMultipartUpload`, so each part computes `TreeBlocks` at its own block size, chosen by the same rule from the part's own size. The object's block is never smaller than any part's, because the rule is monotone in size and the object is at least as large as each part. At `CompleteMultipartUpload`, each object block is one of:
+A multipart upload does not know the object length until `CompleteMultipartUpload`, so each part computes `TreeBlocks` at the block size the same rule gives for its assumed offset plus its length. A record is used only when its assumed offset is the true one, and the object then holds at least that many bytes, so the object's block is never smaller than the part's, because the rule is monotone in size. Sizing the blocks by the part's own length would also be correct, but finer than the object needs: at the 10,000 × 5 GiB maximum that is 3 GiB of CVs against about 6 MiB. At `CompleteMultipartUpload`, each object block is one of:
 
 - A block lying within one part. Its CV is the merge of that part's `TreeBlocks` that it covers.
 - A block straddling a part boundary. The piece on each side is a union of that part's edge subtrees, which `TreeNodes` holds, so its CV is the merge of those entries.
@@ -215,7 +215,7 @@ Ingest adds one BLAKE3 pass per body or part, alongside the MD5 pass already the
 
 `CompleteMultipartUpload` adds one compression per recorded subtree for the digest and one per block for the consistency check, a few tens of thousands at most for the largest uploads, which is milliseconds. The re-hash path reads the affected parts back through the plaintext opener, which decrypts in an encrypting deployment. A part's local copy is removed as soon as the part is parked on its provider, so the re-hash fetches the part's blobs from the storage node with ranged retrievals, the same path a `GET` takes. The work is bounded by the final part plus the budget, about 10 GiB of retrieval at most with the default, so `Complete` on such an upload takes as long as fetching that much from the provider, under a minute and a half at a gigabit per second. A variable-size parallel upload beyond the bound is refused, as described above.
 
-The manifest grows by the block list, 128 KiB at 1 GiB and at most 1 MiB, plus the 34-byte multihash and a few bytes of framing. The part record grows by its tree material for the life of the upload: a few KiB for parts of a few MiB, up to about 320 KiB for a 5 GiB part, nearly all of it block CVs. `Complete` loads every part's record, so the largest upload S3 allows, 10,000 parts of 5 GiB, holds about 3 GiB of records in memory while it completes.
+The manifest grows by the block list, 128 KiB at 1 GiB and at most 1 MiB, plus the 34-byte multihash and a few bytes of framing. The part record grows by its tree material for the life of the upload: a few KiB for parts of a few MiB, at most about 320 KiB for a 5 GiB part, nearly all of it block CVs, and less the further into the object the part sits. `Complete` loads every part's tree material, about 6 MiB for the largest upload S3 allows, 10,000 parts of 5 GiB, and about 4 MiB for a 1 TiB upload in 10,000 parts.
 
 ## Alternatives considered
 
