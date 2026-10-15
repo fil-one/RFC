@@ -136,34 +136,45 @@ A bucket has at most one policy. It is read and written over S3 with a service k
 
 A principal-bound key receives `AccessDenied` from all three; no policy grants them (see [action vocabulary](#action-vocabulary)). A bucket created with `aws s3 mb` gets its policy with `aws s3api put-bucket-policy` and the same service key, or through the console.
 
-The document follows the shape of an AWS bucket policy, with AWS's field names and capitalization, limited to the fields Forge evaluates. It is the body of `PutBucketPolicy` and of the `GetBucketPolicy` response:
+The document is an AWS bucket policy, limited to the fields Forge evaluates, so tools that build and lint AWS policies work on it unchanged. It is the body of `PutBucketPolicy` and of the `GetBucketPolicy` response:
 
 ```jsonc
 {
+  "Version": "2012-10-17",                          // "2012-10-17" or "2008-10-17"
   "Statement": [
     {
-      "Sid": "filone-owners",                       // optional label; Hilt stores and returns it, nothing evaluates it
+      "Sid": "photos-readers",                      // optional label; Hilt stores and returns it, nothing evaluates it
       "Effect": "Allow",                            // "Allow" | "Deny"
-      "Principal": ["8f2c...", "a91e..."],          // principal IDs, or the string "*" for every principal of the tenant
-      "Action": ["s3:GetObject", "s3:ListBucket"]   // policy vocabulary, or ["s3:*"] for all of it
+      "Principal": {                                // principal ARNs, or the string "*" for every principal of the tenant
+        "AWS": ["arn:aws:iam:::user/8f2c...", "arn:aws:iam:::user/a91e..."]
+      },
+      "Action": ["s3:GetObject", "s3:ListBucket"],  // policy vocabulary, or "s3:*" for all of it
+      "Resource": ["arn:aws:s3:::photos", "arn:aws:s3:::photos/*"]
     },
     {
       "Effect": "Deny",
       "Principal": "*",
-      "Action": ["s3:PutObjectRetention", "s3:PutObjectLegalHold"]
+      "Action": ["s3:PutObjectRetention", "s3:PutObjectLegalHold"],
+      "Resource": "arn:aws:s3:::photos/*"
     }
   ]
 }
 ```
 
-Fil One writes its default statements under the labels `filone-owners`, `filone-admins` and `filone-creator`, and finds them again by those labels when a member's role changes. To Hilt they are ordinary labels: any statement may carry any `Sid`.
+A principal is named by the ARN `arn:aws:iam:::user/<principalId>`. The account field stays empty: the bucket fixes the tenant, and Hilt resolves the id among that tenant's principals. `{"AWS": "*"}` is accepted as a second spelling of `"*"`. `Action` and `Resource` take a string or a list, as on AWS.
+
+`Resource` names the whole bucket: `arn:aws:s3:::<bucket>` for bucket actions such as `s3:ListBucket`, and `arn:aws:s3:::<bucket>/*` for object actions such as `s3:GetObject`. A statement lists the ARN each of its actions needs; `s3:*` needs both. Forge grants authority per bucket, so a key prefix such as `arn:aws:s3:::photos/reports/*` cannot be enforced and is refused.
+
+The console writes one statement of its own, naming a bucket's creator, under an ordinary label. It reserves no label and rewrites no statement when a member's role changes. To Hilt every label is ordinary: any statement may carry any `Sid`.
 
 Hilt MUST refuse with `InvalidBucketPolicy`, which Ingot renders as `MalformedPolicy` (400):
 
 - an action outside the [policy vocabulary](#action-vocabulary); in particular `s3:CreateBucket`, `s3:DeleteBucket`, and `s3:ListAllMyBuckets`. `s3:*` is accepted and stands for the whole vocabulary,
-- a `Principal` that is neither the string `"*"` nor a non-empty list of ids of live principals of the tenant. `"*"` inside a list is rejected; the wildcard has one spelling,
-- an empty `Statement` list or a statement with an empty `Action` list. To remove a policy, the caller sends `DeleteBucketPolicy`,
-- a field the schema does not define. There is no `Resource` field: the policy governs the bucket it is stored on.
+- a missing or unrecognized `Version`,
+- a `Principal` that is neither `"*"`, `{"AWS": "*"}`, nor `{"AWS": ...}` naming one or more live principals of the tenant as `arn:aws:iam:::user/<principalId>`. An ARN with an account id, and `"*"` inside the list, are rejected,
+- a `Resource` other than `arn:aws:s3:::<bucket>` or `arn:aws:s3:::<bucket>/*` for the bucket the policy is stored on, or a statement whose actions lack the ARN they apply to,
+- an empty `Statement` list or a statement with an empty `Action` or `Resource`. To remove a policy, the caller sends `DeleteBucketPolicy`,
+- a field the schema does not define, `Condition` and `NotPrincipal` included.
 
 A bucket that does not exist or belongs to another tenant is `UnknownBucket` on all three operations, which Ingot renders as `NoSuchBucket` (404). `GetBucketPolicy` and `DeleteBucketPolicy` on a bucket that has no policy are `PolicyNotFound`, rendered as `NoSuchBucketPolicy` (404).
 
@@ -180,7 +191,7 @@ where `s3:*` expands to every action in the policy vocabulary. Hilt returns the 
 
 `s3:ListAllMyBuckets` sits outside the per-bucket action set and is granted to every principal. The S3 `ListBuckets` operation therefore requires no policy lookup. This is distinct from listing objects within a bucket, which requires `s3:ListBucket` and is granted through the bucket policy like any other action.
 
-**Canonical form.** The `Statement`, `Principal`, and `Action` lists are sets. Hilt removes duplicates and sorts them on write, and stores and returns the sorted document, with statements in the order of their CIDs. The ETag is the CID (DAG-JSON codec, sha256) of a DAG-JSON encoding that represents each set as a map. A statement encodes its principals and actions as maps keyed by principal ID and by action, with the wildcard principal as the single key `"*"`. The policy is a map keyed by the CID of each encoded statement. DAG-JSON sorts map keys, so the encoding is independent of order and duplicates. Two documents that differ only in order or in duplicates have the same ETag.
+**Canonical form.** The `Statement`, `Principal`, `Action`, and `Resource` lists are sets. Hilt removes duplicates and sorts them on write, and stores and returns the sorted document as lists, with statements in the order of their CIDs. The ETag is the CID (DAG-JSON codec, sha256) of the DAG-JSON encoding of that document, in which each set is a map: a statement encodes its principals, actions and resources as maps keyed by principal ID, by action and by resource, with the wildcard principal as the single key `"*"`, and the policy encodes its `Version` and its statements as a list in CID order. DAG-JSON sorts map keys, so the encoding is independent of order and duplicates. Two documents that differ only in order or in duplicates have the same ETag. libforge's `bucket.ETag` is the reference implementation; Hilt stores and checks the tag with it, and Ingot answers clients with it.
 
 **Compare-and-set.** AWS defines no preconditions on these operations, and a request without one is unconditional, as on AWS. Forge adds them. `GetBucketPolicy` returns the `ETag`. `PutBucketPolicy` and `DeleteBucketPolicy` accept `If-Match` with that value, or `If-None-Match: *` on a `PutBucketPolicy` that creates the first policy. A precondition header MUST be among the request's `SignedHeaders`. A request with both preconditions, another `If-None-Match` value, or an unsigned precondition is refused with `InvalidPrecondition`, rendered as `InvalidRequest` (400). A mismatch, or `If-None-Match: *` when a policy exists, is `PreconditionFailed` (412) and nothing is written. A successful `PutBucketPolicy` answers 204 with the new `ETag` in the response header. Callers treat the ETag as opaque. The console sends a precondition on every write.
 
@@ -190,7 +201,7 @@ where `s3:*` expands to every action in the policy vocabulary. Hilt returns the 
 
 Buckets are created and deleted over S3 only with a service key. `CreateBucket` cannot be granted by a bucket policy because the target bucket does not exist yet. `DeleteBucket` is excluded from the policy vocabulary so that bucket lifecycle stays with service keys, as the ADR decides. A principal-bound key receives `AccessDenied` from both operations. `aws s3 mb` with a member's key fails, and members create buckets through the console.
 
-A new bucket has no policy, and only service keys reach it until one is written with `PutBucketPolicy`. The console creates a bucket in two S3 requests signed with its service key: `CreateBucket`, then `PutBucketPolicy` with `If-None-Match: *` and a document naming the member who created the bucket and the organization's current Owners and Admins, each with the actions their role permits. It answers the member after both complete. A failure between the two leaves a bucket that no member can reach and that the console lists with no policy; the console finishes the policy write from a durable job (see [error recovery](#error-recovery)). A bucket created by a generic S3 client gets its policy the same way, from that client or from the console.
+A new bucket has no policy, and only service keys reach it until one is written with `PutBucketPolicy`. The console creates a bucket in two S3 requests signed with its service key: `CreateBucket`, then `PutBucketPolicy` with `If-None-Match: *` and a document naming the member who created the bucket, whatever their role, with every action but the two retention writes. It answers the member after both complete. A failure between the two leaves a bucket that only service keys reach and that the console lists with no policy; the console finishes the policy write from a durable job (see [error recovery](#error-recovery)). A bucket created by a generic S3 client gets its policy the same way, from that client or from the console.
 
 ### Principal-bound access keys
 
@@ -367,12 +378,11 @@ Hilt verifies the signature as `/s3/request/authorize` does and requires a servi
 
 #### Result
 
-`GET` returns the stored document and its `ETag`. `PUT` returns the new `ETag`. `DELETE` returns the result with both empty.
+`GET` returns the stored document. `PUT` and `DELETE` return an empty result. The result carries no `ETag`: Ingot computes it from the document (see [canonical form](#bucket-policies)), the same way Hilt computes the tag it stores.
 
 ```jsonc
 {
-  "etag": "bafy...",
-  "policy": { "Statement": [ /* ... */ ] }   // GET only
+  "policy": { "version": "2012-10-17", "statement": [ /* lists as sets, see canonical form */ ] }   // GET only
 }
 ```
 
@@ -411,7 +421,7 @@ For each access key, Ingot caches the data carried by Hilt's authorize response:
 
 The cached effective set is what makes `Deny` enforceable. Several S3 actions map to the same Forge commands: for example, `s3:GetObject` and `s3:ListBucket` both require `/content/retrieve`, while `s3:PutObject` grants `/blob/remove` alongside `s3:DeleteObject`. A chain lookup alone therefore cannot distinguish between actions that share the same commands or honor a policy that grants one but not the other. The cached action set provides that distinction. A request for a bucket with no cached set goes to Hilt.
 
-Operations that map to no Forge command are authorized at Hilt on every request: `ListBuckets`, `CreateBucket`, `DeleteBucket`, `GetBucketPolicy`, `PutBucketPolicy`, and `DeleteBucketPolicy`. No per-request delegation carries the key's expiry for them, so a cached set alone would outlive an expired key. Ingot forwards the three policy operations as `/s3/bucket/policy` invocations, with the request body on a `PUT`.
+Operations that map to no Forge command are authorized at Hilt on every request: `ListBuckets`, `CreateBucket`, `DeleteBucket`, `GetBucketPolicy`, `PutBucketPolicy`, and `DeleteBucketPolicy`. No per-request delegation carries the key's expiry for them, so a cached set alone would outlive an expired key. Ingot serves the three policy operations through versitygw's own S3 handlers, whose backend forwards each one as a `/s3/bucket/policy` invocation with the signed request, and the body on a `PUT`. versitygw checks a `PutBucketPolicy` document against AWS's rules before the backend sees it, so a document that is not an AWS bucket policy is `MalformedPolicy` without reaching Hilt. Hilt's checks are stricter and remain the ones that decide. Ingot answers versitygw's own policy lookups, made from its access checks, with `NoSuchBucketPolicy`, so versitygw never evaluates a policy itself. Ingot computes the response `ETag` from the document, the one Hilt returned on a `GET` or the body Hilt accepted on a `PUT`, with the canonical-form definition, so it equals the tag Hilt stores.
 
 **The firehose consumer caches revocations.** When Swarf reports a revoked CID, Ingot drops every per-key cache whose proof chains contain that delegation and keeps the CID in memory until the next UTC midnight plus clock skew, the cache's own horizon. Every cached proof chain for a principal-bound key contains one of the key's stored delegations, so a rotation always names something the cache contains. A revocation that matches no cache is cached all the same. On a cache miss, Ingot checks the delegations in Hilt's response against the cached CIDs. If any is present, Ingot authorizes the request from the response and caches nothing, so a key whose revocations were published without a commit reaches Hilt on every request until a committed write issues fresh delegations (see [error recovery](#error-recovery)). The cached revocation CIDs only stop Ingot caching a response; Hilt's committed state decides the request.
 
@@ -421,7 +431,7 @@ Error mapping gains the rows listed under [failures](#failures). `UnknownBucket`
 
 The console holds one service key per tenant. The key is created without a bucket list and holds every action in the management API's permission enum: the object actions it signs on members' behalf, `s3:CreateBucket`, `s3:DeleteBucket`, and the three policy actions. It signs every request the console sends: tenant setup, bucket creation and deletion, policy reads and writes, background workers, and every member's bucket and object traffic, presigned URLs included.
 
-Bucket policies are never evaluated for a service key, so on a region serving the `iam` model the console enforces a scoped member's access itself. Before it signs a request on a member's behalf, it reads the member's effective actions through `GET /principals/{principalId}/access`, filters bucket listings and the activity feed to the buckets in that result, and refuses a bucket-addressed request whose bucket is absent from it or whose action the bucket's effective set does not include. Owners and Admins are named on every bucket's policy and are served without the check.
+Bucket policies are never evaluated for a service key, so on a region serving the `iam` model the console enforces a scoped member's access itself. Before it signs a request on a member's behalf, it reads the member's effective actions through `GET /principals/{principalId}/access`, filters bucket listings and the activity feed to the buckets in that result, and refuses a bucket-addressed request whose bucket is absent from it or whose action the bucket's effective set does not include. Owners and Admins are served without the check: the console signs their traffic with its service key and shows them every bucket. Their own keys are ordinary principal-bound or service keys, which reach a bucket only as the policies allow.
 
 Consequences:
 
@@ -468,9 +478,9 @@ Every existing key becomes a service key because a key without a principal is ex
 1. Deploy Ingot with the policy operations, the new error mappings, and the revocation cache. Ingot already enforces the cached effective action set.
 2. Deploy Hilt. Its schema migration adds principals, policies, and the key's principal. Every existing key keeps authorizing through the parent RFC's path, and nothing is backfilled.
 
-**Once per organization.** The console creates one principal per member with `PUT /tenants/{tenantId}/principals/{principalId}`, then writes a policy for each bucket naming the organization's Owners and Admins. The console signs member traffic with its service key throughout, and service keys are not evaluated against bucket policies, so this step changes no member's access.
+**Once per organization.** The console creates one principal per member with `PUT /tenants/{tenantId}/principals/{principalId}` and writes no policy. The console signs member traffic with its service key throughout, and service keys are not evaluated against bucket policies, so this step changes no member's access.
 
-**Once per region.** After every organization in the region has principals and policies, the console switches that region's access model from `scoped-keys` to `iam`. The access model is configured per region; policy operations, the policy fan-out, and the console's check of member traffic against effective actions are active only where the model is `iam`. From that point forward, the console writes a policy on every bucket it creates and refuses a scoped member's request outside their effective actions.
+**Once per region.** After every organization in the region has principals, the region serves the `iam` access model. The orchestrator serving a region fixes its model, `service-keys` or `iam`, and a Forge region moves to `iam` once and does not move back. Policy operations and the console's check of member traffic against effective actions are active only where the model is `iam`. From that point forward, the console writes a policy on every bucket it creates and refuses a scoped member's request outside their effective actions.
 
 No migration step takes an existing key out of service.
 
@@ -502,7 +512,7 @@ Ingot embeds versitygw, whose policy engine is currently disabled by assigning t
 
 ### An access model flag per tenant
 
-A tenant could carry an access-model flag, `scoped-keys` or `iam`, and Hilt could apply that model to every key the tenant holds. Each request would then read one model from the tenant row rather than branching on the key. A tenant cannot hold a service key and a member key at once under that rule, and a tenant holds both as soon as a member mints a key beside the console's.
+A tenant could carry an access-model flag, `service-keys` or `iam`, and Hilt could apply that model to every key the tenant holds. Each request would then read one model from the tenant row rather than branching on the key. A tenant cannot hold a service key and a member key at once under that rule, and a tenant holds both as soon as a member mints a key beside the console's.
 
 ### A permission list on a principal-bound key
 
@@ -514,7 +524,7 @@ Policies could be read and written through `/tenants/{tenantId}/buckets/{bucketN
 
 ### A default policy template per tenant
 
-Hilt could store one policy template per tenant and copy it onto each bucket at creation, so that a new bucket never lacks a policy. The console would then have to keep that template synchronized with the organization's roster, a second copy of the statements already written to each bucket, and the template could not name the member who created the bucket. Writing each bucket's policy with `PutBucketPolicy` sends the document once, at the point where it is needed.
+Hilt could store one policy template per tenant and copy it onto each bucket at creation, so that a new bucket never lacks a policy. The console would then have to keep that template in step with each organization's membership, and the template could not name the member who created the bucket. Writing each bucket's policy with `PutBucketPolicy` sends the document once, at the point where it is needed.
 
 ### A policy header on the create request
 
@@ -619,7 +629,7 @@ The `delegation` table is unchanged. For a principal-bound key, its rows represe
 
 1. A member creates `photos` in the console. Fil One sends `PUT /photos` to Ingot signed with its service key.
 2. Ingot invokes `/s3/bucket/create`; Hilt creates the bucket and Ingot adds it to its local database.
-3. Fil One sends `PutBucketPolicy` for `photos` with `If-None-Match: *` and a document naming the member and the org's Owners and Admins. Ingot forwards it as `/s3/bucket/policy`; Hilt validates and stores the document and issues each named principal's keys their delegations over `photos`.
+3. Fil One sends `PutBucketPolicy` for `photos` with `If-None-Match: *` and a document naming the member. Ingot forwards it as `/s3/bucket/policy`; Hilt validates and stores the document and issues the member's keys their delegations over `photos`.
 4. Fil One answers the member. Their next request on `photos` reaches Hilt and is authorized against the policy.
 
 #### Grant a member a bucket
