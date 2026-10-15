@@ -12,6 +12,12 @@ Proposal for service identities/URLs in the Forge network.
 
 ## Proposal
 
+Piri hostnames have one shape in every stage: `piri-<N>.<REGION>.` followed by
+the stage's Forge domain or, in production, the provider's own. An appliance
+runs one Piri per storage volume, numbered from 0 within the appliance. The
+region label, which Ingot's hostname also carries, keeps the names of Piris in
+different regions apart and shows which region a Piri serves.
+
 ### Staging
 
 - `did:web:upload.staging.fil-forge.com` (Sprue)
@@ -25,11 +31,6 @@ We run these services in staging but typically they are run by a 3rd party:
 
 - `did:web:s3.eu-central-3.staging.filonecontent.com` (Ingot)
 - `did:key:z...` `https://piri-<N>.eu-central-3.staging.fil-forge.com` (Piri)
-
-An appliance runs one Piri per storage volume, numbered from 0 within the
-appliance. The hostname carries the region label, as Ingot's does, so Piris in
-different regions of one stage get different names and the address shows which
-region a Piri serves.
 
 ### Dev
 
@@ -59,4 +60,4 @@ handle (e.g. `bajtos`) or a PR number (e.g. `pr-920`).
 Multiple of these run by 3rd parties:
 
 - `did:web:s3.<REGION>.filonecontent.com` (Ingot)
-- `did:key:z...` `https://piri.<PROVIDER_DOMAIN>` (Piri)
+- `did:key:z...` `https://piri-<N>.<REGION>.<PROVIDER_DOMAIN>` (Piri)
