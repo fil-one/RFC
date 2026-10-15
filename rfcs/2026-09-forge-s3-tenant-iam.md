@@ -143,7 +143,7 @@ The document is an AWS bucket policy, limited to the fields Forge evaluates, so 
   "Version": "2012-10-17",                          // "2012-10-17" or "2008-10-17"
   "Statement": [
     {
-      "Sid": "filone-owners",                       // optional label; Hilt stores and returns it, nothing evaluates it
+      "Sid": "photos-readers",                      // optional label; Hilt stores and returns it, nothing evaluates it
       "Effect": "Allow",                            // "Allow" | "Deny"
       "Principal": {                                // principal ARNs, or the string "*" for every principal of the tenant
         "AWS": ["arn:aws:iam:::user/8f2c...", "arn:aws:iam:::user/a91e..."]
@@ -165,7 +165,7 @@ A principal is named by the ARN `arn:aws:iam:::user/<principalId>`. The account 
 
 `Resource` names the whole bucket: `arn:aws:s3:::<bucket>` for bucket actions such as `s3:ListBucket`, and `arn:aws:s3:::<bucket>/*` for object actions such as `s3:GetObject`. A statement lists the ARN each of its actions needs; `s3:*` needs both. Forge grants authority per bucket, so a key prefix such as `arn:aws:s3:::photos/reports/*` cannot be enforced and is refused.
 
-Fil One writes its default statements under the labels `filone-owners`, `filone-admins` and `filone-creator`, and finds them again by those labels when a member's role changes. To Hilt they are ordinary labels: any statement may carry any `Sid`.
+The console writes one statement of its own, naming a bucket's creator, under an ordinary label. It reserves no label and rewrites no statement when a member's role changes. To Hilt every label is ordinary: any statement may carry any `Sid`.
 
 Hilt MUST refuse with `InvalidBucketPolicy`, which Ingot renders as `MalformedPolicy` (400):
 
@@ -201,7 +201,7 @@ where `s3:*` expands to every action in the policy vocabulary. Hilt returns the 
 
 Buckets are created and deleted over S3 only with a service key. `CreateBucket` cannot be granted by a bucket policy because the target bucket does not exist yet. `DeleteBucket` is excluded from the policy vocabulary so that bucket lifecycle stays with service keys, as the ADR decides. A principal-bound key receives `AccessDenied` from both operations. `aws s3 mb` with a member's key fails, and members create buckets through the console.
 
-A new bucket has no policy, and only service keys reach it until one is written with `PutBucketPolicy`. The console creates a bucket in two S3 requests signed with its service key: `CreateBucket`, then `PutBucketPolicy` with `If-None-Match: *` and a document naming the member who created the bucket and the organization's current Owners and Admins, each with the actions their role permits. It answers the member after both complete. A failure between the two leaves a bucket that no member can reach and that the console lists with no policy; the console finishes the policy write from a durable job (see [error recovery](#error-recovery)). A bucket created by a generic S3 client gets its policy the same way, from that client or from the console.
+A new bucket has no policy, and only service keys reach it until one is written with `PutBucketPolicy`. The console creates a bucket in two S3 requests signed with its service key: `CreateBucket`, then `PutBucketPolicy` with `If-None-Match: *` and a document naming the member who created the bucket, whatever their role, with every action but the two retention writes. It answers the member after both complete. A failure between the two leaves a bucket that only service keys reach and that the console lists with no policy; the console finishes the policy write from a durable job (see [error recovery](#error-recovery)). A bucket created by a generic S3 client gets its policy the same way, from that client or from the console.
 
 ### Principal-bound access keys
 
@@ -431,7 +431,7 @@ Error mapping gains the rows listed under [failures](#failures). `UnknownBucket`
 
 The console holds one service key per tenant. The key is created without a bucket list and holds every action in the management API's permission enum: the object actions it signs on members' behalf, `s3:CreateBucket`, `s3:DeleteBucket`, and the three policy actions. It signs every request the console sends: tenant setup, bucket creation and deletion, policy reads and writes, background workers, and every member's bucket and object traffic, presigned URLs included.
 
-Bucket policies are never evaluated for a service key, so on a region serving the `iam` model the console enforces a scoped member's access itself. Before it signs a request on a member's behalf, it reads the member's effective actions through `GET /principals/{principalId}/access`, filters bucket listings and the activity feed to the buckets in that result, and refuses a bucket-addressed request whose bucket is absent from it or whose action the bucket's effective set does not include. Owners and Admins are named on every bucket's policy and are served without the check.
+Bucket policies are never evaluated for a service key, so on a region serving the `iam` model the console enforces a scoped member's access itself. Before it signs a request on a member's behalf, it reads the member's effective actions through `GET /principals/{principalId}/access`, filters bucket listings and the activity feed to the buckets in that result, and refuses a bucket-addressed request whose bucket is absent from it or whose action the bucket's effective set does not include. Owners and Admins are served without the check: the console signs their traffic with its service key and shows them every bucket. Their own keys are ordinary principal-bound or service keys, which reach a bucket only as the policies allow.
 
 Consequences:
 
@@ -478,9 +478,9 @@ Every existing key becomes a service key because a key without a principal is ex
 1. Deploy Ingot with the policy operations, the new error mappings, and the revocation cache. Ingot already enforces the cached effective action set.
 2. Deploy Hilt. Its schema migration adds principals, policies, and the key's principal. Every existing key keeps authorizing through the parent RFC's path, and nothing is backfilled.
 
-**Once per organization.** The console creates one principal per member with `PUT /tenants/{tenantId}/principals/{principalId}`, then writes a policy for each bucket naming the organization's Owners and Admins. The console signs member traffic with its service key throughout, and service keys are not evaluated against bucket policies, so this step changes no member's access.
+**Once per organization.** The console creates one principal per member with `PUT /tenants/{tenantId}/principals/{principalId}` and writes no policy. The console signs member traffic with its service key throughout, and service keys are not evaluated against bucket policies, so this step changes no member's access.
 
-**Once per region.** After every organization in the region has principals and policies, the console switches that region's access model from `scoped-keys` to `iam`. The access model is configured per region; policy operations, the policy fan-out, and the console's check of member traffic against effective actions are active only where the model is `iam`. From that point forward, the console writes a policy on every bucket it creates and refuses a scoped member's request outside their effective actions.
+**Once per region.** After every organization in the region has principals, the region serves the `iam` access model. The orchestrator serving a region fixes its model, `service-keys` or `iam`, and a Forge region moves to `iam` once and does not move back. Policy operations and the console's check of member traffic against effective actions are active only where the model is `iam`. From that point forward, the console writes a policy on every bucket it creates and refuses a scoped member's request outside their effective actions.
 
 No migration step takes an existing key out of service.
 
@@ -512,7 +512,7 @@ Ingot embeds versitygw, whose policy engine is currently disabled by assigning t
 
 ### An access model flag per tenant
 
-A tenant could carry an access-model flag, `scoped-keys` or `iam`, and Hilt could apply that model to every key the tenant holds. Each request would then read one model from the tenant row rather than branching on the key. A tenant cannot hold a service key and a member key at once under that rule, and a tenant holds both as soon as a member mints a key beside the console's.
+A tenant could carry an access-model flag, `service-keys` or `iam`, and Hilt could apply that model to every key the tenant holds. Each request would then read one model from the tenant row rather than branching on the key. A tenant cannot hold a service key and a member key at once under that rule, and a tenant holds both as soon as a member mints a key beside the console's.
 
 ### A permission list on a principal-bound key
 
@@ -524,7 +524,7 @@ Policies could be read and written through `/tenants/{tenantId}/buckets/{bucketN
 
 ### A default policy template per tenant
 
-Hilt could store one policy template per tenant and copy it onto each bucket at creation, so that a new bucket never lacks a policy. The console would then have to keep that template synchronized with the organization's roster, a second copy of the statements already written to each bucket, and the template could not name the member who created the bucket. Writing each bucket's policy with `PutBucketPolicy` sends the document once, at the point where it is needed.
+Hilt could store one policy template per tenant and copy it onto each bucket at creation, so that a new bucket never lacks a policy. The console would then have to keep that template in step with each organization's membership, and the template could not name the member who created the bucket. Writing each bucket's policy with `PutBucketPolicy` sends the document once, at the point where it is needed.
 
 ### A policy header on the create request
 
@@ -629,7 +629,7 @@ The `delegation` table is unchanged. For a principal-bound key, its rows represe
 
 1. A member creates `photos` in the console. Fil One sends `PUT /photos` to Ingot signed with its service key.
 2. Ingot invokes `/s3/bucket/create`; Hilt creates the bucket and Ingot adds it to its local database.
-3. Fil One sends `PutBucketPolicy` for `photos` with `If-None-Match: *` and a document naming the member and the org's Owners and Admins. Ingot forwards it as `/s3/bucket/policy`; Hilt validates and stores the document and issues each named principal's keys their delegations over `photos`.
+3. Fil One sends `PutBucketPolicy` for `photos` with `If-None-Match: *` and a document naming the member. Ingot forwards it as `/s3/bucket/policy`; Hilt validates and stores the document and issues the member's keys their delegations over `photos`.
 4. Fil One answers the member. Their next request on `photos` reaches Hilt and is authorized against the policy.
 
 #### Grant a member a bucket
