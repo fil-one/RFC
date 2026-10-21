@@ -49,13 +49,13 @@ Aggregate data moves onto the pipeline rows that already describe each blob. Mig
 - `agg_position integer`: the piece's position in its aggregate.
 - `inclusion_proof bytea`: the CBOR-encoded `merkletree.ProofData` for the piece.
 
-Each aggregate piece is one row's `commp`, and the row already carries `aggregate_root`. An aggregate is the set of rows `WHERE aggregate_root = $1 ORDER BY agg_position`. Piece order and each proof's index must survive exactly, because AddRoots checks that sub-roots are in descending size order and recomputes the root from them.
+Each aggregate piece is one row's `commp`, and the row already carries `aggregate_root`. The fold matches each piece to its row by blob digest, because two blobs with the same bytes and different multihashes share a `commp`. An aggregate is the set of rows `WHERE aggregate_root = $1 ORDER BY agg_position`. Piece order and each proof's index must survive exactly, because AddRoots checks that sub-roots are in descending size order and recomputes the root from them.
 
 ### Lifecycle
 
 `AggregateTask` sets `aggregate_root`, `aggregated_at`, `agg_position` and `inclusion_proof` in the transaction that folds the pieces. The aggregate and the pipeline state now commit together.
 
-`PieceAcceptor` and `AddRootsTask` read the aggregate from these rows. They are the only readers. `/pdp/info` serves inclusion proofs from the `/pdp/accept` receipts, which are already in Postgres, and the prover works from Curio's `pdp_data_set_pieces` tables.
+`AddRootsTask` is the only reader. It loads each aggregate from these rows once and passes it to `PieceAcceptor`, which issues the `/pdp/accept` receipts. `/pdp/info` serves inclusion proofs from the `/pdp/accept` receipts, which are already in Postgres, and the prover works from Curio's `pdp_data_set_pieces` tables.
 
 When AddRoots succeeds, the existing retirement transaction deletes the batch's `pdp_blob_pipeline` and `pdp_root_submissions` rows. The aggregate data goes with them. The table holds only aggregates between aggregation and AddRoots, so its size is bounded by the in-flight window.
 
@@ -63,7 +63,7 @@ Piri stops opening `data_dir/aggregator`. The aggregator storage config, its fx 
 
 ### Upgrade
 
-No production node exists. Development and staging nodes may hold aggregates written to LevelDB but not yet submitted. Migration `00000008` does not import them. It clears `aggregate_root` and `aggregated_at` on every unretired pipeline row and empties `pdp_root_submissions`. Those blobs fold into new aggregates, which are written to Postgres.
+No production node exists. Development and staging nodes may hold aggregates written to LevelDB but not yet submitted. Migration `00000008` does not import them. It clears `aggregate_root`, `aggregated_at` and `agg_task_id` on every unretired pipeline row and empties `pdp_root_submissions`. Clearing `agg_task_id` lets the aggregation task claim the rows on its next idle poll instead of waiting for a new blob to trigger a fold. Those blobs fold into new aggregates, which are written to Postgres.
 
 One case loses data: AddRoots landed on chain but the node stopped before the retirement transaction committed. Those blobs are aggregated again and added to the data set a second time, so the node proves and is paid for them twice. On development and staging this is acceptable.
 
