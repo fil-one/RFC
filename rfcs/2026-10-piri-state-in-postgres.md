@@ -71,24 +71,49 @@ The leftover `data_dir/aggregator` directory is unused after the upgrade. Operat
 
 ## Design: IPNI publisher store
 
-The publisher store holds the IPNI advertisement chain:
+The publisher store holds the IPNI advertisement chain. Each published blob adds:
 
-- content-addressed blocks: adverts and entry chunks
-- the chain head, updated with compare-and-swap
-- two per-context maps, from context ID to entry-chunk link and to metadata
+| Record | Contents | Size |
+|---|---|---|
+| Advert | dag-cbor: previous advert link, provider, addresses, context ID, metadata, entries link, signature | ~590 B |
+| Entries chunk | dag-cbor `{Entries: [digest]}`; Piri advertises one multihash per advert | 46 B |
+| Chunk-link map | context ID → entries-chunk link | ~36 B |
+| Metadata map | context ID → metadata (the location claim CID) | ~51 B |
 
-It grows by one advert and one entry chunk per blob, and nothing deletes them. Postgres already holds the queue of adverts waiting to be published (`ipni_pending_adverts`).
+The node also keeps one signed head, rewritten once per publish batch. Nothing deletes any of these. At 12 PiB of 128 MiB blobs, about 100.7M blobs, the store holds about 110 GB. Postgres already holds the queue of adverts waiting to be published (`ipni_pending_adverts`).
 
-The store splits by kind of data:
+An indexer reads the chain by fetching the head, then each advert and its entries chunk by CID through `GET /ipni/v1/ad/<cid>`, walking back to the last advert it has seen. Each block is fetched about once per indexer. Piri itself reads only the head and the two maps, while publishing.
 
-- **Postgres** holds the head and the per-context maps. These are small, change on every publish, and need compare-and-swap. They can share a transaction with the advert queue.
-- **The blob store** (flatfs on a local volume, or S3-compatible object storage) holds the adverts and entry chunks. These are immutable, content-addressed and written once, and the blob store is already sized for the node's data.
+### Where each record goes
 
-A publish writes its blocks to the blob store first, then moves the head in Postgres. A failure between the two leaves unreferenced blocks, which do no harm because nothing links to them. Indexers keep fetching blocks through the existing `/ipni/v1/ad/` endpoint.
+- **The head** is one row in Postgres, updated with compare-and-swap.
+- **The two maps** move unchanged into one Postgres table, `ipni_contexts(context_id, chunk_link, metadata)`, behind go-ipni-tools' existing table interface. Publishing behaves as it does today: an unchanged context is skipped, a new claim for the same context publishes a metadata update, and a release deletes nothing. The table takes about 21–23 GB at 100.7M blobs. Each node has its own database, so the table does not store the provider peer ID.
+- **Adverts** go to the blob store, one object per advert keyed by its CID: `ipni/<cid>` in the S3 bucket, or a separate flatfs directory `data_dir/ipni` on a local volume. 100.7M objects of ~590 B add under 1 TB of raw disk even with a 4 KiB allocation unit and erasure-coding overhead, against 12 PiB of blobs.
+- **Entries chunks are not stored.** The advert links to its entries chunk with an identity CID, which carries the 46-byte chunk inside the 50-byte CID. The link costs 55 bytes inside the advert instead of 41. storetheindex still requests the chunk by CID; Piri answers by decoding the CID, and the indexer's hash check passes. Nothing in go-libipni or storetheindex rejects an identity link. The cid.contact CAR mirror skips identity blocks and falls back to fetching from Piri.
 
-The schema and blob-store layout belong to the implementation ([FIL-1577](https://linear.app/filecoin-foundation/issue/FIL-1577)).
+### Publishing a batch
 
-No development or staging node has published to IPNI, so the move needs no migration. Nodes start with an empty chain.
+The publish task takes up to 1,000 queued rows and publishes them in one Postgres transaction:
+
+1. Read the maps for every context ID in the batch with one query.
+2. Build and sign the adverts.
+3. Write the adverts to the blob store in parallel.
+4. Write the map changes with one batched upsert, move the head with compare-and-swap, and retire the queue rows.
+5. Commit. Announce the new head to IPNI after the commit.
+
+If any step fails, the transaction rolls back, the head stays where it was and the queue rows are published again later. Adverts already written to the blob store are unreferenced and harmless. Announcing after the commit means an indexer never hears about a head whose adverts are missing or that a rollback discarded.
+
+go-ipni-tools gains batch read and write interfaces for the maps and blocks, so a batch costs a fixed number of SQL statements instead of about four per blob.
+
+### Backups and restore
+
+Only Postgres is backed up; the blob store, sized at petabytes, is not. After a restore, Postgres is the older side. Every head and map row in it was committed after its adverts were written, so each points at objects that still exist. Adverts written after the backup are unreferenced. The restored queue rows publish again on top of the restored head, and indexers keep what they already ingested.
+
+A blob store that loses data also loses the blobs it holds, so that case is a disaster recovery for the whole node rather than for the chain.
+
+### Upgrade
+
+No development or staging node announces to an IPNI node, so the move needs no migration. Nodes start with an empty chain, and operators can delete `data_dir/publisher`. Blobs accepted before the upgrade reach the new chain when Piri gains a backfill.
 
 ## Alternatives Considered
 
@@ -96,7 +121,12 @@ No development or staging node has published to IPNI, so the move needs no migra
 - **A table with one row per piece.** Normalized, but it repeats the key that `pdp_blob_pipeline` already holds.
 - **Import LevelDB aggregates at startup.** It preserves in-flight work but keeps LevelDB code for one more release. No node holds data that needs it.
 - **Read from Postgres, fall back to LevelDB for one release.** The same cost as an import, spread across the runtime path.
-- **The whole publisher store in Postgres.** One backend, and every write can share a transaction. The table grows by roughly 1–2 KB per published blob for as long as the chain is never trimmed, so Postgres would carry data the blob store is better sized for.
+- **The whole publisher store in Postgres.** One backend, and every write can share a transaction. It adds about 110 GB to Postgres at 100.7M blobs for as long as the chain is never trimmed.
+- **Entries chunks as blob-store objects.** A second object of 46 bytes per blob, which on self-hosted S3 or flatfs occupies a whole allocation unit or file.
+- **Pack each publish batch into one object**, with a Postgres index from CID to object, offset and length. It cuts the object count by up to 1,000 times but adds about 15 GB of index, a range-read path and a cache.
+- **Render adverts on request**, as Curio does, from a row per advert. It still needs about 20 GB of rows, and any change in encoding or addresses would change the CIDs indexers already hold.
+- **Record "advertised" as a flag on `ucan_acceptances`.** About one byte per blob instead of `ipni_contexts`, but it changes what happens on release and re-accept. A later migration can derive it from `ipni_contexts`.
+- **One advert for many blobs.** It would save about 590 bytes per blob, but an advert carries one metadata value for all its entries, and Piri's metadata is the per-blob claim. It needs a batch claim type, a new metadata codec and indexing-service changes.
 - **Keep the publisher store in LevelDB.** Backups would still need a consistent snapshot of LevelDB and Postgres together.
 
 ## Open Questions
