@@ -16,7 +16,7 @@ node misbehaves.
 Three Piri stores still live in LevelDB under `data_dir`:
 
 - PDP aggregates; this RFC moves this store into Postgres.
-- The IPNI publisher store; this RFC split it: metadata goes into Postgres and advertisement blocks go into the blob store.
+- The IPNI publisher store; this RFC splits it: metadata goes into Postgres and advertisement blocks go into the blob store.
 - The wallet keystore stays an open question.
 
 ## Background
