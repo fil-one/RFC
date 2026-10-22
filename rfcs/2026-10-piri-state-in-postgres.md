@@ -1,4 +1,4 @@
-# RFC: Keep Piri's State in Postgres
+# RFC: Keep Piri's State in Postgres and Blob Store
 
 **Status:** Proposal
 
