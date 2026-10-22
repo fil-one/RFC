@@ -162,7 +162,10 @@ reads only the head and the two maps, while publishing.
   `ipni_contexts(context_id, chunk_link, metadata)`, behind go-ipni-tools'
   existing table interface. Publishing behaves as it does today: an unchanged
   context is skipped, a new claim for the same context publishes a metadata
-  update, and a release deletes nothing. The table takes about 21–23 GB at
+  update, and a release publishes no removal advert and leaves both maps in
+  place. A blob accepted again after a release keeps its entries at the
+  indexer, and the metadata update points them at the new claim. The table
+  takes about 21–23 GB at
   100.7M blobs. Each node has its own database, so the table does not store the
   provider peer ID.
 - **Adverts** go to the blob store, one object per advert keyed by its CID:
