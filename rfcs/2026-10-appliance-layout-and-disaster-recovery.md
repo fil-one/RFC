@@ -201,7 +201,8 @@ Recovery:
 - Piri commits Postgres rows referencing blobs only after the blobs were written
   to the flatfs volume or S3 storage, there is no inconsistency after recovery.
   (This requires [FIL-1611 Sync flatfs writes before Postgres commits rows that reference them](https://linear.app/filecoin-foundation/issue/FIL-1611).
-- Piri deletes blobs before marking them as deleted in Postgres. After restore, we may end up with orphaned blobs left behind. Fixing this is a future work.
+- Piri deletes blobs before marking them as deleted in Postgres. After restore,
+  we may end up with orphaned blobs left behind. Fixing this is future work.
 
 ### Disk full
 
