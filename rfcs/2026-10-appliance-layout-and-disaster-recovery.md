@@ -446,9 +446,44 @@ Not backed up. Telemetry not yet written to Grafana Cloud is lost.
 - [FIL-1166](https://linear.app/filecoin-foundation/issue/FIL-1166): OpenBao
   snapshots and the control-state restore drill.
 
-- [FIL-1619](https://linear.app/filecoin-foundation/issue/FIL-1619]): a key pair
+- [FIL-1619](https://linear.app/filecoin-foundation/issue/FIL-1619): a key pair
   per region for encrypting backups, with the private key in central OpenBao
   behind a restore-only policy.
+
+- (FIL ticket TBD): the blob undo window, with a snapshot-capable filesystem on
+  the storage array and bucket versioning with noncurrent-version expiry on S3.
+  A candidate for the S3 part is
+  [FIL-1403](https://linear.app/filecoin-foundation/issue/FIL-1403) "Stand up
+  the destination appliance".
+
+- (FIL ticket TBD): fast-pool filesystems or ZFS datasets with the quotas from
+  the layout table. A candidate is
+  [FIL-1343](https://linear.app/filecoin-foundation/issue/FIL-1343) "Configure
+  the Spain hardware".
+
+- [FIL-1166](https://linear.app/filecoin-foundation/issue/FIL-1166) and
+  [FIL-1599](https://linear.app/filecoin-foundation/issue/FIL-1599): the backup
+  target, provisioned with Object Lock in compliance mode or an account that
+  cannot delete.
+
+- (FIL ticket TBD): a copy of the OpenBao root token and recovery key in
+  central OpenBao's KV store.
+
+- [FIL-492](https://linear.app/filecoin-foundation/issue/FIL-492): a tool that
+  rewraps every CEK after a region KEK rotation.
+
+- [FIL-1183](https://linear.app/filecoin-foundation/issue/FIL-1183): no secrets
+  rendered into a tmpfs, so Piri and Ingot start after a reboot without a manual
+  `deploy-apps.sh`.
+
+- [FIL-1446](https://linear.app/filecoin-foundation/issue/FIL-1446): durable or
+  fetchable ship authority, so Ingot ships idle buckets' segments after a
+  restart.
+
+- [FIL-1622](https://linear.app/filecoin-foundation/issue/FIL-1622): services
+  refuse to start on an unmounted volume.
+
+- (FIL ticket TBD): RAID, ZFS and SMART health metrics with alerts.
 
 Higher-level tickets covering some of the above:
 
@@ -562,6 +597,11 @@ _This section was written by Claude. I am sorry. 🙈_
   us out, but every admin task would need a quorum or central. We keep the root
   token and recovery key in two vaults and never give them to the region
   operator.
+- **Encrypting the root token and recovery key to a PGP key at init**, with
+  `bao operator init -root-token-pgp-key=… -recovery-pgp-keys=…`, so they never
+  appear in plain text on the appliance host. Our staff run provisioning over
+  SSH, so both values reach only the operator's own terminal and nothing stores
+  them on the node.
 - **Backing up the seal token and the deploy token.** A rebuild on the same IP
   address would be faster, but the backups would then hold a credential that
   unseals the appliance.
