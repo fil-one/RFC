@@ -42,10 +42,15 @@ We must never lose:
    state means losing the link between blobs and PDP Pieces. As a result, Piri
    stops proving data possession and FWSS stops payouts for the storage service.
 
-3. OpenBao's raft storage. It holds the Piri and Ingot identity keys, the
-   Piri owner wallet keys, the Postgres passwords and the region key encryption
-   key (KEK). Losing OpenBao makes every wrapped CEK in Postgres unusable,
-   because the KEK is not exportable.
+3. OpenBao's raft storage. It holds the Piri and Ingot identity keys, the sprue
+   and hilt delegations, the Piri owner wallet keys, the Postgres passwords, the
+   chain RPC and Grafana push tokens, and the region key encryption key (KEK).
+   Losing OpenBao makes every wrapped CEK in Postgres unusable, because the KEK
+   is not exportable.
+
+   Piri does not talk to OpenBao, and Ingot only wraps and unwraps CEKs using
+   the KEK, which writes nothing. Secrets stored in the appliance OpenBao change
+   only when an operator runs a provisioning script or rotates a value.
 
 Note: The OpenBao root token and recovery key live off the appliance, in
 FilOne's 1Password and in central OpenBao's KV store.
@@ -369,8 +374,8 @@ the wallet keys:
 
 ### OpenBao
 
-- We take a raft snapshot daily and after every provisioning run, encrypt it
-  with the backup public key, and push it to the backup target.
+- We take a raft snapshot daily and after any script that writes to OpenBao,
+  encrypt it with the backup public key, and push it to the backup target.
 
 - Restoring a snapshot needs central: the snapshot is sealed with central's
   transit key, and the restored node needs a new seal token minted at central.
