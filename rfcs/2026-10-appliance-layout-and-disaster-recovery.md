@@ -30,7 +30,9 @@ We must never lose:
    - Content of S3 objects stored by customers
    - Piri's IPNI advertisements
 
-   Each blob is the only copy, we don't replicate blobs at the Piri storage layer.
+   Each blob is the only copy, we don't replicate blobs at the Piri storage
+   layer. We potentially may have an Ingot cache copy, but it's a cache that's
+   not guaranteed to exist or stay around.
 
 2. The Postgres database cluster, which holds Ingot's database and one database per Piri instance.
 
