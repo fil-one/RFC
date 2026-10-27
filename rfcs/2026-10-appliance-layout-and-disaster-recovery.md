@@ -38,6 +38,11 @@ We must never lose:
    encrypted blob in Postgres. Losing a row makes the blob unreadable through the
    region; only the tenant recipient in the encryption envelope remains.
 
+   Notably, losing this does not make the blobs permanently lost. It is,
+   however, extremely inconvenient. We can recover CEKs from the tenant
+   keys, but we haven't implemented it yet, so the recovery would be a manual,
+   slow process. We really don't want it to happen.
+
    Piri stores most of blob metadata and PDP pipeline state in Postgres. Losing
    state means losing the link between blobs and PDP Pieces. As a result, Piri
    stops proving data possession and FWSS stops payouts for the storage service.
