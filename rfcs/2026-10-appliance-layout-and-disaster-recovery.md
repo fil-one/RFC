@@ -53,7 +53,8 @@ We must never lose:
    and hilt delegations, the Piri owner wallet keys, the Postgres passwords, the
    chain RPC and Grafana push tokens, and the region key encryption key (KEK).
    Losing OpenBao makes every wrapped CEK in Postgres unusable, because the KEK
-   is not exportable.
+   is not exportable. (However, losing wrapped CEKs does not make the blobs
+   permanently lost, as discussed above.)
 
    Piri does not talk to OpenBao, and Ingot only wraps and unwraps CEKs using
    the KEK, which writes nothing. Secrets stored in the appliance OpenBao change
