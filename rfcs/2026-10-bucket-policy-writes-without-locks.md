@@ -79,12 +79,14 @@ leaves everything in place and the call retryable.
   succeeds, since Swarf verifies revocations against that DID.
 
 Authorize and `/s3/bucket/info` read without share locks. Bucket info reads a
-key's effective actions and its delegations in one read-only `REPEATABLE READ`
-transaction instead of its re-read check. A policy write commits the document
-and the delegations together, so the snapshot sees both from before the write
-or both from after it. Without it, several S3 actions sharing one Forge
-command would let bucket info pair an action the write removed with a chain
-from the new policy, which the write's revocation never names.
+key's delegations and builds their chains before it reads the policy, in place
+of its re-read check. A write revokes the delegations it replaces before it
+writes and commits the policy with the new ones, so the policy read last is
+never older than the chains: it is either the policy they came from or a newer
+one whose write already revoked them. Reading the policy first could pair an
+action a later write removed with a chain that write stored, which its
+revocation never names; several S3 actions share one Forge command, so the
+gateway would serve the removed action from that pair until midnight.
 
 ### Policy operations and failures
 
