@@ -24,7 +24,7 @@ This RFC amends [Forge S3 tenant IAM](./2026-09-forge-s3-tenant-iam.md) and the
 
 ### Consistency rule
 
-The last committed write wins, and no write waits for another. Each write is
+The last committed write wins, and no write waits on Swarf. Each write is
 one transaction: read the stored document and the affected keys' delegations,
 publish their revocations, write the new delegations and the document, commit.
 A failure at any step, a failed publish included, rolls back and leaves the old
@@ -41,11 +41,26 @@ extra set grants nothing there. A warm Ingot cache filled between the two
 commits can keep the other write's access until the next UTC midnight, because
 one of the sets is never revoked.
 
+A key created for a principal while a write naming that principal is in flight
+can miss the write's rotation: the write lists the principal's keys before the
+key exists, and the key's creation issues its delegations from the policy it
+read before the write committed. After a widening, the new action fails at the
+gateway until the next write to that bucket's policy rotates the key. After a
+narrowing, a cache filled from the key before the commit keeps the old access
+until the next UTC midnight.
+
+Writes to the same rows still wait for each other's commit, which Postgres
+enforces. Hilt sets `lock_timeout` and `idle_in_transaction_session_timeout`
+on its connections, so a stalled transaction ends in an error instead of
+holding other writes indefinitely. Each write uses one connection: reads inside
+its transaction run on that transaction's connection.
+
 ### Revocations before the first write
 
 The publish runs after the transaction's reads and before its first row write.
 Postgres holds a row a transaction has written until it commits, so with no row
-written yet, no other write waits on Swarf. The cost is one open, idle
+written yet, no other write waits on Swarf. Rows written after the publish are
+held for the milliseconds until the commit. The cost is one open, idle
 connection per write for a Swarf round trip. A 204 still means Swarf accepted
 the revocations. A commit that fails after the publish leaves revoked
 delegations stored, which Ingot's revoked-CID cache already covers: it serves
@@ -57,14 +72,19 @@ Access key deletion, principal removal, bucket deletion and tenant removal take
 the same order without locks: read, publish, delete, commit. A failed publish
 leaves everything in place and the call retryable.
 
-- An access key created for a principal during its removal survives it. Hilt
-  refuses the key while the principal is removed, and a later `PUT` that
-  revives the principal's id brings the key back.
+- A principal's keys stop authenticating while it is removed. An access key
+  created during its removal survives it, and a later `PUT` that revives the
+  principal's id brings back that key and any statement still naming it.
 - Tenant removal deactivates the tenant's `did:plc` only after its publish
   succeeds, since Swarf verifies revocations against that DID.
 
-Authorize and `/s3/bucket/info` read without share locks, and bucket info
-drops its re-read check.
+Authorize and `/s3/bucket/info` read without share locks. Bucket info reads a
+key's effective actions and its delegations in one read-only `REPEATABLE READ`
+transaction instead of its re-read check. A policy write commits the document
+and the delegations together, so the snapshot sees both from before the write
+or both from after it. Without it, several S3 actions sharing one Forge
+command would let bucket info pair an action the write removed with a chain
+from the new policy, which the write's revocation never names.
 
 ### Policy operations and failures
 
