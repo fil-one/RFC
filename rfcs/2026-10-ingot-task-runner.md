@@ -74,9 +74,22 @@ A task that touches one instance's local state is placed there with `Node`, and 
 
 ### The runner guarantees
 
-1. **One consumer per subject.** At most one task per (queue, subject) runs at a time. Among a subject's tasks that are due (no `NotBefore`, or one that has passed), the oldest by `Created` runs first. A task waiting on its `NotBefore` never holds up the tasks behind it. A sync child is the exception: it runs as soon as it has its subject's lease, without waiting for older due tasks there, because running another tree while its parent holds leases could deadlock. The handlers' own checks keep that safe. Exclusivity is a lease row per (queue, subject) in Postgres (owner, expiry, renewed while running), so it holds across processes.
-2. **Effects and spawns commit together.** A task's Postgres writes, its result, its completion, the rows of the tasks it spawns and its sync children's writes all commit in one transaction. A task and its sync children succeed or fail together, so a resumed task re-runs its children from scratch. The transaction opens only after every handler in the tree has run, so none stays open across a network call. Until then, handlers add their writes to an ordered list, which runs in that transaction in the order the handlers ran; a write that only makes sense if an earlier one held (claiming a reference, say) is a conditional statement, and one that affects no rows fails the whole tree. Every subject in the tree stays leased until the commit, so reads made before it are safe. A top-level task's row commits when the task is submitted, before it runs, so a crash while it runs leaves a task to resume. A sync child's row commits with its parent. If the final transaction itself fails, the task is not marked failed: it stays as submitted and is resumed when its lease expires, as after a crash. Only an error a handler returns marks a task failed.
-3. **Sync children run inline.** A sync child runs in its parent's goroutine once its subject's lease is taken. It does not wait for a worker. A sync task submitted by an S3 handler runs in the handler's goroutine the same way. Worker pools only run async tasks and tasks taken over after a lease expiry.
+1. **One consumer per subject.** At most one task per (queue, subject) runs at a time.
+    * A lease row per (queue, subject) in Postgres enforces it, so it holds across processes. The lease records its owner and expiry, and is renewed while the task runs.
+    * A subject's due tasks run oldest first. A task is due when it has no `NotBefore` or its `NotBefore` has passed, so a delayed task never holds up the ones behind it.
+    * A sync child runs as soon as it has its subject's lease, without waiting for older due tasks there. Running another tree while its parent holds leases could deadlock. The handlers' own checks keep this safe.
+2. **Effects and spawns commit together.** A task's Postgres writes, its result, its completion, the rows of the tasks it spawns and its sync children's writes all commit in one transaction.
+    * Handlers add their writes to an ordered list. The transaction opens only after every handler in the tree has run, and runs the list in the order the handlers ran it, so no transaction stays open across a network call.
+    * A write that only makes sense if an earlier read still holds (claiming a reference, say) is conditional. One that affects no rows fails the commit.
+    * Every subject in the tree stays leased until the commit, so reads made before it are safe.
+    * A task and its sync children succeed or fail together. A task that runs again re-runs its children from scratch.
+    * A top-level task's row commits when it is submitted, before it runs, so a crash leaves it to resume once its lease expires. A sync child's row commits with its parent.
+    * A failed commit does not mark the task failed. A sync task's caller keeps retrying it until it commits, its handler fails or its `Expires` passes, which defaults to the caller's deadline, so the caller always learns the outcome and an abandoned task never lands later. An async task is left to resume when its lease expires, as after a crash.
+    * Only an error a handler returns marks a task failed.
+3. **Sync children run inline.**
+    * A sync child runs in its parent's goroutine once its subject's lease is taken, without waiting for a worker.
+    * A sync task submitted by an S3 handler runs in the handler's goroutine the same way.
+    * Worker pools run only async tasks, and tasks taken over after a lease expiry.
 
 ### Handlers must
 
@@ -84,7 +97,7 @@ A task that touches one instance's local state is placed there with `Node`, and 
 5. **Sync-spawn only down the queue order, never up or across.** A task may sync-spawn only into a queue below its own in the order below. A task never sync-spawns onto a subject of its own queue. Async spawns may go anywhere.
 6. **Not recurse.** No action spawns, directly or through children, a task with its own action. The runner refuses such a spawn within a tree; an async task that later spawns its own action is not caught.
 7. **Not read their own tree's writes.** A tree's writes reach Postgres only when it commits ([rule 2](#the-runner-guarantees)), so a handler decides from what it read before the tree wrote anything and from its children's results, and never re-reads a row the tree has written. The runner cannot detect a breach, which shows up as a stale read, so a test helper runs each tree twice, once with writes held to the end and once with them applied straight away, and checks both give the same result.
-8. **Fail before acting.** A handler makes its checks, and returns any error it is going to return, before its first effect outside Postgres. After that, it fails only for an error a retry could never get past, such as an expired proof. A task then either fails having changed nothing outside Postgres or ends up committed, since a failed commit is resumed ([rule 2](#the-runner-guarantees)).
+8. **Fail before acting.** A handler makes its checks, and returns any error it is going to return, before its first effect outside Postgres. After that, it fails only for an error a retry could never get past, such as an expired proof. A task then either fails having changed nothing outside Postgres or ends up committed, since a failed commit is retried ([rule 2](#the-runner-guarantees)). The one exception is a sync task whose commit keeps failing until its deadline: it expires, and any effect it already made outside Postgres stays, so it must be one that is safe to leave behind, such as an upload the provider expires on its own.
 
 Queue order (sync spawns only go down):
 
