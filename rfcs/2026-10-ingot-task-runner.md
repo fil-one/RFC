@@ -64,7 +64,7 @@ A handler can be registered as batching, with a limit. One execution then takes 
 
 ### Retries
 
-An action registers with a retry policy for when it runs async: a backoff (first delay, maximum delay, multiplier) and an optional attempt limit. A sync task is never retried: it fails its caller, and the S3 client retries the request. A handler can mark an error as permanent (an abort refused because the blob was accepted, an expired proof) to stop the retries. A task that fails permanently or runs out of attempts is recorded as failed and logged, and monitoring shows it by queue and action.
+An action registers with a retry policy for when it runs async: a backoff (first delay, maximum delay, multiplier) and an optional attempt limit. A sync task is never retried: it fails its caller, and the S3 client retries the request. A handler can mark an error as permanent (an abort refused because the blob was accepted, an expired proof) to stop the retries. A task that fails permanently or runs out of attempts is recorded as failed and logged, and monitoring shows it by queue and action. By default the due tasks behind a task waiting to retry run during its backoff. A policy can hold the subject instead, so the tasks behind wait for the retry and the subject's order survives a failure. That holds up the subject's sync tasks too, so only actions whose order matters more than that use it. A task waiting to retry can still be cancelled, since its failed attempt changed nothing outside Postgres ([rule 8](#handlers-must)).
 
 ### Placement
 
@@ -611,7 +611,7 @@ type AddResult = Unit
 
 Spawns: NONE
 
-Retries: no attempt limit, backing off from 1 second, doubling, up to 5 minutes. Dropping it would leave the space's object count wrong.
+Retries: no attempt limit, backing off from 1 second, doubling, up to 5 minutes, holding the space so an add and a remove of one root keep their order. Dropping it would leave the space's object count wrong.
 
 #### `queue-space-upload.remove`
 
@@ -628,7 +628,7 @@ type RemoveResult = Unit
 
 Spawns: NONE
 
-Retries: no attempt limit, backing off from 1 second, doubling, up to 5 minutes. Dropping it would leave the space's object count wrong.
+Retries: no attempt limit, backing off from 1 second, doubling, up to 5 minutes, holding the space so an add and a remove of one root keep their order. Dropping it would leave the space's object count wrong.
 
 ### Space Shard Queue (`queue-space-shard`)
 
