@@ -62,9 +62,20 @@ We must never lose:
    keys, but we haven't implemented it yet, so the recovery would be a manual,
    slow process. We really don't want it to happen.
 
+   Additionally, Ingot stores the following data which we cannot afford to lose:
+   - all bucket configuration: versioning, tenant, Object Lock, tagging,
+     encryption, CORS
+   - each bucket's current catalog root
+   - the only map from a blob digest to the Piri instance that stores it (until
+     we add IPNI & indexer)
+   - the claim ledger used for deletion
+   - multipart uploads in progress, whose parts are already on Piri
+   - the `upload_registrations` outbox to Sprue
+
    Piri stores most of blob metadata and PDP pipeline state in Postgres. Losing
    state means losing the link between blobs and PDP Pieces. As a result, Piri
    stops proving data possession and FWSS stops payouts for the storage service.
+   Losing the index of staged blobs makes these blobs immediately inaccessible.
 
 2. OpenBao's raft storage. It holds the Piri and Ingot identity keys, the sprue
    and hilt delegations, the Piri owner wallet keys, the Postgres passwords, the
