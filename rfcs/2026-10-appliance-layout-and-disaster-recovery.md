@@ -21,20 +21,37 @@ Prior work:
 - [Fil One Object Encryption](./2026-06-fil-one-encryption-design.md)
 - [Keep Piri's State in Postgres and Blob Store](./2026-10-piri-state-in-postgres.md)
 
-## Persisted state
+## Persisted State
+
+### Blob store
+
+In the current design (Q4/2026 to Q2/2027), we require the Blob Store to be
+resilient and erasure coded, and assume the blobs will not be lost. Each blob is
+the only copy from Forge's point of view. Blobs of S3 objects may have a copy in
+Ingot cache, but that's a cache such copies are not guaranteed to exist or stay
+around.
+
+Blob payloads contain:
+
+- Content of S3 objects stored by customers
+- Piri's IPNI advertisements
+
+In 2027, we want to relax the durability requirement on blob store and allow
+blobs to be occasionally lost without affecting the durability of customer data.
+For anything that we want to write to the blob store and that must be never
+lost, we must erasure code it and replicate it across Piri nodes, before the
+blob reaches Piri.
+
+Anywhere we'd rather avoid this complexity we should put data in the database.
+
+In particular, Piri's IPNI advertisements should be built on-demand by the HTTP
+request handler, using fragments of data stored in the Postgres database.
+
+### Control Plane
 
 We must never lose:
 
-1. Blob payloads, which contain:
-
-   - Content of S3 objects stored by customers
-   - Piri's IPNI advertisements
-
-   Each blob is the only copy, we don't replicate blobs at the Piri storage
-   layer. Blobs of S3 objects may have a copy in Ingot cache, but that's a cache
-   - such copies are not guaranteed to exist or stay around.
-
-2. The Postgres database cluster, which holds Ingot's database and one database per Piri instance.
+1. The Postgres database cluster, which holds Ingot's database and one database per Piri instance.
 
    Ingot stores the region-wrapped content encryption key (CEK) of every
    encrypted blob in Postgres. Losing a row makes the blob unreadable through the
@@ -49,7 +66,7 @@ We must never lose:
    state means losing the link between blobs and PDP Pieces. As a result, Piri
    stops proving data possession and FWSS stops payouts for the storage service.
 
-3. OpenBao's raft storage. It holds the Piri and Ingot identity keys, the sprue
+2. OpenBao's raft storage. It holds the Piri and Ingot identity keys, the sprue
    and hilt delegations, the Piri owner wallet keys, the Postgres passwords, the
    chain RPC and Grafana push tokens, and the region key encryption key (KEK).
    Losing OpenBao makes every wrapped CEK in Postgres unusable, because the KEK
@@ -62,6 +79,8 @@ We must never lose:
 
 Note: The OpenBao root token and recovery key live off the appliance, in
 FilOne's 1Password and in central OpenBao's KV store.
+
+### Loss-tolerant Data
 
 We can afford to lose the following data:
 
@@ -480,15 +499,14 @@ Not backed up. Telemetry not yet written to Grafana Cloud is lost.
   target, provisioned with Object Lock in compliance mode or an account that
   cannot delete.
 
-- (FIL ticket TBD): a copy of the OpenBao root token and recovery key in
+- [FIL-1678](https://linear.app/filecoin-foundation/issue/FIL-1678): a copy of the OpenBao root token and recovery key in
   central OpenBao's KV store.
 
 - [FIL-492](https://linear.app/filecoin-foundation/issue/FIL-492): a tool that
   rewraps every CEK after a region KEK rotation.
 
-- [FIL-1183](https://linear.app/filecoin-foundation/issue/FIL-1183): no secrets
-  rendered into a tmpfs, so Piri and Ingot start after a reboot without a manual
-  `deploy-apps.sh`.
+- [FIL-1677](https://linear.app/filecoin-foundation/issue/FIL-1677) Piri and
+  Ingot must start after a host reboot with no manual intervention needed
 
 - [FIL-1446](https://linear.app/filecoin-foundation/issue/FIL-1446): durable or
   fetchable ship authority, so Ingot ships idle buckets' segments after a
