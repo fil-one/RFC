@@ -160,10 +160,10 @@ Examples:
   in Postgres in a non-reversible way.
 
 - We ship a change in infra-nodes infrastructure configuration or management
-  scripts that accidentally delete directories (Postgres data, OpenBao secrets,
+  scripts that accidentally delete disk data (Postgres data, OpenBao secrets,
   Ingot segments).
 
-A mistake that deletes a directory is recoverable:
+A mistake that deletes disk data is recoverable:
 
 - Postgres is recovered from the standby instance.
 - OpenBao comes back from its snapshot.
