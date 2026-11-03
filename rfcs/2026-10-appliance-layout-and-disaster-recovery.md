@@ -89,7 +89,7 @@ We must never lose:
    only when an operator runs a provisioning script or rotates a value.
 
 Note: The OpenBao root token and recovery key live off the appliance, in
-FilOne's 1Password and in central OpenBao's KV store.
+FilOne's 1Password.
 
 ### Loss-tolerant Data
 
