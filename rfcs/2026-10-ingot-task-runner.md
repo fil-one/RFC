@@ -648,7 +648,7 @@ Actions:
 
 Adds a streamed shard to the space and takes a pending reference. With `Accept: true` (PutObject), it sends `/ucan/conclude` with the `/http/put` receipt, which triggers `/blob/accept`, and records the location. With `Accept: false` (UploadPart), it only records the shard as parked (with the provider, not yet accepted), and `queue-multipart-upload-shard.accept` concludes it later in a batch. For a within-space copy, which uploads nothing, it only takes the reference.
 
-If a `queue-space-shard.release` of the same space and digest removed the blob after this upload's `Started` time, the add fails before it concludes anything ([rule 8](#handlers-must)), and so does the write; the release records when it removed the blob. This only happens without encryption: identical bytes then share a digest, the provider keeps one blob per digest in a space, and the upload cannot take its reference until the body has streamed and the digest is known. The client's retry then uploads normally.
+A `queue-space-shard.release` of the same space and digest cannot leave the upload without its blob. The body streams into an allocation of its own, which the release does not touch, and the add runs under the same lease as the release. So the add either finds the blob still there and takes a reference that keeps it, or finds it removed and concludes its own allocation in its place. That relies on the protocol's guarantee that a space can take a digest again once a `/blob/remove` of it has a receipt.
 
 `queue-space-shard.add` is the durable step of an upload. Before it, nothing records the allocation: a stream that fails while Ingot runs aborts its allocation inline, and one abandoned by a crash is never concluded, so the provider expires it.
 
@@ -657,7 +657,6 @@ type AddTask struct {
   Task
   Space    did.DID
   Digest   multihash.Multihash
-  Started  time.Time // when the upload's allocation was made; zero for a within-space copy
   Path     string    // temporary file to cache once accepted; empty with the cache off, for a part or a copy
   Accept   bool      // accept now (PutObject) or leave parked (UploadPart)
   Deadline time.Time // when the reference expires unless claimed: 24 hours after the add
@@ -725,7 +724,7 @@ Retries: no attempt limit, backing off from 1 second, doubling, up to 5 minutes.
 
 #### `queue-space-shard.release`
 
-Removes the blob from the space on the network: `/blob/abort` if it was parked and never accepted, `/blob/remove` if it was accepted. If a `queue-multipart-upload-shard.accept` races it, the provider decides: a released allocation refuses the accept, and an accepted blob refuses the abort, so the release removes it instead. It then deletes the blob's encryption params (crypto-shred) and location rows, records when it removed the blob (see `queue-space-shard.add`), and evicts the cached copy.
+Removes the blob from the space on the network: `/blob/abort` if it was parked and never accepted, `/blob/remove` if it was accepted. If a `queue-multipart-upload-shard.accept` races it, the provider decides: a released allocation refuses the accept, and an accepted blob refuses the abort, so the release removes it instead. It then deletes the blob's encryption params (crypto-shred) and location rows, and evicts the cached copy.
 
 It does nothing if the space's references are above zero (a write reused the blob, so no cancellation is needed) or the space no longer holds the blob (a `queue-bucket.delete` got there first, or this is a re-run).
 
