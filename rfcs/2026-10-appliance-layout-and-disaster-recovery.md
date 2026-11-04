@@ -217,6 +217,9 @@ corrupted state, we create a scratch cluster, load it with data at an earlier
 moment using point-in-time recovery, inspect the damage and create deltas to
 apply on the production cluster.
 
+We need to keep blobs through the PITR window length, in case we want to roll
+back a deletion.
+
 This scenario will have no automated recovery until we implement [FIL-1591
 Restore one bucket's catalog after a bug corrupts
 it](https://linear.app/filecoin-foundation/issue/FIL-1591).
