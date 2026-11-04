@@ -124,7 +124,11 @@ We can afford to lose the following data:
 
 - Ingot's `cache` files.
 
-  When lost, we re-fetch the content from Piri.
+  When lost, Ingot serve read requests by fetching the content from Piri.
+
+  Note: At the moment, Ingot puts blobs in the cache only on the write path, and
+  the read path never fills the cache. That's an performance optimisation we
+  eventually need to implement.
 
 - Ingot's `segments` files.
 
