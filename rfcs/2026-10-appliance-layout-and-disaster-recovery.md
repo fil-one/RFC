@@ -397,6 +397,8 @@ We need another machine to run the synchronous Postgres standby instance.
 It needs disk that's large enough to hold the whole Postgres cluster, but ZFS
 and filesystem snapshots are not required.
 
+This second machine can potentially run at a different site, or even in AWS.
+
 ## Backup & restore
 
 ### Backup target
