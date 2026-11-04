@@ -21,31 +21,52 @@ Prior work:
 - [Fil One Object Encryption](./2026-06-fil-one-encryption-design.md)
 - [Keep Piri's State in Postgres and Blob Store](./2026-10-piri-state-in-postgres.md)
 
+## Scope
+
+This RFC is proposing the storage layout that will work for the deployment
+topology we are considering for the next 3-9 months:
+
+The Blob Store is either a remote S3-compatible block storage or a custom
+deployment using ZFS volumes to attach disk arrays to the appliance host.
+
+We require the Blob Store to be resilient and store data redundantly (e.g.
+erasure coded), and assume the blobs will not be lost. Each blob is the only
+copy from Forge's point of view. Blobs of S3 objects may have a copy in Ingot
+cache, but that's a cache such copies are not guaranteed to exist or stay
+around.
+
+All appliance services (Piri, Ingot) are running on the same machine and share
+the same Postgres instance.
+
+We have access to the private keys of wallets receiving payments for storage
+services and keep them in appliance's OpenBao.
+
+### Future Direction (Out of Scope)
+
+In 2027, we want to relax the durability requirement on blob store and allow
+blobs to be occasionally lost without affecting the durability of customer data.
+Anything written to the blob store will be erasure coded first and replicated
+across Piri nodes.
+
+Anywhere we would rather avoid that complexity, we would need to put data in the
+database. In particular, we should rework Piri to build IPNI advertisements
+on-demand by the HTTP request handler, using fragments of data stored in the
+database.
+
+Each Piri will has its own database server running alongside it, potentially
+just a local SQLite. Piri nodes will live next to the disk(s) they write to, and
+they may be managed by the regional provider.
+
 ## Persisted State
 
 ### Blob store
-
-In the current design (Q4/2026 to Q2/2027), we require the Blob Store to be
-resilient and erasure coded, and assume the blobs will not be lost. Each blob is
-the only copy from Forge's point of view. Blobs of S3 objects may have a copy in
-Ingot cache, but that's a cache such copies are not guaranteed to exist or stay
-around.
 
 Blob payloads contain:
 
 - Content of S3 objects stored by customers
 - Piri's IPNI advertisements
 
-In 2027, we want to relax the durability requirement on blob store and allow
-blobs to be occasionally lost without affecting the durability of customer data.
-For anything that we want to write to the blob store and that must be never
-lost, we must erasure code it and replicate it across Piri nodes, before the
-blob reaches Piri.
-
-Anywhere we'd rather avoid this complexity we should put data in the database.
-
-In particular, Piri's IPNI advertisements should be built on-demand by the HTTP
-request handler, using fragments of data stored in the Postgres database.
+In the current scope, we assume the blobs will not be lost.
 
 ### Control Plane
 
