@@ -41,7 +41,7 @@ the same Postgres instance.
 We have access to the private keys of wallets receiving payments for storage
 services and keep them in appliance's OpenBao.
 
-### Future Direction (Out of Scope)
+### Future direction (out of scope)
 
 In 2027, we want to relax the durability requirement on blob store and allow
 blobs to be occasionally lost without affecting the durability of customer data.
@@ -329,9 +329,8 @@ loss, run on purpose, and it doubles as the restore drill.
 In the extreme case, the entire datacenter is destroyed and we lose all data
 stored in that location.
 
-I am arguing this scenario is out of the scope of our appliance disaster
-recovery, it must be addressed at a higher level, e.g. by replicating data
-across multiple location.
+This is out of the scope of this RFC, see [Future
+direction](#future-direction-out-of-scope) above.
 
 ## Proposed storage layout
 
