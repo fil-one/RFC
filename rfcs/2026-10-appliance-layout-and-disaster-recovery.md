@@ -304,11 +304,14 @@ The layout is configurable. At the moment, we use the following setups:
 - One EBS volume for all control-plane data, shared by Postgres, OpenBao,
   Caddy, Alloy and deployment state.
 - One EBS volume for Ingot data (spool, cache, segments)
-- One EBS volume per Piri node for storing blobs
+- One EBS volume per Piri node for its whole data directory: blobs, IPNI
+  advertisements, the wallet keystore, the egress journal and `piri-config.toml`
 
 #### Staging (bare metal, single volume)
 
 One ZFS pool shared by all services: Postgres, OpenBao, Caddy, Alloy, Ingot, Piris.
+
+The host's own Caddy serves the appliance and keeps its state on the root filesystem.
 
 ### Proposed layout
 
@@ -319,21 +322,28 @@ same site.
 
 E.g. two NVMe drives in a mirror, one filesystem (or ZFS dataset) per row:
 
-| Filesystem         | Contents                               | Backed up                                | Quota |
-| ------------------ | -------------------------------------- | ---------------------------------------- | ----- |
-| `control/postgres` | Postgres data directory, including WAL | standby, WAL archive and base backups    | no    |
-| `control/openbao`  | OpenBao raft storage                   | raft snapshots                           | no    |
-| `control/state`    | Caddy, Alloy and deployment state      | no                                       | yes   |
-| `ingot/segments`   | Ingot catalog log                      | no, rebuilt from Postgres after FIL-1601 | yes   |
-| `ingot/blobs`      | Ingot `spool` and `cache`              | no                                       | yes   |
+| Filesystem         | Contents                                                       | Backed up                                | Quota |
+| ------------------ | -------------------------------------------------------------- | ---------------------------------------- | ----- |
+| root volume        | The operating system, infra-nodes git clone, config files etc. | no                                       | no    |
+| `control/postgres` | Postgres data directory, including WAL                         | standby, WAL archive and base backups    | no    |
+| `control/openbao`  | OpenBao raft storage                                           | raft snapshots                           | no    |
+| `control/state`    | Caddy, Alloy and deployment state                              | no                                       | yes   |
+| `ingot/segments`   | Ingot catalog log                                              | no, rebuilt from Postgres after FIL-1601 | yes   |
+| `ingot/blobs`      | Ingot `spool` and `cache`                                      | no                                       | yes   |
+
+Note: ZFS datasets share the pool's free space, so the loss-tolerant rows get a
+quota, and `control/postgres` and `control/openbao` get a reservation that no
+other row can take from. If we use fixed-size filesystems instead of datasets,
+then we don't need quotas since each filesystem's size is its limit.
 
 Ingot's spool and cache share one filesystem, because Ingot moves a blob from
 the spool to the cache with a rename. The cache sits on NVMe because a cache on
 the same drives as Piri's blobs would not make reads faster.
 
-In addition to the filesystems above, we need a volume to hold the root
-filesystem, where we keep all Forge binaries, configuration files and Piri's
-wallet keystore.
+Piri's data directory holds the egress journal, the wallet key store and the
+rendered config file. Since the journal's size is small and can be bounded, we
+can keep it on the root filesystem, together with the wallet key store and the
+config file.
 
 #### S3 storage
 
@@ -341,16 +351,21 @@ A remote S3-compatible object storage. If we need to run more than one Piri
 node, then each Piri node will be configured with a different bucket or key
 (path) prefix.
 
+Blob bytes and IPNI advertisements go to its S3 bucket.
+
+The egress journal and the small local files stay on the fast pool.
+
 #### Storage array
 
-The storage array (JBOD) option: one Piri node per each mounted volume. A volume
-is sized in hundreds of TBs to PBs.
+The storage array (JBOD) option: one Piri node per underlying drive or per each
+mounted volume. The important constraint is that each Piri node is storing blobs
+in a single directory (volume mount), we don't support one Piri to distribute
+blobs across multiple locations.
 
-One filesystem per Piri node, sized in hundreds of
-terabytes to petabytes, holding blob bytes, advertisements, the egress journal,
-the wallet keystore and `piri-config.toml`. On an S3-backed Piri, blob bytes and
-advertisements go to its S3 bucket and the small local files stay on the fast
-pool.
+Each Piri node will have one filesystem holding blob bytes and the IPNI
+advertisements.
+
+The egress journal and the small local files stay on the fast pool.
 
 #### Second machine
 
@@ -527,6 +542,23 @@ Not backed up. Telemetry not yet written to Grafana Cloud is lost.
   refuse to start on an unmounted volume.
 
 - (FIL ticket TBD): RAID, ZFS and SMART health metrics with alerts.
+
+- (FIL ticket TBD): staging keeps only Piri's blobs on the ZFS pool. Each
+  Piri's data directory moves to the root filesystem, with its blobs left in
+  place through `repo.blob_dir`
+  ([fil-forge/piri#212](https://github.com/fil-forge/piri/pull/212)), and
+  Ingot's data directory moves to the root filesystem. Both moves copy the
+  existing files while the service is stopped: the egress journal holds egress
+  not yet reported, and Ingot cannot rebuild lost segments until FIL-1601
+  lands. Alternatively, we can reset the stage (wipe out all stored data) before
+  executing the migration.
+
+- (FIL ticket TBD): Piri caps the total size of its egress journal, so batches
+  it cannot report do not fill the root filesystem. Today only each batch's
+  size is limited. Needed before the egress tracker module is re-enabled
+  ([fil-forge/piri#14](https://github.com/fil-forge/piri/issues/14)), unless
+  [FIL-1558](https://linear.app/filecoin-foundation/issue/FIL-1558) moves
+  egress tracking to Ingot first.
 
 Higher-level tickets covering some of the above:
 
