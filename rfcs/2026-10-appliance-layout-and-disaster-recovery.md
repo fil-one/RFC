@@ -378,10 +378,12 @@ The egress journal and the small local files stay on the fast pool.
 
 #### Storage array
 
-The storage array (JBOD) option: one Piri node per underlying drive or per each
-mounted volume. The important constraint is that each Piri node is storing blobs
-in a single directory (volume mount), we don't support one Piri to distribute
-blobs across multiple locations.
+An array of disk drives, attached to the single appliance host via one more more
+ZFS volumes. (E.g. JBOD + Head Node, but not JBOD direct.)
+
+The important constraint is that each Piri node is storing blobs in a single
+directory (volume mount), Piri nodes cannot distribute blobs across multiple
+locations.
 
 Each Piri node will have one filesystem holding blob bytes and the IPNI
 advertisements.
