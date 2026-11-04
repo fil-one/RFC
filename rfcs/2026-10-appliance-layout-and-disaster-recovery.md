@@ -118,7 +118,9 @@ We can afford to lose the following data:
 
 - Ingot's `spool` files.
 
-  When lost, in-flight uploads fail and S3 clients retry. Parts of multipart uploads must be uploaded again.
+  Only in-flight uploads are in the spool and at risk, whether full objects or
+  multipart parts. When lost, these in-flight uploads fail and S3 clients retry.
+  Parts of multipart uploads must be uploaded again.
 
 - Ingot's `cache` files.
 
