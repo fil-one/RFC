@@ -248,10 +248,10 @@ One of the hard-drives dies. There are two scenarios:
 
 The machine running the appliance dies.
 
-A synchronous Postgres standby runs on a second machine at the same site,
-so we are not losing any acknowledged writes. We promote the standby, rebuild
-the appliance on new hardware from the OpenBao snapshot, mint a new seal token
-at central, and start Ingot and Piri against the promoted database.
+A synchronous Postgres standby runs on a second machine, so we are not losing
+any acknowledged writes. We rebuild the appliance on new hardware from the
+OpenBao snapshot, mint a new seal token at central, restore the database from
+the standby, and start Ingot and Piri.
 
 When the standby has been unavailable for a set time, the primary falls back to
 asynchronous replication and alerts. Losing the host inside that window loses
