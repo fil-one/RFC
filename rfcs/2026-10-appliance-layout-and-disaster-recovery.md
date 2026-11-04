@@ -504,11 +504,15 @@ failure, never to an earlier point.
 No off-host copy: the storage array relies on RAID, and the S3 endpoint relies
 on its provider.
 
-To recover from our own deletion bugs, we keep 35 days of undo: daily filesystem
-snapshots on local storage, and bucket versioning with 35-day expiry of
-noncurrent versions on S3. We use the undo window only to copy back individual
-blobs. Rolling a whole volume back to a snapshot would leave committed rows
-pointing at missing bytes.
+To recover from our own deletion bugs:
+
+- Storage array: we keep 35 days of undo in daily filesystem snapshots.
+- S3 endpoint: undo window would require a bucket versioning with 35-day expiry
+  of noncurrent versions, this remains an open question ([see
+  below](#open-questions)).
+
+We use the undo window only to copy back individual blobs. Rolling a whole
+volume back to a snapshot would leave committed rows pointing at missing bytes.
 
 Blobs are encrypted, so keeping deleted ciphertext for 35 days does not weaken
 the deletion guarantee.
@@ -553,10 +557,8 @@ Not backed up. Telemetry not yet written to Grafana Cloud is lost.
   behind a restore-only policy.
 
 - (FIL ticket TBD): the blob undo window, with a snapshot-capable filesystem on
-  the storage array and bucket versioning with noncurrent-version expiry on S3.
-  A candidate for the S3 part is
-  [FIL-1403](https://linear.app/filecoin-foundation/issue/FIL-1403) "Stand up
-  the destination appliance".
+  the storage array, with a snapshot-capable filesystem and daily snapshots kept
+  for 35 days.
 
 - (FIL ticket TBD): fast-pool filesystems or ZFS datasets with the quotas from
   the layout table. A candidate is
@@ -614,6 +616,22 @@ Higher-level tickets covering some of the above:
 
 - Restoring one bucket's catalog after a bug corrupts it
   ([FIL-1591](https://linear.app/filecoin-foundation/issue/FIL-1591)).
+
+- S3-backed Piri has no undo window for our own deletion bugs.
+
+  Bucket versioning with a 35-day expiry of noncurrent versions would provide
+  one, but the [storage-qualification
+  harness](https://github.com/fil-one/storage-qualification/blob/b46ffe5b10f4a4f21ae6ea0a335e31989e832a21/MANUAL.md#L541-L546)
+  fails any bucket with versioning enabled and asks bidders to disable it,
+  because without an expiry rule Piri's deletes leave versions behind and the
+  bucket grows without bound.
+
+  Adopting versioning means the harness requires versioning with a
+  noncurrent-version expiration rule and checks that the store applies it. We
+  would also need to verify that the selected IST-1 provider meets these new
+  requirements.
+
+  Without versioning, a deletion bug on an S3-backed node is unrecoverable.
 
 - Piri cannot resync its database from the chain. Any rewind of a Piri database,
   including the rewind of up to 60 seconds after losing both machines, needs
@@ -703,9 +721,9 @@ _This section was written by Claude. I am sorry. 🙈_
 - **Deletion grace periods as long as the retention window.** Restored metadata
   would never point at freed bytes. Production restores only to the moment of
   failure, so the exposure is limited to deletions in the last 60 seconds
-  before losing both machines, and the 35-day undo window for blobs already
-  holds those bytes for a manual copy-back. A long grace in Ingot would also
-  keep deleted blobs claimed, in the on-chain data set and paid for during
+  before losing both machines, and on the storage array the 35-day undo window
+  already holds those bytes for a manual copy-back. A long grace in Ingot would
+  also keep deleted blobs claimed, in the on-chain data set and paid for during
   those 35 days.
 
 ### OpenBao
