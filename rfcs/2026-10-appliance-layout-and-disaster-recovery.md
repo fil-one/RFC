@@ -274,12 +274,22 @@ Recovery:
 
 ### Disk full
 
-A full NVMe pool stops Postgres, OpenBao and Ingot together. Possible causes:
+Possible causes:
 
 - Ingot overflows its configured storage limit because of a burst in incoming
   data - higher upload rate that we calculate the limits for.
 - Postgres data size grows more than we anticipated.
 - OpenBao data size grows more than we anticipated.
+
+In the proposed design, we have multiple volumes or ZFS data-sets to isolate
+services from each other.
+
+A burst in incoming traffic will prevent Ingot from accepting new uploads until
+the periodic eviction reclaims the space. We run the sweep every 30 seconds with
+no manual intervention needed.
+
+We have alerts in place to notify us well in advance before the remaining free
+space becomes critically low.
 
 ### Compromise or malicious deletion
 
