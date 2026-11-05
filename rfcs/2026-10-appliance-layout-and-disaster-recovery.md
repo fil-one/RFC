@@ -647,10 +647,6 @@ Not backed up. Telemetry not yet written to Grafana Cloud is lost.
 ### MVP
 
 Without these, a scenario in the table above can lose data.
-[FIL-807](https://linear.app/filecoin-foundation/issue/FIL-807) tracks the
-Postgres items, and
-[FIL-1187](https://linear.app/filecoin-foundation/issue/FIL-1187) tracks the
-other backups.
 
 - [FIL-1598](https://linear.app/filecoin-foundation/issue/FIL-1598),
   [FIL-1600](https://linear.app/filecoin-foundation/issue/FIL-1600) and
@@ -660,8 +656,10 @@ other backups.
   connection. The second machine has the same access controls and encryption
   at rest as the backups.
 
-- [FIL-1599](https://linear.app/filecoin-foundation/issue/FIL-1599): WAL archive
-  and base backups.
+- [FIL-807](https://linear.app/filecoin-foundation/issue/FIL-807) and
+  [FIL-1599](https://linear.app/filecoin-foundation/issue/FIL-1599): continuous
+  Postgres WAL archiving and scheduled base backups, encrypted with the backup
+  public key and pushed to the backup target.
 
 - [FIL-1166](https://linear.app/filecoin-foundation/issue/FIL-1166) and
   [FIL-1599](https://linear.app/filecoin-foundation/issue/FIL-1599): the backup
