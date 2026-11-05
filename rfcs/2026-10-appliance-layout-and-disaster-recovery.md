@@ -233,9 +233,10 @@ it](https://linear.app/filecoin-foundation/issue/FIL-1591).
 
 One of the hard-drives dies. There are two scenarios:
 
-1. A single drive in a multi-drive volume with replication (e.g. RAID). The
-   machine operator replaces the drive with a new one and the replication
-   mechanism handles the rest. No data is lost.
+1. A single drive in a multi-drive volume with replication (e.g. RAID). A RAID,
+   ZFS or SMART alert tells us the drive failed. The machine operator replaces
+   the drive with a new one and the replication mechanism handles the rest. No
+   data is lost.
 
 2. The entire volume is lost. This is less likely, but can still happen, e.g. in
    case of a two-drive RAID in a single physical machine where an
@@ -295,9 +296,12 @@ Possible causes:
 
 - Ingot overflows its configured spool/cache limit because of a burst in
   incoming data - higher upload rate that we calculate the limits for.
+- Ingot's catalog log and `ingot.catalog_journal` grow while shipping stalls.
 - Postgres data size grows more than we anticipated.
 - Postgres keeps WAL for a missing standby or for an archive that cannot upload.
 - OpenBao data size grows more than we anticipated.
+- Docker container logs and old images fill the root filesystem.
+- A Piri volume fills up.
 
 In the proposed design, we have multiple volumes or ZFS data-sets to isolate
 services from each other.
@@ -306,8 +310,8 @@ A burst in incoming traffic will prevent Ingot from accepting new uploads until
 the periodic eviction reclaims the space. We run the sweep every 30 seconds with
 no manual intervention needed.
 
-We have alerts in place to notify us well in advance before the remaining free
-space becomes critically low.
+Grafana alerts when any appliance filesystem has less than 40% free space, and
+when Ingot's catalog shipping stalls.
 
 ### Compromise or malicious deletion
 
@@ -376,9 +380,11 @@ The layout is configurable. At the moment, we use the following setups:
 
 #### Staging (bare metal, single volume)
 
-One ZFS pool shared by all services: Postgres, OpenBao, Caddy, Alloy, Ingot, Piris.
+One ZFS pool holds Postgres, OpenBao, deployment state, Ingot and the Piris.
 
-The host's own Caddy serves the appliance and keeps its state on the root filesystem.
+The host owns Caddy and Alloy. Its own Caddy serves the appliance and keeps its
+state on the root filesystem. The host also runs workloads we do not own, which
+may share disks with the appliance.
 
 ### Proposed layout
 
@@ -413,9 +419,8 @@ config file.
 
 #### S3 storage
 
-A remote S3-compatible object storage. If we need to run more than one Piri
-node, then each Piri node will be configured with a different bucket or key
-(path) prefix.
+A remote S3-compatible object storage. Each Piri node needs its own bucket,
+because Piri supports a bucket prefix and no key prefix.
 
 Blob bytes and IPNI advertisements go to its S3 bucket.
 
@@ -424,7 +429,8 @@ The egress journal and the small local files stay on the fast pool.
 #### Storage array
 
 An array of disk drives, attached to the single appliance host via one more more
-ZFS volumes. (E.g. JBOD + Head Node, but not JBOD direct.)
+ZFS volumes. (E.g. JBOD + Head Node with RAIDZ2 or RAID 6, but not
+JBOD direct.)
 
 The important constraint is that each Piri node is storing blobs in a single
 directory (volume mount), Piri nodes cannot distribute blobs across multiple
@@ -626,6 +632,9 @@ Not backed up. Telemetry not yet written to Grafana Cloud is lost.
   refuse to start on an unmounted volume.
 
 - (FIL ticket TBD): RAID, ZFS and SMART health metrics with alerts.
+
+- (FIL ticket TBD): cap the disk space used by Docker container logs and by old
+  Docker images, so they cannot fill the root filesystem.
 
 - (FIL ticket TBD): staging keeps only Piri's blobs on the ZFS pool. Each
   Piri's data directory moves to the root filesystem, with its blobs left in
