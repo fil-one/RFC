@@ -566,8 +566,9 @@ Not backed up. Telemetry not yet written to Grafana Cloud is lost.
 
 - [FIL-1598](https://linear.app/filecoin-foundation/issue/FIL-1598),
   [FIL-1600](https://linear.app/filecoin-foundation/issue/FIL-1600) and
-  [FIL-1602](https://linear.app/filecoin-foundation/issue/FIL-1602): the second
-  machine at each site and the synchronous standby on it.
+  [FIL-1602](https://linear.app/filecoin-foundation/issue/FIL-1602): a second
+  machine for each appliance, at the same site or elsewhere, and the
+  synchronous standby on it.
 
 - [FIL-1599](https://linear.app/filecoin-foundation/issue/FIL-1599): WAL archive
   and base backups.
