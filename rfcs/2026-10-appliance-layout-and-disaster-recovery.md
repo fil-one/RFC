@@ -644,77 +644,124 @@ Not backed up. Telemetry not yet written to Grafana Cloud is lost.
 
 ## Prerequisites for production
 
-- [FIL-1611](https://linear.app/filecoin-foundation/issue/FIL-1611): Piri syncs
-  flatfs writes before committing rows that reference them.
+### MVP
 
-- [FIL-1616](https://linear.app/filecoin-foundation/issue/FIL-1616): every
-  appliance sets Ingot's byte budget for spool and cache.
+Without these, a scenario in the table above can lose data.
+[FIL-807](https://linear.app/filecoin-foundation/issue/FIL-807) tracks the
+Postgres items, and
+[FIL-1187](https://linear.app/filecoin-foundation/issue/FIL-1187) tracks the
+other backups.
 
 - [FIL-1598](https://linear.app/filecoin-foundation/issue/FIL-1598),
   [FIL-1600](https://linear.app/filecoin-foundation/issue/FIL-1600) and
   [FIL-1602](https://linear.app/filecoin-foundation/issue/FIL-1602): a second
   machine for each appliance, at the same site or elsewhere, and the
   synchronous standby on it, replicating over an authenticated, encrypted
-  connection.
+  connection. The second machine has the same access controls and encryption
+  at rest as the backups.
 
 - [FIL-1599](https://linear.app/filecoin-foundation/issue/FIL-1599): WAL archive
   and base backups.
-
-- (FIL ticket TBD): alerts on WAL archive lag and on stale base backups and
-  OpenBao snapshots.
-
-- [FIL-1166](https://linear.app/filecoin-foundation/issue/FIL-1166): OpenBao
-  snapshots and the control-state restore drill.
-
-- [FIL-1745](https://linear.app/filecoin-foundation/issue/FIL-1745): daily and
-  post-provisioning OpenBao raft snapshots, encrypted with the backup public key
-  and pushed to the backup target.
-
-- [FIL-1619](https://linear.app/filecoin-foundation/issue/FIL-1619): a key pair
-  per region for encrypting backups, with the private key in central OpenBao
-  behind a restore-only policy.
-
-- (FIL ticket TBD): the blob undo window, with a snapshot-capable filesystem on
-  the storage array, daily snapshots kept for 35 days, and spare capacity for
-  the blobs deleted in those 35 days.
-
-- (FIL ticket TBD): Ingot keeps deleted blobs longer than the WAL archive lag,
-  so a restore from the archive never references freed bytes.
-
-- (FIL ticket TBD): fast-pool filesystems or ZFS datasets with the quotas from
-  the layout table. A candidate is
-  [FIL-1343](https://linear.app/filecoin-foundation/issue/FIL-1343) "Configure
-  the Spain hardware".
 
 - [FIL-1166](https://linear.app/filecoin-foundation/issue/FIL-1166) and
   [FIL-1599](https://linear.app/filecoin-foundation/issue/FIL-1599): the backup
   target, provisioned with Object Lock in compliance mode or an account that
   cannot delete.
 
-- [FIL-1678](https://linear.app/filecoin-foundation/issue/FIL-1678): a copy of the OpenBao root token and recovery key in
-  central OpenBao's KV store.
+- [FIL-1619](https://linear.app/filecoin-foundation/issue/FIL-1619): a key pair
+  per region for encrypting backups, with the private key in central OpenBao
+  behind a restore-only policy.
 
-- [FIL-492](https://linear.app/filecoin-foundation/issue/FIL-492): a tool that
-  rewraps every CEK after a region KEK rotation.
+- [FIL-1166](https://linear.app/filecoin-foundation/issue/FIL-1166) and
+  [FIL-1745](https://linear.app/filecoin-foundation/issue/FIL-1745): daily and
+  post-provisioning OpenBao raft snapshots, encrypted with the backup public key
+  and pushed to the backup target, and the control-state restore drill.
 
-- [FIL-1677](https://linear.app/filecoin-foundation/issue/FIL-1677) Piri and
-  Ingot must start after a host reboot with no manual intervention needed
+- [FIL-1603](https://linear.app/filecoin-foundation/issue/FIL-1603): the
+  host-recovery runbook and its drills, including the restore from base backups
+  and the WAL archive.
+
+- (FIL ticket TBD): alerts on WAL archive lag and on stale base backups and
+  OpenBao snapshots. A backup pipeline that stops without an alert turns the
+  next host loss into data loss.
+
+- (FIL ticket TBD): a fast pool of mirrored drives, with one filesystem or ZFS
+  dataset per row of the layout table, and reservations for `control/postgres`
+  and `control/openbao`. A candidate is
+  [FIL-1343](https://linear.app/filecoin-foundation/issue/FIL-1343) "Configure
+  the Spain hardware".
+
+- (FIL ticket TBD): RAID, ZFS and SMART health metrics with alerts. Without
+  them, nobody replaces a failed drive before its mirror fails too.
+
+- [FIL-1596](https://linear.app/filecoin-foundation/issue/FIL-1596): Ingot
+  journals each commit's catalog blocks in `ingot.catalog_journal`, so it can
+  rebuild unshipped segments after losing its disk.
+
+- [FIL-1622](https://linear.app/filecoin-foundation/issue/FIL-1622): services
+  refuse to start on an unmounted volume.
+
+- [FIL-1611](https://linear.app/filecoin-foundation/issue/FIL-1611): Piri syncs
+  flatfs writes before committing rows that reference them. Needed on nodes
+  with a storage array.
+
+- (FIL ticket TBD): the blob undo window on the storage array, with a
+  snapshot-capable filesystem, daily snapshots kept for 35 days, and spare
+  capacity for the blobs deleted in those 35 days. Needed on nodes with a
+  storage array.
+
+### Post-launch
+
+These shorten recovery, catch problems earlier or harden the appliance.
+
+- [FIL-1616](https://linear.app/filecoin-foundation/issue/FIL-1616): every
+  appliance sets Ingot's byte budget for spool and cache.
+
+- (FIL ticket TBD): quotas on the loss-tolerant rows of the layout table.
+
+- [FIL-1209](https://linear.app/filecoin-foundation/issue/FIL-1209): an alert
+  when any appliance filesystem has less than 40% free space.
+
+- (FIL ticket TBD): an alert when Ingot's catalog shipping stalls.
+
+- (FIL ticket TBD): cap the disk space used by Docker container logs and by old
+  Docker images, so they cannot fill the root filesystem.
+
+- [FIL-1677](https://linear.app/filecoin-foundation/issue/FIL-1677): Piri and
+  Ingot start after a host reboot with no manual intervention needed.
 
 - [FIL-1446](https://linear.app/filecoin-foundation/issue/FIL-1446): durable or
   fetchable ship authority, so Ingot ships idle buckets' segments after a
   restart.
 
-- [FIL-1622](https://linear.app/filecoin-foundation/issue/FIL-1622): services
-  refuse to start on an unmounted volume.
+- (FIL ticket TBD): Ingot keeps deleted blobs longer than the WAL archive lag,
+  so a restore from the archive never references freed bytes.
 
-- (FIL ticket TBD): RAID, ZFS and SMART health metrics with alerts.
+- (FIL ticket TBD): after a restore, reconcile Ingot's blob tables with Piri's
+  records and the chain, and reclaim blobs on Piri that no row references.
 
-- (FIL ticket TBD): cap the disk space used by Docker container logs and by old
-  Docker images, so they cannot fill the root filesystem.
+- (FIL ticket TBD): Ingot's health check detects a lapsed region-key token, so
+  a restore is verified without reading an encrypted object.
 
-- (FIL ticket TBD): staging keeps only Piri's blobs on the ZFS pool. Each
-  Piri's data directory moves to the root filesystem, with its blobs left in
-  place through `repo.blob_dir`
+- [FIL-1678](https://linear.app/filecoin-foundation/issue/FIL-1678): a copy of
+  the OpenBao root token and recovery key in central OpenBao's KV store.
+
+- [FIL-492](https://linear.app/filecoin-foundation/issue/FIL-492): a tool that
+  rewraps every CEK after a region KEK rotation. Needed before the first
+  rotation.
+
+- [FIL-1167](https://linear.app/filecoin-foundation/issue/FIL-1167): Piri reads
+  its secrets from OpenBao or the environment, so `piri-config.toml` no longer
+  holds the Postgres password and the S3 secret key.
+
+- (FIL ticket TBD): keep the blob undo window out of reach of root on the
+  appliance, with storage-array snapshots taken and held on a machine the
+  appliance cannot administer, and a bucket policy that denies Piri
+  `s3:DeleteObjectVersion`.
+
+- [FIL-1744](https://linear.app/filecoin-foundation/issue/FIL-1744): staging
+  keeps only Piri's blobs on the ZFS pool. Each Piri's data directory moves to
+  the root filesystem, with its blobs left in place through `repo.blob_dir`
   ([fil-forge/piri#212](https://github.com/fil-forge/piri/pull/212)), and
   Ingot's data directory moves to the root filesystem. Both moves copy the
   existing files while the service is stopped: if Piri's egress tracker is
@@ -728,13 +775,6 @@ Not backed up. Telemetry not yet written to Grafana Cloud is lost.
   ([fil-forge/piri#14](https://github.com/fil-forge/piri/issues/14)), unless
   [FIL-1558](https://linear.app/filecoin-foundation/issue/FIL-1558) moves
   egress tracking to Ingot first.
-
-Higher-level tickets covering some of the above:
-
-- [FIL-807](https://linear.app/filecoin-foundation/issue/FIL-807)
-  Postgres replication and point-in-time recovery
-
-- [FIL-1187](https://linear.app/filecoin-foundation/issue/FIL-1187) backups for all durable appliance state
 
 ## Open questions
 
@@ -753,7 +793,8 @@ Higher-level tickets covering some of the above:
   Adopting versioning means the harness requires versioning with a
   noncurrent-version expiration rule and checks that the store applies it. We
   would also need to verify that the selected IST-1 provider meets these new
-  requirements.
+  requirements. [FIL-1746](https://linear.app/filecoin-foundation/issue/FIL-1746)
+  tracks the harness change.
 
   Without versioning, a deletion bug on an S3-backed node is unrecoverable.
 
