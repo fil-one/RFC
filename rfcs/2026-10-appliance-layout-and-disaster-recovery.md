@@ -558,8 +558,7 @@ Not backed up. Telemetry not yet written to Grafana Cloud is lost.
   behind a restore-only policy.
 
 - (FIL ticket TBD): the blob undo window, with a snapshot-capable filesystem on
-  the storage array, with a snapshot-capable filesystem and daily snapshots kept
-  for 35 days.
+  the storage array, and daily snapshots kept for 35 days.
 
 - (FIL ticket TBD): fast-pool filesystems or ZFS datasets with the quotas from
   the layout table. A candidate is
@@ -613,7 +612,7 @@ Higher-level tickets covering some of the above:
 
 - [FIL-1187](https://linear.app/filecoin-foundation/issue/FIL-1187) backups for all durable appliance state
 
-## Open issues
+## Open questions
 
 - Restoring one bucket's catalog after a bug corrupts it
   ([FIL-1591](https://linear.app/filecoin-foundation/issue/FIL-1591)).
