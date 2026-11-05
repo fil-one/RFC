@@ -204,7 +204,7 @@ The table estimates data loss and recovery time for each scenario.
 | Bug or operator deletes data       | None                                                    | Hours                                               |
 | One drive fails                    | None                                                    | No downtime                                         |
 | Machine lost                       | None                                                    | Days to replace hardware, hours to rebuild the host |
-| Both machines lost                 | Up to 60 seconds plus upload time                       | Days to replace hardware, hours to rebuild the host |
+| Both machines lost                 | The archive lag (see [Postgres](#postgres))             | Days to replace hardware, hours to rebuild the host |
 | Unclean shutdown                   | None                                                    | Minutes                                             |
 | Disk full                          | None                                                    | Hours                                               |
 | Compromise or malicious deletion   | Blobs the attacker deletes, and writes not yet archived | Days, with downtime while we rebuild the host       |
@@ -292,9 +292,11 @@ One of the hard-drives dies. There are two scenarios:
 The machine running the appliance dies.
 
 A synchronous Postgres standby runs on a second machine, so we are not losing
-any acknowledged writes. We rebuild the appliance on new hardware from the
-OpenBao snapshot, mint a new seal token at central, restore the database from
-the standby, and start Ingot and Piri.
+any acknowledged writes. We rebuild the appliance on new hardware: move the
+storage array to the new host, copy the database from the standby, restore
+OpenBao from its snapshot and mint new local tokens (see [Loss-tolerant
+Data](#loss-tolerant-data)), point DNS at the new host, and redeploy Ingot and
+Piri.
 
 When the standby has been unavailable for a set time, the primary falls back to
 asynchronous replication and alerts. If the host dies inside that window, the
@@ -494,7 +496,13 @@ We need another machine to run the synchronous Postgres standby instance.
 It needs disk that's large enough to hold the whole Postgres cluster, but ZFS
 and filesystem snapshots are not required.
 
-This second machine can potentially run at a different site, or even in AWS.
+This second machine can potentially run at a different site, or even in AWS on
+EC2. At another site, every commit waits for the network round trip to the
+standby.
+
+The standby holds a live copy of the whole cluster, including `curio.eth_keys`
+and the plaintext catalog, so the second machine needs the same access controls
+and encryption at rest as the [Postgres backups](#postgres).
 
 ## Backup & restore
 
@@ -539,7 +547,8 @@ Retention is 35 days, the same window infra-central uses in production.
 - **Archive.** Continuous WAL archiving with `archive_timeout = 60s`, plus
   scheduled base backups, to the backup target
   ([FIL-1599](https://linear.app/filecoin-foundation/issue/FIL-1599)). WAL-G can
-  encrypt both with an OpenPGP public key.
+  encrypt both with an OpenPGP public key. The archive lags the primary by up
+  to 60 seconds plus upload time, and by more while uploads fail.
 
 - **Restore.**
   - Host loss: copy the database from the standby to the new host. If the
@@ -640,10 +649,14 @@ Not backed up. Telemetry not yet written to Grafana Cloud is lost.
   [FIL-1600](https://linear.app/filecoin-foundation/issue/FIL-1600) and
   [FIL-1602](https://linear.app/filecoin-foundation/issue/FIL-1602): a second
   machine for each appliance, at the same site or elsewhere, and the
-  synchronous standby on it.
+  synchronous standby on it, replicating over an authenticated, encrypted
+  connection.
 
 - [FIL-1599](https://linear.app/filecoin-foundation/issue/FIL-1599): WAL archive
   and base backups.
+
+- (FIL ticket TBD): alerts on WAL archive lag and on stale base backups and
+  OpenBao snapshots.
 
 - [FIL-1166](https://linear.app/filecoin-foundation/issue/FIL-1166): OpenBao
   snapshots and the control-state restore drill.
@@ -736,7 +749,7 @@ Higher-level tickets covering some of the above:
 
 - Piri cannot resync its database from the chain. The chain holds only each
   root's piece CID, and only Postgres knows which blobs make up a piece. Any
-  rewind of a Piri database, including the rewind of up to 60 seconds after
+  rewind of a Piri database, including the rewind by the archive lag after
   losing both machines, needs manual repair.
 
 - Nothing reclaims blobs on Piri that no database row references, and nothing
@@ -780,8 +793,13 @@ _This section was written by Claude. I am sorry. 🙈_
   archiving, but a restore loses up to a day or an hour of metadata and orphans
   every blob written in that window.
 - **WAL archive only, without a standby.** Needs no second machine, but losing
-  the host rewinds every database by up to 60 seconds, including Piri's state
+  the host rewinds every database by the archive lag, including Piri's state
   that has to follow the chain.
+- **Amazon RDS or Aurora as the standby.** Neither accepts physical replication
+  from an external server
+  ([AWS](https://aws.amazon.com/blogs/database/best-practices-for-migrating-postgresql-databases-to-amazon-rds-and-amazon-aurora/)),
+  so the new host could not copy the database from either. Postgres on EC2 can run
+  the standby.
 - **One Postgres cluster for Ingot and one for the Piris.** Each could be
   restored to a different point. Production never chooses an earlier restore
   point, so one cluster is enough, and a scratch cluster serves forensics.
@@ -840,7 +858,7 @@ _This section was written by Claude. I am sorry. 🙈_
 
 - **A reconcile tool for Ingot's blob tables, Piri's records and the chain,
   required before production.** It stays an open issue; manual repair covers
-  the rewind of up to 60 seconds that remains possible.
+  the rewind by the archive lag that remains possible.
 - **Deletion grace periods as long as the retention window.** Metadata restored
   to any point in the window would never point at freed bytes. Production never
   chooses an earlier restore point, so a grace longer than the archive lag is
