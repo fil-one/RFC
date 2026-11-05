@@ -213,7 +213,8 @@ last good state and re-applying later changes is not possible in production:
 - Rewinding either database brings back references to blobs whose bytes Piri
   already deleted.
 
-Production recovery therefore always restores to the moment of failure. To fix
+Production recovery therefore restores to the latest recoverable point and
+never chooses an earlier one, except to recover from a compromise. To fix
 corrupted state, we create a scratch cluster, load it with data at an earlier
 moment using point-in-time recovery, inspect the damage and create deltas to
 apply on the production cluster.
@@ -263,6 +264,15 @@ nor the archive: up to 60 seconds plus upload time while archiving works. If
 both machines are lost, we restore Postgres from the WAL archive, which trails
 by the same amount and rewinds Piri by that much.
 
+Either restore from the archive rewinds the database, and the rewind needs
+manual repair:
+
+- Ingot loses writes it already acknowledged to S3 clients. Their bodies stay
+  on Piri with no row referencing them.
+- Piri's database falls behind the chain (see [Open questions](#open-questions)).
+- Sprue, the indexer and IPNI keep the registrations, location claims and
+  adverts of the lost writes.
+
 ### Unclean shutdown
 
 A power loss or kernel crash stops the host without a clean shutdown.
@@ -305,6 +315,9 @@ or backups.
 We can recover metadata and keys. Backups go to a target where no credential on
 the appliance can delete or overwrite them within the retention window, and the
 appliance encrypts them with a public key whose private key it never holds.
+Undoing a malicious write or `DROP`, which replicates to the standby, means
+restoring to a point before the attack. That rewind needs the same manual
+repair as losing both machines.
 
 We cannot recover blobs the attacker deletes. Each blob is the only copy, and
 root can destroy the 35-day undo window (see [Open issues](#open-issues)).
@@ -519,8 +532,8 @@ the spool and cache start empty.
 
 #### Database
 
-Backed up with the Postgres cluster. It is restored only to the moment of
-failure, never to an earlier point.
+Backed up with the Postgres cluster. It is restored to the latest recoverable
+point and never to an earlier one, except to recover from a compromise.
 
 #### Blob store
 
@@ -704,8 +717,8 @@ _This section was written by Claude. I am sorry. 🙈_
   the host rewinds every database by up to 60 seconds, including Piri's state
   that has to follow the chain.
 - **One Postgres cluster for Ingot and one for the Piris.** Each could be
-  restored to a different point. Production never rewinds a database, so one
-  cluster is enough, and a scratch cluster serves forensics.
+  restored to a different point. Production never chooses an earlier restore
+  point, so one cluster is enough, and a scratch cluster serves forensics.
 - **Rewinding the whole database after a bug corrupts data**, or repairing the
   damaged rows from a scratch copy. A rewind deletes the wrapped CEKs of every
   object written since the restore point and rolls Piri back after the chain
@@ -763,8 +776,8 @@ _This section was written by Claude. I am sorry. 🙈_
   required before production.** It stays an open issue; manual repair covers
   the rewind of up to 60 seconds that remains possible.
 - **Deletion grace periods as long as the retention window.** Restored metadata
-  would never point at freed bytes. Production restores only to the moment of
-  failure, so the exposure is limited to deletions in the last 60 seconds
+  would never point at freed bytes. Production never chooses an earlier restore
+  point, so the exposure is limited to deletions in the last 60 seconds
   before losing both machines, and on the storage array the 35-day undo window
   already holds those bytes for a manual copy-back. A long grace in Ingot would
   also keep deleted blobs claimed, in the on-chain data set and paid for during
