@@ -101,10 +101,15 @@ We must never lose:
 
 2. OpenBao's raft storage. It holds the Piri and Ingot identity keys, the sprue
    and hilt delegations, the Piri owner wallet keys, the Postgres passwords, the
-   chain RPC and Grafana push tokens, and the region key encryption key (KEK).
+   chain RPC and Grafana push tokens, Ingot's region-key token, and the region
+   key encryption key (KEK).
    Losing OpenBao makes every wrapped CEK in Postgres unusable, because the KEK
    is not exportable. (However, losing wrapped CEKs does not make the blobs
    permanently lost, as discussed above.)
+
+   The appliance cannot regenerate the hilt proof or the third-party tokens;
+   central and the providers must reissue them. Losing a Piri identity key
+   means a new DID and re-onboarding.
 
    Piri does not talk to OpenBao, and Ingot only wraps and unwraps CEKs using
    the KEK, which writes nothing. Secrets stored in the appliance OpenBao change
@@ -142,9 +147,10 @@ We can afford to lose the following data:
 
 - Piri's wallet keystore and `piri-config.toml`.
 
-  When lost, we re-render the key from OpenBao and run `piri init` against the
-  existing database, which finds the existing proof set. Running `piri init`
-  against an empty database creates a new proof set, and the old one faults.
+  When lost, we re-render the key from OpenBao and force `piri init` to run
+  again against the existing database, which finds the existing proof set.
+  Running `piri init` against an empty database creates a new proof set, and
+  the old one faults.
 
 - Piri's egress journal.
 
@@ -166,17 +172,25 @@ We can afford to lose the following data:
 
 - Deployment state.
 
-  When lost, we reinstall the appliance software stack and attach it to the
-  existing Postgres cluster & OpenBao raft storage.
+  When lost, the next reconcile pass redeploys the appliance software stack
+  against the existing Postgres cluster & OpenBao raft storage.
 
 - The OpenBao seal token and the deploy token in `/etc/fil-one`.
 
-  When lost, we mint new ones at central. The seal token is bound to the node's IP address.
+  When lost, we mint a new seal token at central and a new deploy token with
+  the appliance's OpenBao root token from 1Password. The seal token is bound to
+  the node's IP address.
 
-Appliance recovery depends on central OpenBao in two places: it holds the
-transit key that unseals the appliance's OpenBao, and the private key that
-decrypts the appliance's backups. Central OpenBao stores its data in RDS
-Postgres with a 35-day point-in-time recovery window.
+Appliance recovery depends on central in three places: central OpenBao holds
+the transit key that unseals the appliance's OpenBao and the private key that
+decrypts the appliance's backups, and `piri init` registers with central's
+registrar. Central OpenBao stores its data in PostgreSQL with point-in-time
+recovery: 35 days in production and 7 days in staging, where we run the restore
+drills.
+
+While central is down, a running appliance keeps serving, but an appliance
+whose OpenBao restarts stays sealed, and no restore can complete. Central's own
+durability is out of scope for this RFC.
 
 ## Disaster scenarios
 
@@ -530,7 +544,13 @@ tight as access to the wallet keys:
   transit key, and the restored node needs a new seal token minted at central.
 
 - We do not back up the seal token or the deploy token. A rebuild mints new
-  ones.
+  ones: the seal token at central, the deploy token with the root token from
+  1Password.
+
+- The seal, deploy and region-key tokens lapse after 72 hours without renewal.
+  After a longer outage, or a restore from an older snapshot, we mint new ones.
+  A restore is complete once Ingot reads an encrypted object, because Ingot's
+  health check does not detect a lapsed region-key token.
 
 - After rotating the region KEK, we take a snapshot immediately. We never raise
   the key's `min_decryption_version` until every row is rewrapped and 35 days
