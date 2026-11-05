@@ -402,7 +402,10 @@ store.
 We move an appliance to new hardware.
 
 This will follow the same runbook as host
-loss, run on purpose, and it doubles as the restore drill.
+loss, run on purpose, and it doubles as the drill for the standby path.
+
+A separate drill restores Postgres from the base backups and the WAL archive.
+Recovery from losing both machines depends on that path.
 
 ### Appliance datacenter is destroyed
 
@@ -472,7 +475,8 @@ because Piri supports a bucket prefix and no key prefix.
 
 Blob bytes and IPNI advertisements go to its S3 bucket.
 
-The egress journal and the small local files stay on the fast pool.
+The egress journal, wallet keystore and `piri-config.toml` stay on the root
+filesystem.
 
 #### Storage array
 
@@ -487,7 +491,8 @@ locations.
 Each Piri node will have one filesystem holding blob bytes and the IPNI
 advertisements.
 
-The egress journal and the small local files stay on the fast pool.
+The egress journal, wallet keystore and `piri-config.toml` stay on the root
+filesystem.
 
 #### Second machine
 
@@ -666,7 +671,8 @@ Not backed up. Telemetry not yet written to Grafana Cloud is lost.
   behind a restore-only policy.
 
 - (FIL ticket TBD): the blob undo window, with a snapshot-capable filesystem on
-  the storage array, and daily snapshots kept for 35 days.
+  the storage array, daily snapshots kept for 35 days, and spare capacity for
+  the blobs deleted in those 35 days.
 
 - (FIL ticket TBD): Ingot keeps deleted blobs longer than the WAL archive lag,
   so a restore from the archive never references freed bytes.
