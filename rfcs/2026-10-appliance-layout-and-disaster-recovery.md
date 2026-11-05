@@ -32,7 +32,7 @@ deployment using ZFS volumes to attach disk arrays to the appliance host.
 We require the Blob Store to be resilient and store data redundantly (e.g.
 erasure coded), and assume the blobs will not be lost. Each blob is the only
 copy from Forge's point of view. Blobs of S3 objects may have a copy in Ingot
-cache, but that's a cache such copies are not guaranteed to exist or stay
+cache, but that's a cache, and such copies are not guaranteed to exist or stay
 around.
 
 All appliance services (Piri, Ingot) are running on the same machine and share
@@ -53,7 +53,7 @@ database. In particular, we should rework Piri to build IPNI advertisements
 on-demand by the HTTP request handler, using fragments of data stored in the
 database.
 
-Each Piri will has its own database server running alongside it, potentially
+Each Piri will have its own database server running alongside it, potentially
 just a local SQLite. Piri nodes will live next to the disk(s) they write to, and
 they may be managed by the regional provider.
 
@@ -130,10 +130,10 @@ We can afford to lose the following data:
 
 - Ingot's `cache` files.
 
-  When lost, Ingot serve read requests by fetching the content from Piri.
+  When lost, Ingot serves read requests by fetching the content from Piri.
 
   Note: At the moment, Ingot puts blobs in the cache only on the write path, and
-  the read path never fills the cache. That's an performance optimisation we
+  the read path never fills the cache. That's a performance optimisation we
   eventually need to implement.
 
 - Ingot's `segments` files.
@@ -480,7 +480,7 @@ filesystem.
 
 #### Storage array
 
-An array of disk drives, attached to the single appliance host via one more more
+An array of disk drives, attached to the single appliance host via one or more
 ZFS volumes. (E.g. JBOD + Head Node with RAIDZ2 or RAID 6, but not
 JBOD direct.)
 
@@ -851,8 +851,8 @@ _This section was written by Claude. I am sorry. 🙈_
 - **Keeping every shipped catalog segment on Ingot's disk, or copying each one
   to the backup target.** Segments are shipped to Piri as regular blobs. Instead
   of designing a custom backup solution for catalog segments only, it's better
-  improve the way how Ingot stores blobs (see [future
-  direction](future-direction-out-of-scope)) and lean on that for catalog
+  to improve how Ingot stores blobs (see [future
+  direction](#future-direction-out-of-scope)) and lean on that for catalog
   segments too. For now, we accept that losing a Piri volume can break read
   operations for buckets storing MST data on the lost volume.
 - **A full copy of the blobs on a backup host, or replication to a second
