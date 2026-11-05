@@ -214,8 +214,7 @@ last good state and re-applying later changes is not possible in production:
   already deleted.
 
 Production recovery therefore restores to the latest recoverable point and
-never chooses an earlier one, except to recover from a compromise. To fix
-corrupted state, we create a scratch cluster, load it with data at an earlier
+never chooses an earlier one. To fix corrupted state, we create a scratch cluster, load it with data at an earlier
 moment using point-in-time recovery, inspect the damage and create deltas to
 apply on the production cluster.
 
@@ -315,9 +314,10 @@ or backups.
 We can recover metadata and keys. Backups go to a target where no credential on
 the appliance can delete or overwrite them within the retention window, and the
 appliance encrypts them with a public key whose private key it never holds.
-Undoing a malicious write or `DROP`, which replicates to the standby, means
-restoring to a point before the attack. That rewind needs the same manual
-repair as losing both machines.
+We repair a malicious write the same way as a bug, from a scratch cluster.
+After a `DROP DATABASE` or a wiped data directory, we restore up to just before
+it. If the attacker stopped WAL archiving first, we lose the writes that never
+reached the archive, the same as when both machines are lost.
 
 We cannot recover blobs the attacker deletes. Each blob is the only copy, and
 root can destroy the 35-day undo window (see [Open issues](#open-issues)).
@@ -533,7 +533,7 @@ the spool and cache start empty.
 #### Database
 
 Backed up with the Postgres cluster. It is restored to the latest recoverable
-point and never to an earlier one, except to recover from a compromise.
+point and never to an earlier one.
 
 #### Blob store
 
