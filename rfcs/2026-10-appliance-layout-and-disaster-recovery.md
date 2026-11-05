@@ -666,6 +666,10 @@ Not backed up. Telemetry not yet written to Grafana Cloud is lost.
 - [FIL-1166](https://linear.app/filecoin-foundation/issue/FIL-1166): OpenBao
   snapshots and the control-state restore drill.
 
+- [FIL-1745](https://linear.app/filecoin-foundation/issue/FIL-1745): daily and
+  post-provisioning OpenBao raft snapshots, encrypted with the backup public key
+  and pushed to the backup target.
+
 - [FIL-1619](https://linear.app/filecoin-foundation/issue/FIL-1619): a key pair
   per region for encrypting backups, with the private key in central OpenBao
   behind a restore-only policy.
