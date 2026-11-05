@@ -382,8 +382,7 @@ The host's own Caddy serves the appliance and keeps its state on the root filesy
 
 ### Proposed layout
 
-Each production appliance has two storage tiers, plus a second machine at the
-same site.
+Each production appliance has two storage tiers, plus a second machine.
 
 #### Fast pool
 
@@ -452,7 +451,7 @@ This second machine can potentially run at a different site, or even in AWS.
 The target is configurable, either an S3-compatible bucket or a host we control,
 and it must meet three requirements:
 
-- It is off the appliance host. It may be at the same site.
+- It is off the appliance host. It can be at the same site or elsewhere.
 
 - No credential on the appliance can delete or overwrite a backup within the
   retention window: S3 Object Lock in compliance mode, or a host where the
