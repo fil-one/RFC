@@ -255,10 +255,13 @@ OpenBao snapshot, mint a new seal token at central, restore the database from
 the standby, and start Ingot and Piri.
 
 When the standby has been unavailable for a set time, the primary falls back to
-asynchronous replication and alerts. Losing the host inside that window loses
-the writes since the standby fell behind. If both machines are lost, we restore
-Postgres from the WAL archive, which trails by up to 60 seconds and rewinds Piri
-by that much.
+asynchronous replication and alerts. If the host dies inside that window, the
+new host copies the database from the standby and then replays the WAL archive
+past the standby’s position, decrypting the segments with the region’s private
+key from central OpenBao. We lose the writes that reached neither the standby
+nor the archive: up to 60 seconds plus upload time while archiving works. If
+both machines are lost, we restore Postgres from the WAL archive, which trails
+by the same amount and rewinds Piri by that much.
 
 ### Unclean shutdown
 
@@ -471,7 +474,9 @@ Retention is 35 days, the same window infra-central uses in production.
   encrypt both with an OpenPGP public key.
 
 - **Restore.**
-  - Host loss: recover from the standby.
+  - Host loss: copy the database from the standby to the new host. If the
+    primary was running in asynchronous mode when it died, replay the archive
+    past the standby’s position.
   - Both machines lost: restore the latest base backup and replay the archive to its end.
   - Forensics and drills: restore to any point in the last 35 days into a scratch cluster.
 
