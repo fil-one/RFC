@@ -298,9 +298,15 @@ An attacker gains root on the appliance, through stolen operator credentials,
 ransomware or a rogue datacenter employee, and tries to destroy or read our data
 or backups.
 
-Backups go to a target where no credential on the appliance can delete or
-overwrite them within the retention window. The appliance encrypts backups with
-a public key whose private key it never holds.
+We can recover metadata and keys. Backups go to a target where no credential on
+the appliance can delete or overwrite them within the retention window, and the
+appliance encrypts them with a public key whose private key it never holds.
+
+We cannot recover blobs the attacker deletes. Each blob is the only copy, and
+root can destroy the 35-day undo window (see [Open issues](#open-issues)).
+Protecting blobs against a compromise needs a copy outside the appliance's
+reach, the same copy that protects them against losing the datacenter, so it
+belongs to [Future direction](#future-direction-out-of-scope).
 
 A compromised appliance can still serve plaintext while it runs; the [regional
 security RFC](./2026-08-regional-security-and-key-management.md) covers that
@@ -649,6 +655,24 @@ Higher-level tickets covering some of the above:
 
 - A running appliance keeps serving after its seal token is revoked, until it
   restarts. A central-triggered seal would close that window.
+
+- An attacker with root on the appliance can destroy blobs for good.
+  Control-plane backups are safe because no credential on the appliance can
+  shorten their retention, but the blob undo window does not have that property:
+
+  - Storage array: root can destroy the daily snapshots. Keeping them out of
+    reach needs snapshots taken and held on a machine the appliance cannot
+    administer.
+
+  - S3 endpoint: Piri's S3 credentials can delete noncurrent versions. A bucket
+    policy that denies Piri `s3:DeleteObjectVersion`, leaving lifecycle expiry
+    as the only way versions go away, would close this. Object Lock alone does
+    not, because its retention counts from when a version was written: the
+    noncurrent version of a blob written more than 35 days earlier is no longer
+    locked.
+
+  Until we close both gaps, the undo window protects against our own bugs but
+  not against a compromise.
 
 ## Alternatives considered
 
