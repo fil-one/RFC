@@ -280,6 +280,7 @@ Possible causes:
 - Ingot overflows its configured storage limit because of a burst in incoming
   data - higher upload rate that we calculate the limits for.
 - Postgres data size grows more than we anticipated.
+- Postgres keeps WAL for a missing standby or for an archive that cannot upload.
 - OpenBao data size grows more than we anticipated.
 
 In the proposed design, we have multiple volumes or ZFS data-sets to isolate
@@ -449,10 +450,20 @@ Retention is 35 days, the same window infra-central uses in production.
 
 - **Replication.** A synchronous standby on the second machine, streaming
   through a replication slot
-  ([FIL-1602](https://linear.app/filecoin-foundation/issue/FIL-1602)). When the
-  standby has been gone for a set time, the primary drops to asynchronous
-  replication and alerts, and resumes synchronous replication once the standby
-  catches up.
+  ([FIL-1602](https://linear.app/filecoin-foundation/issue/FIL-1602)).
+  Postgres waits for a missing synchronous standby indefinitely, so a watcher
+  on the primary clears `synchronous_standby_names` once the standby has been
+  gone for a set time, and restores it once the standby catches up. Each
+  switch alerts. Commits stall for that set time before the fallback.
+
+- **Retained WAL.** `max_slot_wal_keep_size` caps the WAL the slot keeps for a
+  missing standby
+  ([FIL-1602](https://linear.app/filecoin-foundation/issue/FIL-1602)). A standby
+  that falls past the cap stops streaming, and we bring it back by hand. We
+  either rebuild it from the primary with `pg_basebackup`, or replay the missing
+  WAL from the archive after decrypting it with the region's private key from
+  central OpenBao. WAL that fails to upload to the archive stays on the primary
+  with no cap, so archive failures alert as well.
 
 - **Archive.** Continuous WAL archiving with `archive_timeout = 60s`, plus
   scheduled base backups, to the backup target
