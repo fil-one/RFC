@@ -148,9 +148,13 @@ We can afford to lose the following data:
 
 - Piri's egress journal.
 
-  In [FIL-1558 Forge regions measure each space's egress, so the trial egress
-  cap applies there](https://linear.app/filecoin-foundation/issue/FIL-1558), we
-  will implement egress measuring in Ingot.
+  Piri's egress tracker is disabled today, so nothing writes the journal and
+  losing it loses nothing. If Piri re-enables the tracker
+  ([fil-forge/piri#14](https://github.com/fil-forge/piri/issues/14)), the
+  journal holds the egress Piri has not reported yet, and that egress goes
+  unreported. Alternatively, Ingot measures egress
+  ([FIL-1558](https://linear.app/filecoin-foundation/issue/FIL-1558)), and
+  Piri's journal stays empty.
 
 - Caddy state & TLS certificates issued via Let's Encrypt.
 
@@ -629,10 +633,10 @@ Not backed up. Telemetry not yet written to Grafana Cloud is lost.
   place through `repo.blob_dir`
   ([fil-forge/piri#212](https://github.com/fil-forge/piri/pull/212)), and
   Ingot's data directory moves to the root filesystem. Both moves copy the
-  existing files while the service is stopped: the egress journal holds egress
-  not yet reported, and Ingot cannot rebuild lost segments until FIL-1601
-  lands. Alternatively, we can reset the stage (wipe out all stored data) before
-  executing the migration.
+  existing files while the service is stopped: Ingot cannot rebuild lost
+  segments until FIL-1601 lands, and if Piri's egress tracker is enabled, the
+  egress journal holds egress not yet reported. Alternatively, we can reset the
+  stage (wipe out all stored data) before executing the migration.
 
 - (FIL ticket TBD): Piri caps the total size of its egress journal, so batches
   it cannot report do not fill the root filesystem. Today only each batch's
