@@ -327,8 +327,11 @@ After a `DROP DATABASE` or a wiped data directory, we restore up to just before
 it. If the attacker stopped WAL archiving first, we lose the writes that never
 reached the archive, the same as when both machines are lost.
 
+The second machine holds a live copy of the database, wallet keys included, so
+it needs the same protection as the appliance.
+
 We cannot recover blobs the attacker deletes. Each blob is the only copy, and
-root can destroy the 35-day undo window (see [Open issues](#open-issues)).
+root can destroy the 35-day undo window (see [Open questions](#open-questions)).
 Protecting blobs against a compromise needs a copy outside the appliance's
 reach, the same copy that protects them against losing the datacenter, so it
 belongs to [Future direction](#future-direction-out-of-scope).
@@ -504,15 +507,19 @@ Retention is 35 days, the same window infra-central uses in production.
 
 The 35-day retention sets the deletion guarantee. Deleting an object deletes its
 wrapped CEK, and that deletion becomes irreversible once every backup taken
-before it has expired, 35 days later.
+before it has expired, 35 days later. On the storage array, the blob undo
+window keeps the deleted ciphertext equally long. The guarantee covers object
+content only: object keys and user metadata stay on Piri in the shipped catalog
+segments.
 
-The backups contain secrets, so access to them must be as tight as access to
-the wallet keys:
+The backups contain secrets and customer data, so access to them must be as
+tight as access to the wallet keys:
 
 - `curio.eth_keys` holds each Piri owner's wallet key in plaintext.
 - `ingot.upload_registrations.proofs` holds bearer UCAN delegations, and
   `ingot.blob_parks.put_invocation` embeds derived signer keys.
-- `ingot.catalog_journal` holds object keys and metadata in plaintext.
+- Ingot's tables hold object keys, user metadata and fragments of multipart
+  object bodies in plaintext.
 
 ### OpenBao
 
@@ -559,9 +566,6 @@ To recover from our own deletion bugs:
 We use the undo window only to copy back individual blobs. Rolling a whole
 volume back to a snapshot would leave committed rows pointing at missing bytes.
 
-Blobs are encrypted, so keeping deleted ciphertext for 35 days does not weaken
-the deletion guarantee.
-
 #### Local files
 
 The wallet keystore and `piri-config.toml` are regenerated from OpenBao and
@@ -604,6 +608,9 @@ Not backed up. Telemetry not yet written to Grafana Cloud is lost.
 
 - (FIL ticket TBD): the blob undo window, with a snapshot-capable filesystem on
   the storage array, and daily snapshots kept for 35 days.
+
+- (FIL ticket TBD): Ingot keeps deleted blobs longer than the WAL archive lag,
+  so a restore from the archive never references freed bytes.
 
 - (FIL ticket TBD): fast-pool filesystems or ZFS datasets with the quotas from
   the layout table. A candidate is
@@ -787,13 +794,11 @@ _This section was written by Claude. I am sorry. 🙈_
 - **A reconcile tool for Ingot's blob tables, Piri's records and the chain,
   required before production.** It stays an open issue; manual repair covers
   the rewind of up to 60 seconds that remains possible.
-- **Deletion grace periods as long as the retention window.** Restored metadata
-  would never point at freed bytes. Production never chooses an earlier restore
-  point, so the exposure is limited to deletions in the last 60 seconds
-  before losing both machines, and on the storage array the 35-day undo window
-  already holds those bytes for a manual copy-back. A long grace in Ingot would
-  also keep deleted blobs claimed, in the on-chain data set and paid for during
-  those 35 days.
+- **Deletion grace periods as long as the retention window.** Metadata restored
+  to any point in the window would never point at freed bytes. Production never
+  chooses an earlier restore point, so a grace longer than the archive lag is
+  enough. A 35-day grace would also keep deleted blobs claimed, in the on-chain
+  data set and paid for during those 35 days.
 
 ### OpenBao
 
