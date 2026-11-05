@@ -277,8 +277,8 @@ Recovery:
 
 Possible causes:
 
-- Ingot overflows its configured storage limit because of a burst in incoming
-  data - higher upload rate that we calculate the limits for.
+- Ingot overflows its configured spool/cache limit because of a burst in
+  incoming data - higher upload rate that we calculate the limits for.
 - Postgres data size grows more than we anticipated.
 - Postgres keeps WAL for a missing standby or for an archive that cannot upload.
 - OpenBao data size grows more than we anticipated.
