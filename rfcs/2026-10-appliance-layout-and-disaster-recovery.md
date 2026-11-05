@@ -138,12 +138,11 @@ We can afford to lose the following data:
 
 - Ingot's `segments` files.
 
-  When lost, Ingot rebuilds segments from Postgres and ships them again.
-
-  This requires us to implement [FIL-1601 Rebuild unshipped catalog segments
-  from the journal after losing the
-  host](https://linear.app/filecoin-foundation/issue/FIL-1601) first. Until
-  FIL-1601 lands, losing segments breaks every bucket with an unshipped segment.
+  When lost, Ingot rebuilds the unshipped segments from `ingot.catalog_journal`
+  at startup ([FIL-1601](https://linear.app/filecoin-foundation/issue/FIL-1601)).
+  A rebuilt segment ships after its bucket's next write, until
+  [FIL-1446](https://linear.app/filecoin-foundation/issue/FIL-1446) makes ship
+  authority survive a restart.
 
 - Piri's wallet keystore and `piri-config.toml`.
 
@@ -213,7 +212,7 @@ A mistake that deletes disk data is recoverable:
 
 - Postgres is recovered from the standby instance.
 - OpenBao comes back from its snapshot.
-- Ingot rebuilds its segments from data stored in Postgres.
+- Ingot rebuilds its unshipped segments from `ingot.catalog_journal`.
 
 Corruption written through the application is harder, because it replicates to
 the standby and lands in the WAL archive. Restoring the whole database to the
@@ -226,7 +225,8 @@ last good state and re-applying later changes is not possible in production:
 - Rewinding a Piri database rolls it back after the chain has moved on. Roots
   already added on chain are added again, the chain challenges roots the
   database no longer knows, and blobs accepted after the restore point are
-  never proven. Piri has no path to resync its state from the chain.
+  never proven. Piri has no path to resync its state from the chain (see
+  [Open questions](#open-questions)).
 
 - Rewinding either database brings back references to blobs whose bytes Piri
   already deleted.
@@ -258,7 +258,7 @@ One of the hard-drives dies. There are two scenarios:
 
    If the NVMe pool holding the control-plane volume is lost, we can restore
    Postgres from the standby instance, restore OpenBao from its latest snapshot,
-   and let Ingot rebuild its local state from Postgres & data stored in Piri.
+   and let Ingot rebuild its unshipped segments from `ingot.catalog_journal`.
 
    Losing Piri's storage volume is the same as losing the datacenter (see
    [Appliance datacenter is destroyed](#appliance-datacenter-is-destroyed)
@@ -298,11 +298,16 @@ A power loss or kernel crash stops the host without a clean shutdown.
 Recovery:
 
 - Postgres recovers from its WAL.
-- Piri commits Postgres rows referencing blobs only after the blobs were written
-  to the flatfs volume or S3 storage, there is no inconsistency after recovery.
-  (This requires [FIL-1611 Sync flatfs writes before Postgres commits rows that reference them](https://linear.app/filecoin-foundation/issue/FIL-1611).
-- Piri deletes blobs before marking them as deleted in Postgres. After restore,
-  we may end up with orphaned blobs left behind. Fixing this is future work.
+- Piri writes blobs and IPNI adverts to the flatfs volume or S3 storage before
+  it commits the Postgres rows that reference them, so no row points at a
+  missing file after recovery. On the flatfs volume, this requires
+  [FIL-1611](https://linear.app/filecoin-foundation/issue/FIL-1611).
+- A crash can leave bytes that nothing references, on Piri and in Ingot's
+  spool, and can make Piri submit the same roots to the chain twice. These
+  waste space or need manual repair. Their fixes are outside this RFC
+  ([FIL-799](https://linear.app/filecoin-foundation/issue/FIL-799),
+  [FIL-1456](https://linear.app/filecoin-foundation/issue/FIL-1456),
+  [FIL-1391](https://linear.app/filecoin-foundation/issue/FIL-1391)).
 
 ### Disk full
 
@@ -417,7 +422,7 @@ E.g. two NVMe drives in a mirror, one filesystem (or ZFS dataset) per row:
 | `control/postgres` | Postgres data directory, including WAL                         | standby, WAL archive and base backups    | no    |
 | `control/openbao`  | OpenBao raft storage                                           | raft snapshots                           | no    |
 | `control/state`    | Caddy, Alloy and deployment state                              | no                                       | yes   |
-| `ingot/segments`   | Ingot catalog log                                              | no, rebuilt from Postgres after FIL-1601 | yes   |
+| `ingot/segments`   | Ingot catalog log                                              | no, rebuilt from Postgres                | yes   |
 | `ingot/blobs`      | Ingot `spool` and `cache`                                      | no                                       | yes   |
 
 Note: ZFS datasets share the pool's free space, so the loss-tolerant rows get a
@@ -561,8 +566,8 @@ tight as access to the wallet keys:
 
 Nothing on Ingot's disk is backed up. Postgres holds every acknowledged write,
 including the catalog blocks of unshipped segments. After a restore, Ingot
-rebuilds and ships those segments from `ingot.catalog_journal` (FIL-1601), and
-the spool and cache start empty.
+rebuilds those segments from `ingot.catalog_journal` and ships each one after
+its bucket's next write. The spool and cache start empty.
 
 ### Piri
 
@@ -600,9 +605,6 @@ Not backed up. A new appliance re-issues its TLS certificates.
 Not backed up. Telemetry not yet written to Grafana Cloud is lost.
 
 ## Prerequisites for production
-
-- [FIL-1601](https://linear.app/filecoin-foundation/issue/FIL-1601): Ingot
-  rebuilds unshipped segments from `ingot.catalog_journal`.
 
 - [FIL-1611](https://linear.app/filecoin-foundation/issue/FIL-1611): Piri syncs
   flatfs writes before committing rows that reference them.
@@ -668,10 +670,10 @@ Not backed up. Telemetry not yet written to Grafana Cloud is lost.
   place through `repo.blob_dir`
   ([fil-forge/piri#212](https://github.com/fil-forge/piri/pull/212)), and
   Ingot's data directory moves to the root filesystem. Both moves copy the
-  existing files while the service is stopped: Ingot cannot rebuild lost
-  segments until FIL-1601 lands, and if Piri's egress tracker is enabled, the
-  egress journal holds egress not yet reported. Alternatively, we can reset the
-  stage (wipe out all stored data) before executing the migration.
+  existing files while the service is stopped: if Piri's egress tracker is
+  enabled, the egress journal holds egress not yet reported. Alternatively, we
+  can reset the stage (wipe out all stored data) before executing the
+  migration.
 
 - (FIL ticket TBD): Piri caps the total size of its egress journal, so batches
   it cannot report do not fill the root filesystem. Today only each batch's
@@ -708,9 +710,10 @@ Higher-level tickets covering some of the above:
 
   Without versioning, a deletion bug on an S3-backed node is unrecoverable.
 
-- Piri cannot resync its database from the chain. Any rewind of a Piri database,
-  including the rewind of up to 60 seconds after losing both machines, needs
-  manual repair.
+- Piri cannot resync its database from the chain. The chain holds only each
+  root's piece CID, and only Postgres knows which blobs make up a piece. Any
+  rewind of a Piri database, including the rewind of up to 60 seconds after
+  losing both machines, needs manual repair.
 
 - Nothing reclaims blobs on Piri that no database row references, and nothing
   reconciles Ingot's blob tables with what Piri holds after a restore.
