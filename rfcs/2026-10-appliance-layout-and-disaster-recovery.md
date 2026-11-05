@@ -193,6 +193,24 @@ durability is out of scope for this RFC.
 
 ## Disaster scenarios
 
+Piri sets the recovery-time budget. Each day without a proof is a mainnet
+proving period that pays nothing
+([FWSS](https://github.com/fil-forge/filecoin-services/blob/08d9e619ca3c6cf5e764112445869e6c4f5492dd/service_contracts/src/FilecoinWarmStorageService.sol#L1626)).
+The table estimates data loss and recovery time for each scenario.
+
+| Scenario                           | Data lost                                               | Recovery time                                       |
+| ---------------------------------- | ------------------------------------------------------- | --------------------------------------------------- |
+| Silent data corruption due to bugs | None                                                    | No downtime, the repair can take days               |
+| Bug or operator deletes data       | None                                                    | Hours                                               |
+| One drive fails                    | None                                                    | No downtime                                         |
+| Machine lost                       | None                                                    | Days to replace hardware, hours to rebuild the host |
+| Both machines lost                 | Up to 60 seconds plus upload time                       | Days to replace hardware, hours to rebuild the host |
+| Unclean shutdown                   | None                                                    | Minutes                                             |
+| Disk full                          | None                                                    | Hours                                               |
+| Compromise or malicious deletion   | Blobs the attacker deletes, and writes not yet archived | Days, with downtime while we rebuild the host       |
+| Lost OpenBao root credentials      | None                                                    | No downtime                                         |
+| Appliance datacenter is destroyed  | Out of scope                                            | Out of scope                                        |
+
 ### Data corruption due to bugs in our code
 
 Examples:
@@ -206,13 +224,18 @@ Examples:
 
 - We ship a change in infra-nodes infrastructure configuration or management
   scripts that accidentally delete disk data (Postgres data, OpenBao secrets,
-  Ingot segments).
+  Ingot segments). Such a change reaches every node at once.
 
-A mistake that deletes disk data is recoverable:
+- An operator runs `DROP DATABASE` on the wrong node.
+
+A mistake that deletes files on the primary is recoverable:
 
 - Postgres is recovered from the standby instance.
 - OpenBao comes back from its snapshot.
 - Ingot rebuilds its unshipped segments from `ingot.catalog_journal`.
+
+A `DROP DATABASE` replicates to the standby. We restore the database from the
+archive to just before the drop.
 
 Corruption written through the application is harder, because it replicates to
 the standby and lands in the WAL archive. Restoring the whole database to the
@@ -341,10 +364,11 @@ or backups.
 We can recover metadata and keys. Backups go to a target where no credential on
 the appliance can delete or overwrite them within the retention window, and the
 appliance encrypts them with a public key whose private key it never holds.
-We repair a malicious write the same way as a bug, from a scratch cluster.
-After a `DROP DATABASE` or a wiped data directory, we restore up to just before
-it. If the attacker stopped WAL archiving first, we lose the writes that never
-reached the archive, the same as when both machines are lost.
+We rebuild the appliance on a clean host, as after machine loss, and rotate
+the secrets it held. We repair a malicious write the same way as a bug, from a
+scratch cluster. After a `DROP DATABASE` or a wiped data directory, we restore
+up to just before it. If the attacker stopped WAL archiving first, we lose the
+writes that never reached the archive, the same as when both machines are lost.
 
 The second machine holds a live copy of the database, wallet keys included, so
 it needs the same protection as the appliance.
