@@ -64,6 +64,7 @@ they may be managed by the regional provider.
 Blob payloads contain:
 
 - Content of S3 objects stored by customers
+- Ingot's MST nodes and manifests
 - Piri's IPNI advertisements
 
 In the current scope, we assume the blobs will not be lost.
@@ -705,9 +706,12 @@ _This section was written by Claude. I am sorry. 🙈_
   survive a Postgres restore. FIL-1601 makes the files disposable, which also
   covers segments that shipped and were pruned after the restore point.
 - **Keeping every shipped catalog segment on Ingot's disk, or copying each one
-  to the backup target.** Ingot keeps only the newest segments, to aggregate
-  them before shipping. We accept that losing a Piri volume can break listing
-  for buckets with segments on it.
+  to the backup target.** Segments are shipped to Piri as regular blobs. Instead
+  of designing a custom backup solution for catalog segments only, it's better
+  improve the way how Ingot stores blobs (see [future
+  direction](future-direction-out-of-scope)) and lean on that for catalog
+  segments too. For now, we accept that losing a Piri volume can break read
+  operations for buckets storing MST data on the lost volume.
 - **A full copy of the blobs on a backup host, or replication to a second
   Piri.** Either doubles raw storage, and replication needs work in sprue. We
   rely on RAID and treat the loss of a whole volume like the loss of the
