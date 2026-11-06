@@ -364,8 +364,8 @@ ransomware or a rogue datacenter employee, and tries to destroy or read our data
 or backups.
 
 We can recover metadata and keys. Backups go to a target where no credential on
-the appliance can delete or overwrite them within the retention window, and the
-appliance encrypts them with a public key whose private key it never holds.
+the appliance can delete or overwrite them within the retention window, and only
+central can read them (see [Backup target](#backup-target)).
 We rebuild the appliance on a clean host, as after machine loss, and rotate
 the secrets it held. We repair a malicious write the same way as a bug, from a
 scratch cluster. After a `DROP DATABASE` or a wiped data directory, we restore
@@ -523,10 +523,20 @@ and it must meet three requirements:
   appliance's account has no delete permission. The appliance pushes backups
   and never needs read access to old ones.
 
-- Every backup is encrypted on the appliance with a public key. The private key
-  lives in central OpenBao behind a restore-only policy. Deleting it at central
-  makes every backup of the region unreadable, which keeps the regional
-  security RFC's guarantee that a retired region loses access to all its data.
+- Only central can read backups. At first, the target's access controls
+  enforce this: the target is administered by central, and only central's
+  restore credentials can read from it. OpenBao raft snapshots additionally
+  cannot be read without the appliance's unseal key at central (see
+  [OpenBao](#openbao)). Until encryption lands, a retired region's Postgres
+  backups stay readable to central until they expire at the end of the
+  retention window.
+
+  [FIL-1619](https://linear.app/filecoin-foundation/issue/FIL-1619) encrypts
+  every backup on the appliance with a public key whose private key lives in
+  central OpenBao behind a restore-only policy. No backup can then be read
+  without a key held only at central, and deleting that key makes every backup
+  of the region unreadable, which keeps the regional security RFC's guarantee
+  that a retired region loses access to all its data.
 
 Retention is 35 days, the same window infra-central uses in production.
 
@@ -551,9 +561,12 @@ Retention is 35 days, the same window infra-central uses in production.
 
 - **Archive.** Continuous WAL archiving with `archive_timeout = 60s`, plus
   scheduled base backups, to the backup target
-  ([FIL-1599](https://linear.app/filecoin-foundation/issue/FIL-1599)). WAL-G can
-  encrypt both with an OpenPGP public key. The archive lags the primary by up
-  to 60 seconds plus upload time, and by more while uploads fail.
+  ([FIL-1599](https://linear.app/filecoin-foundation/issue/FIL-1599)). Both go
+  to the target unencrypted at first.
+  [FIL-1619](https://linear.app/filecoin-foundation/issue/FIL-1619) encrypts
+  them with the region's backup public key, which WAL-G supports as an OpenPGP
+  key. The archive lags the primary by up to 60 seconds plus upload time, and by
+  more while uploads fail.
 
 - **Restore.**
   - Host loss: copy the database from the standby to the new host. If the
@@ -581,10 +594,25 @@ tight as access to the wallet keys:
 ### OpenBao
 
 - We take a raft snapshot daily and after any script that writes to OpenBao,
-  encrypt it with the backup public key, and push it to the backup target.
+  then push it to the backup target.
 
-- Restoring a snapshot needs central: the snapshot is sealed with central's
-  transit key, and the restored node needs a new seal token minted at central.
+- OpenBao encrypts every value before writing it to raft storage, so a
+  snapshot holds the values already encrypted. Storage paths, such as mount
+  paths, policy names and secret names, stay in plaintext. Central's
+  `appliance-unseal-<region>` transit key wraps OpenBao's root key, so a
+  snapshot cannot be read without the unseal key stored at central. The root
+  token and the recovery key cannot unseal or decrypt a snapshot on their own.
+
+- Because a snapshot is unreadable without central, we push snapshots without
+  encrypting them with the backup public key. Adding that layer is follow-up
+  work in [FIL-1619](https://linear.app/filecoin-foundation/issue/FIL-1619): it
+  hides the storage paths, and it lets central grant read access to backups
+  without granting the ability to unseal the appliance.
+
+- Restoring a snapshot needs central: the restored node needs a new seal token
+  minted at central for its IP address. Any token with access to the unseal
+  key decrypts every snapshot taken under it, so we never raise the unseal
+  key's `min_decryption_version` within the 35-day retention window.
 
 - We do not back up the seal token or the deploy token. A rebuild mints new
   ones: the seal token at central, the deploy token with the root token from
@@ -658,22 +686,18 @@ Without these, a scenario in the table above can lose data.
 
 - [FIL-807](https://linear.app/filecoin-foundation/issue/FIL-807) and
   [FIL-1599](https://linear.app/filecoin-foundation/issue/FIL-1599): continuous
-  Postgres WAL archiving and scheduled base backups, encrypted with the backup
-  public key and pushed to the backup target.
+  Postgres WAL archiving and scheduled base backups, pushed to the backup
+  target.
 
 - [FIL-1166](https://linear.app/filecoin-foundation/issue/FIL-1166) and
   [FIL-1599](https://linear.app/filecoin-foundation/issue/FIL-1599): the backup
   target, provisioned with Object Lock in compliance mode or an account that
   cannot delete.
 
-- [FIL-1619](https://linear.app/filecoin-foundation/issue/FIL-1619): a key pair
-  per region for encrypting backups, with the private key in central OpenBao
-  behind a restore-only policy.
-
 - [FIL-1166](https://linear.app/filecoin-foundation/issue/FIL-1166) and
   [FIL-1745](https://linear.app/filecoin-foundation/issue/FIL-1745): daily and
-  post-provisioning OpenBao raft snapshots, encrypted with the backup public key
-  and pushed to the backup target, and the control-state restore drill.
+  post-provisioning OpenBao raft snapshots, pushed to the backup target, and the
+  control-state restore drill.
 
 - [FIL-1603](https://linear.app/filecoin-foundation/issue/FIL-1603): the
   host-recovery runbook and its drills, including the restore from base backups
@@ -743,6 +767,12 @@ These shorten recovery, catch problems earlier or harden the appliance.
 
 - [FIL-1678](https://linear.app/filecoin-foundation/issue/FIL-1678): a copy of
   the OpenBao root token and recovery key in central OpenBao's KV store.
+
+- [FIL-1619](https://linear.app/filecoin-foundation/issue/FIL-1619): a key pair
+  per region, with the private key in central OpenBao behind a restore-only
+  policy, and Postgres backups and OpenBao raft snapshots encrypted with its
+  public key before they leave the appliance. Until then, only the target's
+  access controls keep backups readable by central alone.
 
 - [FIL-492](https://linear.app/filecoin-foundation/issue/FIL-492): a tool that
   rewraps every CEK after a region KEK rotation. Needed before the first
