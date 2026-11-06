@@ -127,9 +127,13 @@ What happens in the handlers in terms of interactions with the queues. Indented 
 
 ### `DeleteBucket`
 
+1. (sync) [`queue-bucket.close`][bucket-close] - refuses a bucket that holds objects, and marks it closing, so no commit or new multipart upload gets in
+1. (sync) [`queue-multipart-upload.abort`][multipart-upload-abort] - each multipart upload in flight, as AWS deletes a bucket with its uploads. The request runs them: the multipart queue is above the bucket queue, so a bucket task cannot
+    * (async) [`queue-space-shard.remove`][space-shard-remove] - each part shard, with `NoGrace`
 1. (sync) [`queue-bucket.delete`][bucket-delete]
-    * (sync) [`queue-space-shard.release`][space-shard-release] - each of the space's pending releases, ignoring `NotBefore`
+    * [`queue-space-shard.release`][space-shard-release] - each of the space's pending releases, run at once, ignoring `NotBefore`
         * (async) [`queue-shard.evict`][shard-evict]
+    * `queue-space-upload` - the space's pending registrations and retractions, run at once
 
 ### `PutBucketVersioning`
 
@@ -175,11 +179,12 @@ What happens in the handlers in terms of interactions with the queues. Indented 
 
 ### `CopyObject`
 
-1. Within the space: (sync) [`queue-bucket.commit`][bucket-commit] with a `Copy` change
-    * (sync) [`queue-space-shard.add`][space-shard-add] - each source shard, with no `Path`
-        * (async, at `Deadline`) [`queue-space-shard.expire`][space-shard-expire] - cancelled when this commit claims the reference
+1. Within the space: read the source, then
+    * (sync) [`queue-space-shard.add`][space-shard-add] - each source shard, with no `Path`. The reference holds the shard whatever becomes of the source, so a copy whose source is deleted before its commit still has its shards
+        * (async, at `Deadline`) [`queue-space-shard.expire`][space-shard-expire] - cancelled when the commit claims the reference
             * (async, after the reader grace period) [`queue-space-shard.release`][space-shard-release] - when the space's references reach zero
                 * (async) [`queue-shard.evict`][shard-evict]
+1. Within the space: (sync) [`queue-bucket.commit`][bucket-commit] with a `Put` change that claims those references
     * (async) [`queue-bucket.ship`][bucket-ship] - when the log's open segment is sealed
     * (async) [`queue-space-shard.remove`][space-shard-remove] - shards of a superseded version (unversioned bucket)
         * (async, after the reader grace period) [`queue-space-shard.release`][space-shard-release] - when the space's references reach zero
@@ -214,6 +219,7 @@ What happens in the handlers in terms of interactions with the queues. Indented 
 ### `CreateMultipartUpload`
 
 1. (sync) [`queue-multipart-upload.create`][multipart-upload-create]
+    * (sync) [`queue-bucket.admit-upload`][bucket-admit-upload] - refuses a closing bucket
     * (async, after 1 week) [`queue-multipart-upload.abort`][multipart-upload-abort] - ignored once the upload is complete or aborted
         * (async) [`queue-space-shard.remove`][space-shard-remove] - each part shard, with `NoGrace`
             * (async) [`queue-space-shard.release`][space-shard-release] - when the space's references reach zero, with no grace period
@@ -238,8 +244,8 @@ What happens in the handlers in terms of interactions with the queues. Indented 
 
 ### `CompleteMultipartUpload`
 
-1. (sync) [`queue-multipart-upload-shard.accept`][multipart-upload-shard-accept] - an ordinary task, never a replacement: concludes every shard still parked, and fails the request if one cannot be accepted
-1. (sync) [`queue-multipart-upload.complete`][multipart-upload-complete] - checks every listed part is accepted
+1. (sync) [`queue-multipart-upload.complete`][multipart-upload-complete]
+    * (sync) [`queue-multipart-upload-shard.accept`][multipart-upload-shard-accept] - an ordinary task, never a replacement, for the listed parts: concludes every shard of them still parked, and fails the request if one cannot be accepted
     * (sync) [`queue-bucket.commit`][bucket-commit] with a `Put` change - the parts already own their shards' references
         * (async) [`queue-bucket.ship`][bucket-ship] - when the log's open segment is sealed
         * (async) [`queue-space-shard.remove`][space-shard-remove] - shards of a superseded version (unversioned bucket)
@@ -250,6 +256,7 @@ What happens in the handlers in terms of interactions with the queues. Indented 
     * (async) [`queue-space-shard.remove`][space-shard-remove] - shards of recorded parts not listed in the request, with `NoGrace`
         * (async) [`queue-space-shard.release`][space-shard-release] - when the space's references reach zero, with no grace period
             * (async) [`queue-shard.evict`][shard-evict]
+    * (async, after 1 week) [`queue-multipart-upload.reap`][multipart-upload-reap] - deletes the completed upload, kept until then so a repeated Complete gets the same answer
 
 ### `AbortMultipartUpload`
 
@@ -258,6 +265,8 @@ What happens in the handlers in terms of interactions with the queues. Indented 
         * (async) [`queue-space-shard.release`][space-shard-release] - when the space's references reach zero, with no grace period
             * (async) [`queue-shard.evict`][shard-evict]
 
+[bucket-admit-upload]: #queue-bucketadmit-upload
+[bucket-close]: #queue-bucketclose
 [bucket-commit]: #queue-bucketcommit
 [bucket-create]: #queue-bucketcreate
 [bucket-delete]: #queue-bucketdelete
@@ -269,6 +278,7 @@ What happens in the handlers in terms of interactions with the queues. Indented 
 [multipart-upload-add-part]: #queue-multipart-uploadadd-part
 [multipart-upload-complete]: #queue-multipart-uploadcomplete
 [multipart-upload-create]: #queue-multipart-uploadcreate
+[multipart-upload-reap]: #queue-multipart-uploadreap
 [shard-cache]: #queue-shardcache
 [shard-evict]: #queue-shardevict
 [space-shard-add]: #queue-space-shardadd
@@ -310,7 +320,8 @@ type CreateResult struct {
 
 Spawns:
 
-* (async) `queue-multipart-upload.abort` - with a `NotBefore` value that aborts the upload after 1 week when not completed. Error is ignored if upload no longer exists in an abortable state.
+* (sync) `queue-bucket.admit-upload` - the bucket must not be closing. The create holds the bucket's subject until it commits, so a `queue-bucket.close` either runs after the upload exists, and the bucket's delete aborts it, or refuses this create
+* (async) `queue-multipart-upload.abort` - with a `NotBefore` value that aborts the upload after 1 week when not completed. It does nothing once the upload is completed or gone.
 
 #### `queue-multipart-upload.add-part`
 
@@ -337,7 +348,7 @@ Spawns:
 
 #### `queue-multipart-upload.complete`
 
-Assembles the object from the listed parts and puts it. CompleteMultipartUpload runs `queue-multipart-upload-shard.accept` as its own task first, so every part's acceptance is committed before this reads the parts ([rule 7](#handlers-must)). If a listed part is still parked, because it was uploaded again after that accept, Complete fails and the client retries it. Parts recorded but not listed in the request are dropped.
+Assembles the object from the listed parts and puts it. It runs `queue-multipart-upload-shard.accept` as a child for the parts it lists, after the response's headers have gone out, so a long accept is covered by the keep-alive. The accept's writes commit with this task, so Complete learns which parts it accepted from the child's result, not by reading the parts again ([rule 7](#handlers-must)). Parts recorded but not listed in the request are dropped. A completed upload is kept, so a repeated Complete answers with the same version, until its `queue-multipart-upload.reap`.
 
 ```go
 type CompleteTask struct {
@@ -354,12 +365,14 @@ type CompleteResult struct {
 
 Spawns:
 
+* (sync) `queue-multipart-upload-shard.accept` - the listed parts
 * (sync) `queue-bucket.commit` - a `Put` change that adds the object to the bucket
 * (async) `queue-space-shard.remove` - shards of recorded parts not listed in the request, with `NoGrace`: a part is never readable
+* (async) `queue-multipart-upload.reap` - with a `NotBefore` 1 week out
 
 #### `queue-multipart-upload.abort`
 
-Marks the upload aborted and drops its parts. Error is ignored if the upload is already complete or aborted (the auto-abort).
+Deletes the upload and its parts. An upload already completed or gone is NoSuchUpload for a client's abort, and nothing for the auto-abort.
 
 ```go
 type AbortTask struct {
@@ -379,6 +392,21 @@ Spawns:
 
 Retries: no attempt limit, backing off from 1 second, doubling, up to 5 minutes. Dropping the auto-abort would leave an abandoned upload open, holding its parts' blobs.
 
+#### `queue-multipart-upload.reap`
+
+Deletes a completed upload and its part rows, a week after its Complete. It releases nothing: the Complete queued the releases of the parts it left out with its own commit, and the object's references hold the rest. A separate action from the abort, which only ever aborts an open upload.
+
+```go
+type ReapTask struct {
+  Task
+  UploadID uuid.ID
+}
+
+type ReapResult = Unit
+```
+
+Spawns: NONE
+
 ### Multipart Upload Shard Queue (`queue-multipart-upload-shard`)
 
 Serialized on: `upload ID`
@@ -395,7 +423,7 @@ Concludes every parked shard of the upload, in part order and in batches of 1,00
 
 A failed batch fails the task, which records nothing ([rule 2](#the-runner-guarantees)). Run async, it is retried; run sync by CompleteMultipartUpload, it fails the request. Concluding a shard again counts as a repeat, so a retry only repeats round trips.
 
-CompleteMultipartUpload runs this action as a top-level sync task before `queue-multipart-upload.complete`, so its writes are committed when Complete reads the parts. Submitted as an ordinary task, never a replacement, it runs after any accept already pending and concludes whatever is left.
+`queue-multipart-upload.complete` runs this action as a sync child for the parts it lists, and reads which it accepted from its result. Submitted as an ordinary task, never a replacement, it runs after any accept already pending and concludes whatever of those parts is left.
 
 ```go
 type AcceptTask struct {
@@ -439,7 +467,7 @@ Spawns: NONE
 
 #### `queue-bucket.commit`
 
-Applies a list of key changes in order: decides each one's effect from the bucket's state, splices them into the MST, appends the new catalog blocks to the bucket's log in one fsynced batch and swaps the root once. Every handler passes one change except `DeleteObjects`, which passes every key of its request, so up to 1,000 deletes cost one fsync and one root swap. Replaces the per-bucket in-process lock and the root CAS. Everything below is decided under this subject, so a concurrent `queue-bucket.set-versioning` lands entirely before or after a commit:
+Applies a list of key changes in order, and refuses a closing bucket (`queue-bucket.close`): decides each one's effect from the bucket's state, splices them into the MST, appends the new catalog blocks to the bucket's log in one fsynced batch and swaps the root once. Every handler passes one change except `DeleteObjects`, which passes every key of its request, so up to 1,000 deletes cost one fsync and one root swap. Replaces the per-bucket in-process lock and the root CAS. Everything below is decided under this subject, so a concurrent `queue-bucket.set-versioning` lands entirely before or after a commit:
 
 * the new version's sequence number and ID: a minted ID with versioning Enabled, the null version otherwise
 * what it supersedes: nothing with versioning Enabled, otherwise the key's null version, whose references are removed and whose upload is retracted
@@ -447,7 +475,7 @@ Applies a list of key changes in order: decides each one's effect from the bucke
 * for a delete, whether it adds a delete marker or removes the version, and the refusal of a version under retention or legal hold
 * for a put or copy, claiming the new version's pending references and cancelling their `queue-space-shard.expire` tasks
 
-Each change gets its own result. A change that fails on its own terms (a failed precondition, a version under retention or legal hold) fails only that change, and the rest still apply. A failure of the commit itself, such as the fsync or the Postgres transaction, fails every change. A within-space copy reads its source under this subject too, so the source cannot change or disappear while the copy takes references to its shards.
+Each change gets its own result. A change that fails on its own terms (a failed precondition, a version under retention or legal hold) fails only that change, and the rest still apply. A failure of the commit itself, such as the fsync or the Postgres transaction, fails every change. A within-space copy is a `Put`: it reads its source and takes references to its shards before the commit, as an upload does, and the references keep the shards whatever becomes of the source.
 
 ```go
 type CommitTask struct {
@@ -461,24 +489,15 @@ type CommitTask struct {
 type KeyChange struct {
   Key           string
   Put           *PutChange
-  Copy          *CopyChange
   Delete        *DeleteChange
   SetAttributes *SetAttributesChange
 }
 
-// PutChange adds a version from an upload or a completed multipart upload.
+// PutChange adds a version from an upload, a copy or a completed multipart
+// upload.
 type PutChange struct {
   Value         ObjectValue
   Refs          []TaskID // pending references to claim; empty for shards a multipart part already owns
-  Preconditions Preconditions
-}
-
-// CopyChange copies another key of the bucket. Metadata only: the new
-// version references the source's shards. A copy across spaces re-ingests
-// and is a PutChange.
-type CopyChange struct {
-  SourceKey     string
-  VersionID     string // source version, empty for current
   Preconditions Preconditions
 }
 
@@ -509,7 +528,6 @@ type ChangeResult struct {
 
 Spawns:
 
-* (sync) `queue-space-shard.add` - for a copy, each source shard, with no `Path`
 * (async) `queue-space-shard.remove` - shards of a superseded or removed version
 * (async) `queue-space-upload.add` - a new version's root, for a put or copy
 * (async) `queue-space-upload.remove` - root of a superseded or removed version
@@ -519,11 +537,12 @@ Spawns:
 
 Ships sealed catalog segments to the network.
 
+It ships every sealed segment still unshipped, oldest first, and stops at the first that fails. The log seals on its own trigger, by size or by age, and queues a ship when it does, as a replacement due at once, so a bucket has at most one pending; a seal found unshipped at startup queues one too. A seal by age has no request behind it, so the ship signs with the authority the bucket's latest write captured, as today's ship does, and carries no proofs of its own.
+
 ```go
 type ShipTask struct {
   Task
-  Space  did.DID
-  Proofs []byte // for the segment upload
+  Space did.DID
 }
 
 type ShipResult struct {
@@ -533,7 +552,7 @@ type ShipResult struct {
 
 Spawns: NONE
 
-Retries: no attempt limit, backing off from 1 second, doubling, up to 5 minutes. An expired proof is permanent: the bucket's next write spawns a ship with fresh proofs. Dropping a ship any other way would leave an idle bucket's catalog only on local disk.
+Retries: no attempt limit, backing off from 1 second, doubling, up to 5 minutes. An expired proof is permanent: the bucket's next write captures fresh authority, and its next seal queues a ship. Dropping a ship any other way would leave an idle bucket's catalog only on local disk.
 
 #### `queue-bucket.set-versioning`
 
@@ -567,26 +586,56 @@ type SetObjectLockConfigResult = Unit
 
 Spawns: NONE
 
+#### `queue-bucket.close`
+
+The first step of DeleteBucket. Refuses a bucket that holds objects (BucketNotEmpty), and otherwise marks it closing: from then on `queue-bucket.commit` and `queue-bucket.admit-upload` refuse it, so it stays empty and gains no multipart upload while the request aborts the ones in flight. A delete that stops after this leaves the bucket closed, and the client's retry carries on from there.
+
+```go
+type CloseTask struct {
+  Task
+  Space did.DID
+}
+
+type CloseResult = Unit
+```
+
+Spawns: NONE
+
+#### `queue-bucket.admit-upload`
+
+Run by `queue-multipart-upload.create` as a child: refuses a closing bucket. The create holds this subject until it commits, so its upload either exists before a `queue-bucket.close`, and the delete aborts it, or is refused. No lock is needed.
+
+```go
+type AdmitUploadTask struct {
+  Task
+  Space did.DID
+}
+
+type AdmitUploadResult = Unit
+```
+
+Spawns: NONE
+
 #### `queue-bucket.delete`
 
-Deletes an empty bucket, and fails if it holds objects or in-flight multipart uploads. It releases the space's blobs immediately, since an explicit delete owes readers no grace (the delayed releases then find nothing to do), then asks Hilt to delete the space. A re-run after Hilt already deleted it gets `UnknownBucket`, which counts as done.
+The last step of DeleteBucket, after `queue-bucket.close` and the aborts of the bucket's multipart uploads. It fails if the bucket holds objects or an upload, which the close makes impossible. It releases the space's blobs immediately, since an explicit delete owes readers no grace (the delayed releases then find nothing to do), then asks Hilt to delete the space. A re-run after Hilt already deleted it gets `UnknownBucket`, which counts as done. When Hilt refuses the delete, it clears the closing mark, and the bucket works again.
 
-Hilt authorizes the delete with the signed S3 request itself, so the task stores that request exactly as received, headers and signature included, and clears it once the task completes. A signed request can be replayed for that one operation while it is inside Hilt's 15-minute clock-skew window, so it is not kept longer than the task needs it. A delete resumed within the window finishes on its own. One resumed later is refused by Hilt and recorded as failed; the client, whose request failed with the crash, retries with a freshly signed request, and every step before the Hilt call is safe to repeat.
+Hilt authorizes the delete with the signed S3 request itself. A signed request can be replayed for that one operation while it is inside Hilt's 15-minute clock-skew window, so it is never stored: it reaches the task through its caller's context. A delete resumed without its caller fails without acting; the client, whose request failed with it, retries with a freshly signed request, and every step before the Hilt call is safe to repeat.
 
 ```go
 type DeleteTask struct {
   Task
-  Space   did.DID
-  Request []byte // the signed S3 request, as Hilt verifies it; cleared when the task completes
-  Proofs  []byte // passed to the spawned queue-space-shard.release tasks
+  Space  did.DID
+  Proofs []byte // for the queue-space-shard.release tasks it runs
 }
 
 type DeleteResult = Unit
 ```
 
-Spawns:
+Runs, as tasks of their own rather than children, since it waits on them only to drain the space:
 
-* (sync) `queue-space-shard.release` - each of the space's pending releases, ignoring `NotBefore`
+* `queue-space-shard.release` - each of the space's pending releases, ignoring `NotBefore`
+* `queue-space-upload` - the space's pending registrations and retractions, so the objects the emptying removed are not left counted
 
 ### Space Upload Queue (`queue-space-upload`)
 
@@ -816,6 +865,7 @@ Retries: 3 attempts, backing off from 1 second, doubling. The disk budget sweepe
 | Stream sweeper (aborts a stream whose request died) | Not needed. A failed stream aborts its allocation inline; one abandoned by a crash is never concluded and the provider expires it within 24 hours. An unaccepted blob counts toward no space usage and is never served, so nothing needs to abort it sooner. References an abandoned request took are removed by `queue-space-shard.expire` |
 | Multipart acceptor, and the accept sweeper that nudges it | `queue-multipart-upload-shard.accept` |
 | Session expiry | `queue-multipart-upload.abort` with `NotBefore` |
+| Reaping completed sessions | `queue-multipart-upload.reap` with `NotBefore` |
 | Upload registration sweep | `queue-space-upload` |
 | Cache residency and read retention windows | The TTL on each cached file: a pending `queue-shard.evict`, extended by `queue-shard.cache` |
 | Disk budget eviction | Stays a sweeper: a TTL does not bound the disk, and a burst of writes can fill it before anything expires. Over budget, it spawns `queue-shard.evict` with no `NotBefore` for the oldest cached files first |
