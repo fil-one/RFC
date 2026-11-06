@@ -514,7 +514,7 @@ and encryption at rest as the [Postgres backups](#postgres).
 ### Backup target
 
 The target is configurable, either an S3-compatible bucket or a host we control,
-and it must meet three requirements:
+and it must meet four requirements:
 
 - It is off the appliance host. It can be at the same site or elsewhere.
 
@@ -522,6 +522,9 @@ and it must meet three requirements:
   retention window: S3 Object Lock in compliance mode, or a host where the
   appliance's account has no delete permission. The appliance pushes backups
   and never needs read access to old ones.
+
+- No credential on an appliance can read, write or delete another appliance's
+  backups.
 
 - Only central can read backups. At first, the target's access controls
   enforce this: the target is administered by central, and only central's
@@ -689,10 +692,15 @@ Without these, a scenario in the table above can lose data.
   Postgres WAL archiving and scheduled base backups, pushed to the backup
   target.
 
-- [FIL-1166](https://linear.app/filecoin-foundation/issue/FIL-1166) and
-  [FIL-1599](https://linear.app/filecoin-foundation/issue/FIL-1599): the backup
+- [FIL-1751](https://linear.app/filecoin-foundation/issue/FIL-1751): the backup
   target, provisioned with Object Lock in compliance mode or an account that
   cannot delete.
+
+- [FIL-1619](https://linear.app/filecoin-foundation/issue/FIL-1619): a key pair
+  per region, with the private key in central OpenBao behind a restore-only
+  policy, and Postgres backups and OpenBao raft snapshots encrypted with its
+  public key before they leave the appliance. Until then, only the target's
+  access controls keep backups readable by central alone.
 
 - [FIL-1166](https://linear.app/filecoin-foundation/issue/FIL-1166) and
   [FIL-1745](https://linear.app/filecoin-foundation/issue/FIL-1745): daily and
@@ -767,12 +775,6 @@ These shorten recovery, catch problems earlier or harden the appliance.
 
 - [FIL-1678](https://linear.app/filecoin-foundation/issue/FIL-1678): a copy of
   the OpenBao root token and recovery key in central OpenBao's KV store.
-
-- [FIL-1619](https://linear.app/filecoin-foundation/issue/FIL-1619): a key pair
-  per region, with the private key in central OpenBao behind a restore-only
-  policy, and Postgres backups and OpenBao raft snapshots encrypted with its
-  public key before they leave the appliance. Until then, only the target's
-  access controls keep backups readable by central alone.
 
 - [FIL-492](https://linear.app/filecoin-foundation/issue/FIL-492): a tool that
   rewraps every CEK after a region KEK rotation. Needed before the first
