@@ -245,7 +245,7 @@ What happens in the handlers in terms of interactions with the queues. Indented 
 ### `CompleteMultipartUpload`
 
 1. (sync) [`queue-multipart-upload.complete`][multipart-upload-complete]
-    * (sync) [`queue-multipart-upload-shard.accept`][multipart-upload-shard-accept] - an ordinary task, never a replacement, for the listed parts: concludes every shard of them still parked, and fails the request if one cannot be accepted
+    * (sync, as a task of its own) [`queue-multipart-upload-shard.accept`][multipart-upload-shard-accept] - an ordinary task, never a replacement, for the listed parts: concludes every shard of them still parked, and fails the request if one cannot be accepted
     * (sync) [`queue-bucket.commit`][bucket-commit] with a `Put` change - the parts already own their shards' references
         * (async) [`queue-bucket.ship`][bucket-ship] - when the log's open segment is sealed
         * (async) [`queue-space-shard.remove`][space-shard-remove] - shards of a superseded version (unversioned bucket)
@@ -348,7 +348,7 @@ Spawns:
 
 #### `queue-multipart-upload.complete`
 
-Assembles the object from the listed parts and puts it. It runs `queue-multipart-upload-shard.accept` as a child for the parts it lists, after the response's headers have gone out, so a long accept is covered by the keep-alive. The accept's writes commit with this task, so Complete learns which parts it accepted from the child's result, not by reading the parts again ([rule 7](#handlers-must)). Parts recorded but not listed in the request are dropped. A completed upload is kept, so a repeated Complete answers with the same version, until its `queue-multipart-upload.reap`.
+Assembles the object from the listed parts and puts it. After the response's headers have gone out, so a long accept is covered by the keep-alive, it runs `queue-multipart-upload-shard.accept` for the parts it lists as a task of its own, not a child: the accept's writes commit before Complete reads the parts again and before it assembles the object's tree, which reads accepted shards back through their locations ([rule 7](#handlers-must)). Parts recorded but not listed in the request are dropped. A completed upload is kept, so a repeated Complete answers with the same version, until its `queue-multipart-upload.reap`.
 
 ```go
 type CompleteTask struct {
@@ -365,7 +365,7 @@ type CompleteResult struct {
 
 Spawns:
 
-* (sync) `queue-multipart-upload-shard.accept` - the listed parts
+* (sync, as a task of its own, committed before Complete reads on) `queue-multipart-upload-shard.accept` - the listed parts
 * (sync) `queue-bucket.commit` - a `Put` change that adds the object to the bucket
 * (async) `queue-space-shard.remove` - shards of recorded parts not listed in the request, with `NoGrace`: a part is never readable
 * (async) `queue-multipart-upload.reap` - with a `NotBefore` 1 week out
@@ -423,7 +423,7 @@ Concludes every parked shard of the upload, in part order and in batches of 1,00
 
 A failed batch fails the task, which records nothing ([rule 2](#the-runner-guarantees)). Run async, it is retried; run sync by CompleteMultipartUpload, it fails the request. Concluding a shard again counts as a repeat, so a retry only repeats round trips.
 
-`queue-multipart-upload.complete` runs this action as a sync child for the parts it lists, and reads which it accepted from its result. Submitted as an ordinary task, never a replacement, it runs after any accept already pending and concludes whatever of those parts is left.
+`queue-multipart-upload.complete` runs this action for the parts it lists, as a task of its own so its writes commit before Complete reads the parts again. Submitted as an ordinary task, never a replacement, it runs after any accept already pending and concludes whatever of those parts is left.
 
 ```go
 type AcceptTask struct {
