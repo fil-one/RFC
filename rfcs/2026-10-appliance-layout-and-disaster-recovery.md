@@ -201,7 +201,7 @@ The table estimates data loss and recovery time for each scenario.
 | Scenario                           | Data lost                                               | Recovery time                                       |
 | ---------------------------------- | ------------------------------------------------------- | --------------------------------------------------- |
 | Silent data corruption due to bugs | None                                                    | No downtime, the repair can take days               |
-| Bug or operator deletes data       | None                                                    | Hours                                               |
+| Bug or operator deletes data       | Blobs on S3 nodes, same-day blobs on storage arrays     | Hours                                               |
 | One drive fails                    | None                                                    | No downtime                                         |
 | Machine lost                       | None                                                    | Days to replace hardware, hours to rebuild the host |
 | Both machines lost                 | The archive lag (see [Postgres](#postgres))             | Days to replace hardware, hours to rebuild the host |
@@ -234,8 +234,10 @@ A mistake that deletes files on the primary is recoverable:
 - OpenBao comes back from its snapshot.
 - Ingot rebuilds its unshipped segments from `ingot.catalog_journal`.
 
-A `DROP DATABASE` replicates to the standby. We restore the database from the
-archive to just before the drop.
+A `DROP DATABASE` replicates to the standby. We restore the archive into a
+scratch cluster to just before the drop, and copy the dropped database back to
+production with `pg_dump` and `pg_restore`. Restoring the production cluster
+itself would rewind every other database too.
 
 Corruption written through the application is harder, because it replicates to
 the standby and lands in the WAL archive. Restoring the whole database to the
@@ -368,9 +370,10 @@ the appliance can delete or overwrite them within the retention window, and only
 central can read them (see [Backup target](#backup-target)).
 We rebuild the appliance on a clean host, as after machine loss, and rotate
 the secrets it held. We repair a malicious write the same way as a bug, from a
-scratch cluster. After a `DROP DATABASE` or a wiped data directory, we restore
-up to just before it. If the attacker stopped WAL archiving first, we lose the
-writes that never reached the archive, the same as when both machines are lost.
+scratch cluster, and copy a dropped database back from one. After a wiped data
+directory, we restore up to just before the wipe. If the attacker stopped WAL
+archiving first, we lose the writes that never reached the archive, the same as
+when both machines are lost.
 
 The second machine holds a live copy of the database, wallet keys included, so
 it needs the same protection as the appliance.
@@ -519,9 +522,10 @@ and it must meet four requirements:
 - It is off the appliance host. It can be at the same site or elsewhere.
 
 - No credential on the appliance can delete or overwrite a backup within the
-  retention window: S3 Object Lock in compliance mode, or a host where the
-  appliance's account has no delete permission. The appliance pushes backups
-  and never needs read access to old ones.
+  retention window: S3 Object Lock in compliance mode, or a host that takes
+  read-only snapshots of the received backups every few minutes and keeps them
+  out of reach of the appliance's account. The appliance pushes backups and
+  never needs read access to old ones.
 
 - No credential on an appliance can read, write or delete another appliance's
   backups.
@@ -652,7 +656,9 @@ on its provider.
 
 To recover from our own deletion bugs:
 
-- Storage array: we keep 35 days of undo in daily filesystem snapshots.
+- Storage array: we keep 35 days of undo in daily filesystem snapshots. A blob
+  written and deleted between two snapshots is in none of them (see [open
+  questions](#open-questions)).
 - S3 endpoint: undo window would require a bucket versioning with 35-day expiry
   of noncurrent versions, this remains an open question ([see
   below](#open-questions)).
@@ -693,8 +699,8 @@ Without these, a scenario in the table above can lose data.
   target.
 
 - [FIL-1751](https://linear.app/filecoin-foundation/issue/FIL-1751): the backup
-  target, provisioned with Object Lock in compliance mode or an account that
-  cannot delete.
+  target, provisioned with Object Lock in compliance mode or read-only
+  snapshots out of reach of the appliance's account.
 
 - [FIL-1619](https://linear.app/filecoin-foundation/issue/FIL-1619): a key pair
   per region, with the private key in central OpenBao behind a restore-only
@@ -827,6 +833,11 @@ These shorten recovery, catch problems earlier or harden the appliance.
   tracks the harness change.
 
   Without versioning, a deletion bug on an S3-backed node is unrecoverable.
+
+- Daily snapshots on the storage array miss every blob written and deleted on
+  the same day, so a deletion bug can lose up to a day of new blobs. Hourly
+  snapshots would shrink that window, and delaying Piri's deletes past the next
+  snapshot would close it.
 
 - Piri cannot resync its database from the chain. The chain holds only each
   root's piece CID, and only Postgres knows which blobs make up a piece. Any
