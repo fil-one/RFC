@@ -122,11 +122,10 @@ A task that touches one instance's local state is placed there with `Node`, and 
 Queue order (sync spawns only go down):
 
 1. [`queue-multipart-upload`](#multipart-upload-queue-queue-multipart-upload)
-2. [`queue-multipart-upload-shard`](#multipart-upload-shard-queue-queue-multipart-upload-shard)
-3. [`queue-bucket`](#bucket-queue-queue-bucket)
-4. [`queue-space-upload`](#space-upload-queue-queue-space-upload)
-5. [`queue-space-shard`](#space-shard-queue-queue-space-shard)
-6. [`queue-shard`](#shard-queue-queue-shard)
+2. [`queue-bucket`](#bucket-queue-queue-bucket)
+3. [`queue-space-upload`](#space-upload-queue-queue-space-upload)
+4. [`queue-space-shard`](#space-shard-queue-queue-space-shard)
+5. [`queue-shard`](#shard-queue-queue-shard)
 
 Rule 5 is the lock-ordering discipline Ingot already follows (commits take their claim-key locks sorted by digest so two commits sharing digests cannot deadlock). The difference is that it is now stated once for every queue, which matters most where porting today's code would break it: see the release check under [`queue-space-shard.release`](#queue-space-shardrelease).
 
@@ -242,7 +241,7 @@ The catalog log queues a [`queue-bucket.ship`][bucket-ship] whenever it seals a 
     * (sync) [`queue-space-shard.add`][space-shard-add] - records the shard as parked, unless the space has it parked or accepted already
         * (async, at 24 hours) [`queue-space-shard.expire`][space-shard-expire] - cancelled when the part row takes the reference over
 1. (sync) [`queue-multipart-upload.add-part`][multipart-upload-add-part] - takes the shards' references over
-    * (async) [`queue-multipart-upload-shard.accept`][multipart-upload-shard-accept] - submitted as a replacement
+    * (async) [`queue-multipart-upload.accept`][multipart-upload-accept] - submitted as a replacement
         * (async) [`queue-space-shard.accept`][space-shard-accept] - each parked shard, submitted as a replacement
     * (async) [`queue-space-shard.release`][space-shard-release] - each shard of a replaced part this one does not name, due now: a part is never readable
 
@@ -253,8 +252,7 @@ The catalog log queues a [`queue-bucket.ship`][bucket-ship] whenever it seals a 
 ### `CompleteMultipartUpload`
 
 1. (sync) [`queue-multipart-upload.complete`][multipart-upload-complete]
-    * (sync, as a task of its own) [`queue-multipart-upload-shard.accept`][multipart-upload-shard-accept] - an ordinary task, never a replacement, for the listed parts
-        * (async) [`queue-space-shard.accept`][space-shard-accept] - each of their shards still parked. Complete brings these forward and waits for them, and fails the request if one cannot be accepted
+    * (async, committed at once) [`queue-space-shard.accept`][space-shard-accept] - each shard of the listed parts still parked. Complete brings these forward and waits for them, and fails the request if one cannot be accepted
     * (sync) [`queue-bucket.commit`][bucket-commit] with a `Put` change - the parts' references become the version's claims, spawning as for `PutObject`
     * (async) [`queue-space-shard.release`][space-shard-release] - each shard of recorded parts not listed in the request, due now
         * (async) [`queue-shard.evict`][shard-evict]
@@ -277,7 +275,7 @@ The catalog log queues a [`queue-bucket.ship`][bucket-ship] whenever it seals a 
 [bucket-set-tagging]: #queue-bucketset-tagging
 [bucket-set-cors]: #queue-bucketset-cors
 [bucket-set-encryption]: #queue-bucketset-encryption
-[multipart-upload-shard-accept]: #queue-multipart-upload-shardaccept
+[multipart-upload-accept]: #queue-multipart-uploadaccept
 [multipart-upload-abort]: #queue-multipart-uploadabort
 [multipart-upload-add-part]: #queue-multipart-uploadadd-part
 [multipart-upload-complete]: #queue-multipart-uploadcomplete
@@ -306,7 +304,7 @@ Every change to an upload runs here, one at a time: its creation, its parts, its
 
 Create, add-part and Complete run sync, and take what they write from their request, through its context, rather than from stored arguments: a task its caller abandoned can answer nobody, so it fails without acting. The auto-abort a create schedules, and the reap a Complete schedules, carry their own arguments.
 
-An upload's accept is scheduled on its own queue, `queue-multipart-upload-shard`, and each shard is concluded on `queue-space-shard`, so no network call made to accept a part holds up a `queue-multipart-upload.add-part`.
+Accepting an upload's parts makes no network call here: `queue-multipart-upload.accept` only queues each parked shard's `queue-space-shard.accept`, which concludes it under the shard's own subject. So the accept runs on the upload's subject in turn with its other changes, and holds none of them up for long.
 
 Actions:
 
@@ -351,12 +349,33 @@ type AddPartResult struct {
 
 Spawns:
 
-* (async) `queue-multipart-upload-shard.accept` - with `NotBefore` set to now, submitted as a replacement, so an upload has at most one accept pending
+* (async) `queue-multipart-upload.accept` - with `NotBefore` set to now, submitted as a replacement, so an upload has at most one accept pending
 * (async) `queue-space-shard.release` - each shard of a replaced part this one does not name, due now: a part is never readable
+
+#### `queue-multipart-upload.accept`
+
+Queues a `queue-space-shard.accept` for each shard of the upload's parked parts, in one submission ([Submitting many](#submitting-many)), and marks a part with no shards accepted, since nothing else will. It makes no network calls. Does nothing when nothing is parked or the upload is no longer open. Replaces the per-upload acceptor goroutine and the sweeper that nudges it.
+
+```go
+type AcceptTask struct {
+  Task
+  UploadID uuid.ID
+}
+
+type AcceptResult struct {
+  Queued int // shards whose accept this execution queued
+}
+```
+
+Spawns:
+
+* (async) `queue-space-shard.accept` - each shard of the parked parts, as a replacement, so a shard has at most one accept pending however many parts or uploads name it
+
+Retries: 5 attempts, backing off from 5 seconds, doubling. A later part's accept, or a Complete, queues whatever is left.
 
 #### `queue-multipart-upload.complete`
 
-Assembles the object from the listed parts and puts it. After the response's headers have gone out, so a long accept is covered by the keep-alive, it runs `queue-multipart-upload-shard.accept` for the parts it lists as a task of its own, not a child, then brings forward the `queue-space-shard.accept` of each of their shards still pending and waits for them, within 30 seconds in all. Their writes commit before Complete reads the parts again and before it assembles the object's tree, which reads accepted shards back through their locations ([rule 7](#handlers-must)). A listed part still parked after the wait has a shard whose accept failed, and Complete fails for the client to retry. Parts recorded but not listed in the request are dropped. A completed upload is kept, so a repeated Complete answers with the same version, until its `queue-multipart-upload.reap`.
+Assembles the object from the listed parts and puts it. After the response's headers have gone out, so a long accept is covered by the keep-alive, it queues the `queue-space-shard.accept` of each shard of the parts it lists that are still parked, committed at once rather than with its own commit, then brings them forward and waits for them, within 30 seconds in all. Their writes commit before Complete reads the parts again and before it assembles the object's tree, which reads accepted shards back through their locations ([rule 7](#handlers-must)). A listed part still parked after the wait has a shard whose accept failed, and Complete fails for the client to retry. Parts recorded but not listed in the request are dropped. A completed upload is kept, so a repeated Complete answers with the same version, until its `queue-multipart-upload.reap`.
 
 ```go
 type CompleteTask struct {
@@ -373,7 +392,7 @@ type CompleteResult struct {
 
 Spawns:
 
-* (sync, as a task of its own, committed before Complete reads on) `queue-multipart-upload-shard.accept` - the listed parts, whose `queue-space-shard.accept` tasks Complete then waits for
+* (async, committed at once, before Complete reads on) `queue-space-shard.accept` - each shard of the listed parts still parked, which Complete then waits for
 * (sync) `queue-bucket.commit` - a `Put` change that adds the object to the bucket
 * (async) `queue-space-shard.release` - each shard of recorded parts not listed in the request, due now: a part is never readable
 * (async) `queue-multipart-upload.reap` - with a `NotBefore` one session TTL out
@@ -415,40 +434,6 @@ type ReapResult = Unit
 ```
 
 Spawns: NONE
-
-### Multipart Upload Shard Queue (`queue-multipart-upload-shard`)
-
-Serialized on: `upload ID`
-
-i.e. one accept per upload at a time, running apart from the upload's own queue.
-
-Schedules the acceptance of a multipart upload's parked shards while the client is still uploading, so CompleteMultipartUpload has only the last few left to accept. The shards are concluded by `queue-space-shard.accept`, under each shard's own subject, so a shard's conclude never runs beside its release or a write's add of it. This queue makes no network calls.
-
-Actions:
-
-#### `queue-multipart-upload-shard.accept`
-
-Queues a `queue-space-shard.accept` for each shard of the upload's parked parts, including parts parked while it runs, in one submission ([Submitting many](#submitting-many)). A part with no shards is marked accepted here, since nothing else will. Does nothing when nothing is parked or the upload is no longer open. Replaces the per-upload acceptor goroutine and the sweeper that nudges it.
-
-`queue-multipart-upload.complete` runs this action for the parts it lists, as a task of its own. Submitted as an ordinary task, never a replacement, it runs after any accept already pending.
-
-```go
-type AcceptTask struct {
-  Task
-  UploadID uuid.ID
-  Parts    []int // limits the accept to these parts; empty for every parked part
-}
-
-type AcceptResult struct {
-  Queued int // shards whose accept this execution queued
-}
-```
-
-Spawns:
-
-* (async) `queue-space-shard.accept` - each shard of the parked parts, as a replacement, so a shard has at most one accept pending however many parts or uploads name it
-
-Retries: 5 attempts, backing off from 5 seconds, doubling. A later part's accept, or the accept CompleteMultipartUpload runs, queues whatever is left.
 
 ### Bucket Queue (`queue-bucket`)
 
@@ -943,7 +928,7 @@ Retries: as `queue-shard.cache`. One that fails for longer, such as a disk that 
 |---|---|
 | Release sweeper | `queue-space-shard.release` with `NotBefore` |
 | Stream sweeper (aborts a stream whose request died) | Not needed. A failed stream aborts its allocation inline; one abandoned by a crash is never concluded and the provider expires it within 24 hours. An unaccepted blob counts toward no space usage and is never served, so nothing needs to abort it sooner. References an abandoned request took are removed by `queue-space-shard.expire` |
-| Multipart acceptor, and the accept sweeper that nudges it | `queue-multipart-upload-shard.accept`, which queues a `queue-space-shard.accept` per shard |
+| Multipart acceptor, and the accept sweeper that nudges it | `queue-multipart-upload.accept`, which queues a `queue-space-shard.accept` per shard |
 | Session expiry | `queue-multipart-upload.abort` with `NotBefore` |
 | Reaping completed sessions | `queue-multipart-upload.reap` with `NotBefore` |
 | Upload registration sweep | `queue-space-upload` |
@@ -989,7 +974,7 @@ The queue gauges are read from Postgres each time they are collected, and every 
 | Advisory lock per (upload ID, part number) on a part write | `registry/stores_postgres.go` (put part) | `queue-multipart-upload` |
 | `FOR SHARE` read of the multipart session row, against a concurrent Complete or Abort | `registry/stores_postgres.go` (put part) | `queue-multipart-upload` |
 | In-process mutex per bucket, plus the compare-and-swap of the bucket root | `bucketop` (`Coordinator`) | `queue-bucket` |
-| In-process ownership of each upload's acceptor goroutine | `s3frontend/acceptor.go` | `queue-multipart-upload-shard.accept`, and `queue-space-shard.accept` per shard |
+| In-process ownership of each upload's acceptor goroutine | `s3frontend/acceptor.go` | `queue-multipart-upload.accept`, and `queue-space-shard.accept` per shard |
 | In-process mutex per (space, digest), so two streams of the same bytes in one space never both record a location | `s3frontend` (`Backend.blobKeys`, taken in `concludeStreamed`) | `queue-space-shard` |
 | In-memory spool holds per (space, digest), which stop a file a write is still uploading from being moved or removed | `blockstore/spool.go` (`Spool.holds`) | Nothing: an upload reads no local file, so there is no spool (see `queue-shard`) |
 | Lease on `blob_streams` rows, renewed by the live request | `s3frontend/stream.go` | Nothing: an unconcluded allocation expires on the provider, and `queue-space-shard.add` is the upload's first durable step |
