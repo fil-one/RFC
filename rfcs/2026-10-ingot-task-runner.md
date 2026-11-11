@@ -371,7 +371,7 @@ Spawns:
 
 * (async) `queue-space-shard.accept` - each shard of the parked parts, as a replacement, so a shard has at most one accept pending however many parts or uploads name it
 
-Retries: 5 attempts, backing off from 5 seconds, doubling. A later part's accept, or a Complete, queues whatever is left.
+Retries: no attempt limit, backing off from 5 seconds, doubling, up to 5 minutes. Once the client has sent its last part only a Complete queues it again, and dropping it would leave the parts' shards parked until their provider expires them.
 
 #### `queue-multipart-upload.complete`
 
@@ -808,7 +808,7 @@ type AcceptResult = Unit
 
 Spawns: NONE
 
-Retries: 5 attempts, backing off from 5 seconds, doubling. A failed conclude records nothing ([rule 2](#the-runner-guarantees)); concluding a shard again counts as a repeat.
+Retries: no attempt limit, backing off from 5 seconds, doubling, up to 5 minutes. A failed conclude records nothing ([rule 2](#the-runner-guarantees)); concluding a shard again counts as a repeat. A provider expires an allocation that is not accepted within a day, so dropping the accept would lose the part. When the provider answers that it no longer holds the allocation (`AllocationExpired` or `AllocationNotFound` on the `/blob/accept` receipt), the failure is permanent and the accept drops the park. Its parts stay parked with no park behind them: Complete answers `InvalidPart` for them, and a part uploaded again parks a new allocation.
 
 #### `queue-space-shard.expire`
 
