@@ -75,7 +75,7 @@ A handler can be registered as batching, with a limit. One execution then takes 
 
 ### Retries
 
-An action registers with a retry policy for when it runs async: a backoff (first delay, maximum delay, multiplier) and an optional attempt limit. A sync task is never retried: it fails its caller, and the S3 client retries the request. A handler can mark an error as permanent (an abort refused because the blob was accepted, an expired proof) to stop the retries. A task that fails permanently or runs out of attempts is recorded as failed and logged, and monitoring shows it by queue and action. By default the due tasks behind a task waiting to retry run during its backoff. A policy can hold the subject instead, so the tasks behind wait for the retry and the subject's order survives a failure. That holds up the subject's sync tasks too, so only actions whose order matters more than that use it. A task waiting to retry can still be cancelled, since its failed attempt changed nothing outside Postgres ([rule 8](#handlers-must)).
+An action registers with a retry policy for when it runs async: a backoff (first delay, maximum delay, multiplier) and an optional attempt limit. A sync task is never retried: it fails its caller, and the S3 client retries the request. A handler can mark an error as permanent (an abort refused because the blob was accepted, an expired proof) to stop the retries. A task that fails permanently or runs out of attempts is recorded as failed and logged, and monitoring shows it by queue and action. By default the due tasks behind a task waiting to retry run during its backoff. A policy can hold the subject instead, so the tasks behind wait for the retry and the subject's order survives a failure. That holds up the subject's sync tasks too, so only actions whose order matters more than that use it. A task waiting to retry can still be cancelled, so only an action whose failed attempts change nothing outside Postgres is ever cancelled. Ingot cancels only `queue-space-shard.expire`, which makes no network call. A `queue-space-shard.release` is never cancelled: a failed attempt may already have removed the blob.
 
 ### Failed tasks
 
@@ -467,7 +467,7 @@ Applies a list of key changes in order, and refuses a closing bucket (`queue-buc
 
 * the new version's sequence number and ID: a minted ID with versioning Enabled, the null version otherwise
 * what it supersedes: nothing with versioning Enabled, otherwise the key's null version, whose references are removed and whose upload is retracted
-* the write's preconditions (If-Match, If-None-Match), checked against the version it would supersede
+* the write's preconditions (If-Match, If-None-Match), checked against the key's current version whatever the write supersedes, and for a delete that names a version, against that version
 * for a delete, whether it adds a delete marker or removes the version, and the refusal of a version under retention or legal hold
 * for a put or copy, claiming the new version's pending references and cancelling their `queue-space-shard.expire` tasks
 * for the versions it supersedes or removes, dropping their claims, and queuing a release of each shard nothing else in the space claims
@@ -763,7 +763,7 @@ Makes a written shard durable for the space and takes the write's pending refere
 * **part** (UploadPart): records the shard as parked, with the provider but not yet accepted, for `queue-space-shard.accept` to conclude later;
 * **copy** (a copy within the bucket): sends nothing, and fails if the space no longer holds the shard.
 
-A space that holds the shard already, parked or accepted, keeps it, and a streamed write's own allocation is given up. The allocation's `/http/put` invocation carries derived signer keys, so it reaches the add through its caller's context and is never stored.
+A space that has the shard accepted keeps it, and the write's own allocation is given up. A part write also keeps a shard the space has parked. A streamed write that finds only a park concludes its own allocation, so it never returns before its shard is accepted and located. The allocation's `/http/put` invocation carries derived signer keys, so it reaches the add through its caller's context and is never stored.
 
 A `queue-space-shard.release` of the same space and digest cannot leave the upload without its blob. The body streams into an allocation of its own, which the release does not touch, and the add runs under the same lease as the release. So the add either finds the blob still there and takes a reference that keeps it, or finds it removed and concludes its own allocation in its place. That relies on the protocol's guarantee that a space can take a digest again once a `/blob/remove` of it has a receipt. An add that waits more than 30 seconds behind a release, running or waiting to retry, is refused with SlowDown, which the client retries.
 
@@ -812,7 +812,7 @@ Retries: 5 attempts, backing off from 5 seconds, doubling. A failed conclude rec
 
 #### `queue-space-shard.expire`
 
-Drops the pending reference a `queue-space-shard.add` took, if nothing took it over. Its takeover normally cancels it; if the takeover commits while it is already running, it finds the reference gone and does nothing. When nothing else in the space references the shard, it queues the shard's release due now: a shard nothing claimed was never readable, so no reader grace is owed.
+Drops the pending reference a `queue-space-shard.add` took, if nothing took it over. The add records the reference with this task's ID, and the expiry drops only the reference carrying its own ID, however many adds of the digest are pending. Its takeover normally cancels it; if the takeover commits while it is already running, it finds the reference gone and does nothing. When nothing else in the space references the shard, it queues the shard's release due now: a shard nothing claimed was never readable, so no reader grace is owed.
 
 ```go
 type ExpireTask struct {
@@ -835,7 +835,7 @@ Retries: no attempt limit, backing off from 1 second, doubling, up to 5 minutes.
 
 Removes the shard from the space on the network: `/blob/remove` if it was accepted, `/blob/abort` if it was parked and never accepted, and `/blob/remove` anyway if the provider answers that the space accepted it. A shard with neither a location nor a park may still be accepted, if a conclude was accepted and its location never recorded, so the release sends `/blob/remove` for it too, which costs one round trip and closes that leak. It deletes the shard's encryption params first (crypto-shred), so a shard nothing references becomes unreadable at once, and then its rows, with its commit. It evicts the cached copy unless another space's upload intent names the digest.
 
-Releases are queued by whatever drops a reference: a commit that drops a version's last claim, after the reader grace period and as a replacement, so a reader of the newer version gets its full grace; and a teardown, a replaced part or an expiry, due now. It does nothing when the space still references the shard (a write reused it, so no cancellation is needed) or when the shard's upload intent is gone, which only a release's commit removes (an earlier release has run).
+Releases are queued by whatever drops a reference: a commit that drops a version's last claim, after the reader grace period, so a reader of the newer version gets its full grace; and a teardown, a replaced part or an expiry, due now. Every release is queued as a replacement that keeps the later due time, so a due-now release queued while a graced one is pending keeps the grace. It does nothing when the space still references the shard (a write reused it, so no cancellation is needed) or when the shard's upload intent is gone, which only a release's commit removes (an earlier release has run).
 
 It shares its subject with the shard's `queue-space-shard.accept`, so it never runs while the shard is being concluded. A conclude Ingot gave up on (a timeout, or a crash that lets its lease lapse) may still be running at the upload service; ordering a remove against that is the upload service's to get right, and Ingot treats a `/blob/remove` receipt as final.
 
