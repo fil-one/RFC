@@ -94,9 +94,9 @@ A task that touches one instance's local state is placed there with `Node`, and 
 ### The runner guarantees
 
 1. **One consumer per subject.** At most one task per (queue, subject) runs at a time.
-    * A lease row per (queue, subject) in Postgres enforces it, so it holds across processes. The lease records its owner and expiry, and is renewed three times per lease period (30 seconds by default) while the task runs. A lease left unrenewed past its period is taken over by the next consumer to ask, which runs the interrupted task again; the old holder's commit then fails and writes nothing.
+    * A lease row per (queue, subject) in Postgres enforces it, so it holds across processes. The lease records its owner and expiry, and the runner renews every lease it holds each third of the lease period (every 10 seconds of the default 30), so two renewals can fail before a lease lapses. A lease released before its first renewal is never renewed. A lease left unrenewed past its period is taken over by the next consumer to ask, which runs the interrupted task again; the old holder's commit then fails and writes nothing.
     * A worker makes at most a set number of handler runs on one subject (100 by default, a batch counting as one) before it releases the lease, so one busy subject cannot hold a worker for good.
-    * A subject's due tasks run oldest first. A task is due when it has no `NotBefore` or its `NotBefore` has passed, so a delayed task never holds up the ones behind it.
+    * A subject's due tasks run oldest first. A task is due when its `NotBefore`, if it has one, has passed and it is not waiting out a retry backoff. A delayed task never holds up the ones behind it, and a task waiting to retry does so only when its action's policy holds the subject ([Retries](#retries)).
     * A sync child runs as soon as it has its subject's lease, without waiting for older due tasks there. Running another tree while its parent holds leases could deadlock. The handlers' own checks keep this safe.
 2. **Effects and spawns commit together.** A task's Postgres writes, its result, its completion, the rows of the tasks it spawns and its sync children's writes all commit in one transaction.
     * Handlers add their writes to an ordered list. The transaction opens only after every handler in the tree has run, and runs the list in the order the handlers ran it, so no transaction stays open across a network call.
@@ -114,10 +114,10 @@ A task that touches one instance's local state is placed there with `Node`, and 
 ### Handlers must
 
 4. **Be idempotent.** Effects outside Postgres (file renames, log fsyncs, network invocations) happen before the transaction in rule 2 commits, so a crash re-runs them. Every handler must tolerate running again after an effect already happened.
-5. **Sync-spawn only down the queue order, never up or across.** A task may sync-spawn only into a queue below its own in the order below. A task never sync-spawns onto a subject of its own queue. Async spawns may go anywhere.
-6. **Not recurse.** No action spawns, directly or through children, a task with its own action. The runner refuses such a spawn within a tree; an async task that later spawns its own action is not caught.
+5. **Sync-spawn only down the queue order, never up or across.** A task may sync-spawn only into a queue below its own in the order below. A task never sync-spawns onto a subject of its own queue. The runner refuses any other sync spawn with an error, so a breach fails the first test that runs its path and never becomes a deadlock. Async spawns may go anywhere.
+6. **Not recurse.** No action spawns, directly or through children, a task with its own action. [Rule 5](#handlers-must) already rules this out for sync spawns, so the rule matters for async ones: an action that spawns itself makes a chain of tasks that nothing bounds. The runner refuses such a spawn within a tree. It does not catch a cycle that crosses trees, where one action async-spawns another that later runs and spawns the first.
 7. **Not read their own tree's writes.** A tree's writes reach Postgres only when it commits ([rule 2](#the-runner-guarantees)), so a handler decides from what it read before the tree wrote anything and from its children's results, and never re-reads a row the tree has written. The runner cannot detect a breach, which shows up as a stale read, so a test helper runs each tree twice, once with writes held to the end and once with them applied straight away, and checks both give the same result.
-8. **Fail before acting.** A handler makes its checks, and returns any error it is going to return, before its first effect outside Postgres. After that, it fails only for an error a retry could never get past, such as an expired proof. A task then either fails having changed nothing outside Postgres or ends up committed, since a failed commit is retried ([rule 2](#the-runner-guarantees)). The one exception is a sync task whose commit keeps failing until its deadline: it expires, and any effect it already made outside Postgres stays, so it must be one that is safe to leave behind, such as an upload the provider expires on its own.
+8. **Fail before acting.** A handler makes its checks, and returns any permanent error it is going to return, before its first effect outside Postgres. After that, a permanent error is only for something a retry could never get past, such as an expired proof. An error a retry could get past, such as a provider that cannot be reached, is returned as an ordinary error at any point. An async task then runs again under its retry policy ([Retries](#retries)). A sync task fails its caller, and the client's retried request runs the handler again over whatever the first attempt left ([rule 4](#handlers-must)). Retried to the end, a task either fails having changed nothing outside Postgres or ends up committed, since a failed commit is retried too ([rule 2](#the-runner-guarantees)). Where the retries stop first (a sync task whose client gives up or whose commit keeps failing until its deadline, an async task out of attempts), the effects already made outside Postgres stay, so they must be safe to leave behind, such as an upload the provider expires on its own.
 
 Queue order (sync spawns only go down):
 
@@ -147,7 +147,7 @@ What happens in the handlers in terms of interactions with the queues. Indented 
 ### `DeleteBucket`
 
 1. (sync) [`queue-bucket.close`][bucket-close] - refuses a bucket that holds objects, and marks it closing, so no commit or new multipart upload gets in
-1. For each of the bucket's multipart uploads, as AWS deletes a bucket with its uploads. The request runs them: the multipart queue is above the bucket queue, so a bucket task cannot
+1. For each of the bucket's multipart uploads, as AWS deletes a bucket with its uploads. The request runs them: the multipart queue is above the bucket queue, so a bucket task cannot run them as sync children
     * an open upload: (sync) [`queue-multipart-upload.abort`][multipart-upload-abort]
         * (async) [`queue-space-shard.release`][space-shard-release] - each part shard, due now
     * a completed one: (sync) [`queue-multipart-upload.reap`][multipart-upload-reap]
@@ -155,6 +155,8 @@ What happens in the handlers in terms of interactions with the queues. Indented 
     * [`queue-space-shard.release`][space-shard-release] - each of the space's pending releases, run at once, ignoring `NotBefore`
         * (async) [`queue-shard.evict`][shard-evict]
     * `queue-space-upload` - the space's pending registrations and retractions, run at once
+
+A step that fails fails the request and leaves the bucket closing. The client's retry starts again from the close, which accepts a bucket already closing, and aborts the uploads that remain.
 
 ### `PutBucketVersioning`
 
