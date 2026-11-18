@@ -24,7 +24,7 @@ This RFC proposes that Ingot records every blob range it serves to an S3 client,
 - Piri and Ingot share one implementation of the journal, the batching and the reporting.
 - Recording a read adds no network call and no database write to a GET.
 
-Re-enabling Piri's tracker, moving the egress tracking service to UCAN 1.0 and deploying it from `infra-central` are separate pieces of work that this design depends on. They are listed under [Order of work](#order-of-work).
+Moving the egress tracking service to UCAN 1.0 and deploying it from `infra-central` is separate work that this design depends on. Re-enabling Piri's tracker can follow later, because the trial limit needs only Ingot's records. Both are listed under [Order of work](#order-of-work).
 
 ## Design
 
@@ -232,9 +232,9 @@ The reporter's work could run as harmonydb tasks in Piri and as task-runner task
 
 1. Build `libforge/egress` with the UCAN 1.0 batch format, add `/content/serve` to libforge, and rename the tracking commands to `/egress/track` and `/egress/consolidate`. libforge, the delegator, smelt and the egress tracking spec still carry the `/space` prefix of the UCAN 0.9 capability names.
 2. Move the egress tracking service to ucantone and libforge with the two totals, and deploy it from `infra-central`. The service still speaks UCAN 0.9 through go-ucanto and go-libstoracha, stores its records in DynamoDB and checks spaces against the Storacha-era upload API tables.
-3. Re-enable Piri's tracker on the shared package.
-4. Grant `/content/serve` from Hilt with the S3 read actions.
-5. Add the `/content/serve` records, the batch endpoint and the track delegation to Ingot.
+3. Grant `/content/serve` from Hilt with the S3 read actions.
+4. Add the `/content/serve` records, the batch endpoint and the track delegation to Ingot.
+5. Re-enable Piri's tracker on the shared package.
 6. Update the retrieval and egress tracking specs.
 
 ## References
