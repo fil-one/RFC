@@ -23,7 +23,7 @@ We get there through three product tiers, rolled out in this order:
 | Tier | Survives the loss of | Who it is for |
 |---|---|---|
 | **Local** | Hardware inside one data center | Neoclouds (newer GPU and AI cloud providers), and anyone who wants inexpensive storage close to their compute. This is effectively what we sell today. |
-| **Sovereign** | A whole data center, with data kept inside one region or country | Buyers who need their data to stay in-country or in-region. Costs less than full copies only where a region has three or more data centers. |
+| **Sovereign** | A whole data center. | Buyers who need their data to stay in-country or in-region. Costs less than full copies only where a region has three or more data centers. |
 | **Global** | A whole region | Media and other high-bandwidth streaming workloads. For them it works much like a CDN. |
 
 Not every line of the user story applies to every tier. "Upload once, download anywhere at comparable performance" is the Global tier, and even there only where we run data centers. A single global endpoint is where every tier ends up, but for a long time Local and Sovereign customers will use a regional endpoint.
