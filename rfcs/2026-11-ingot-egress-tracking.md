@@ -127,6 +127,17 @@ Ingot issues one record for each blob the read tier opens for an S3 client's rea
 
 Nothing is counted after decryption. The command is about a blob, and a count in another unit could not be checked against the range. A ranged GET of an encrypted object reads whole ciphertext chunks, so it counts up to a chunk more at each end than the client receives.
 
+Ingot encrypts in chunks of 256 KiB of plaintext, each stored with a 16-byte tag, and never reads the envelope header when serving. What is recorded against what is sent:
+
+| Read of an encrypted object | Sent | Recorded |
+| --- | --- | --- |
+| The whole of a 1 KiB object | 1,024 B | 1,040 B |
+| The whole of a 1 GiB object | 1 GiB | 1 GiB + 64 KiB |
+| 1 MiB at an arbitrary offset | 1 MiB | about 1.25 MiB |
+| 4 KiB at an arbitrary offset | 4 KiB | about 256 KiB |
+
+Whole-object and large sequential reads record 0.006% more than they send. Small ranged reads record far more: a million 4 KiB ranged reads deliver about 3.8 GiB and record about 244 GiB. A trial account that queries Parquet or similar files in place reaches 1 TiB of recorded egress well before it has received that much. An unencrypted bucket records exactly what it sends.
+
 Ingot opens an object's blobs one at a time as the response streams. A GET the client abandons half way records the bytes sent from the blobs it reached and nothing for the rest. A read that sends nothing issues no record. A response cut short by a crash issues no receipt, so its bytes go uncounted.
 
 The record does not depend on the tier. A hit and a miss for the same request produce the same record, and a miss that fills the cache with more than the request asked for still records only what was sent.
