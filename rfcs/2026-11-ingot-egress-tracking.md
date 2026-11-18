@@ -93,6 +93,8 @@ A read that misses Ingot's cache appears in both, so the tracker never adds them
 
 The subject is the bucket's space, a `did:key`. The proofs are the requesting access key's `/content/serve` chain for that space: the space's root delegation to the tenant, the tenant's grant to the access key, and the key's delegation to Ingot. Hilt grants `/content/serve` wherever it grants `/content/retrieve` for an S3 read action, so every key that can read a bucket holds both.
 
+A read by a key with no `/content/serve` chain is refused, as a read from a storage node is refused today without a `/content/retrieve` chain. Hilt stores a key's grants when the key is created, so a key issued before Hilt grants `/content/serve` holds no chain. There is no production deployment yet, so development and staging keys are reissued and no grants are migrated.
+
 The invocation says what was asked for and the receipt says what was sent. Ingot issues the invocation when it opens the blob, and issues the receipt itself when the read ends, with the number of bytes it wrote to the response:
 
 ```jsonc
@@ -121,13 +123,15 @@ Neither token crosses the network. Both are built in the request's goroutine and
 
 ### What Ingot records
 
-Ingot issues one record for each blob the read tier opens for an S3 client's read (`Layered.OpenBlob` and `Layered.OpenBlobRange`). The invocation's range is the stored bytes the request needs from that blob (ciphertext offsets for an encrypted blob). The receipt's count is the stored bytes written to the response by the time the reader is closed.
+Ingot issues one record for each blob it opens to answer an S3 client's read, in the body reader that assembles a response from an object's blobs. The invocation's range is the stored bytes the request needs from that blob (ciphertext offsets for an encrypted blob).
+
+The receipt's count is the bytes of the response body that came from the blob, counted as the response reads them, after decryption and after trimming to the requested range. A one-byte ranged GET of an encrypted object reads a whole ciphertext chunk from the blob and counts one byte.
 
 Ingot opens an object's blobs one at a time as the response streams. A GET the client abandons half way records the bytes sent from the blobs it reached and nothing for the rest. A read that sends nothing issues no record. A response cut short by a crash issues no receipt, so its bytes go uncounted.
 
 The record does not depend on the tier. A hit and a miss for the same request produce the same record, and a miss that fills the cache with more than the request asked for still records only what was sent.
 
-Reads that serve no client issue no record: the source reads of a CopyObject between spaces and of an UploadPartCopy, and catalog blocks. The copy paths mark their reads so the read tier can tell.
+Reads that serve no client issue no record: the source reads of a CopyObject between spaces and of an UploadPartCopy, and catalog blocks. The copy paths mark their reads so the body reader issues nothing for them, and catalog blocks never pass through it.
 
 ### Journal and batches
 
@@ -150,6 +154,10 @@ For each sealed batch the reporter:
 
 Piri's earlier implementation left step 4 unwritten.
 
+A consolidation that fails outright leaves the batch in place, and the reporter submits it again under a new track task. It does the same when it cannot tell whether the tracker accepted a track, after a lost response or a crash before step 2. The tracker therefore counts a batch CID once for a reporter, however many tasks name it.
+
+A consolidation that succeeds settles the batch even when the totals differ or the tracker refused some records. Its receipt names each record it refused, and submitting the same batch again would give the same answer.
+
 The reporting state lives on disk beside its batch, and one loop per process scans the directory. A batch file is local to one instance, so a shared database adds nothing, and the package needs neither Piri's task engine nor Ingot's task runner.
 
 #### Where the tracker fetches Ingot's batches
@@ -168,13 +176,14 @@ The package (`libforge/egress`) holds the journal and the reporting:
 - **Reporter.** Tracks sealed batches, polls for consolidation receipts, checks the totals and removes settled batches.
 - **Handler.** An `http.Handler` that serves a sealed batch by CID.
 
-The host supplies its signer, the tracker's DID, URL and proofs, a directory, and the public URL of its handler. It records a receipt with one call: Piri from its `/content/retrieve` handler, with the invocation it was sent and the receipt it issued, and Ingot from the read tier, with the `/content/serve` pair it built. The package does not read the command.
+The host supplies its signer, the tracker's DID, URL and proofs, a directory, and the public URL of its handler. It records a receipt with one call: Piri from its `/content/retrieve` handler, with the invocation it was sent and the receipt it issued, and Ingot from its body reader, with the `/content/serve` pair it built. The package reads the command in one place, to measure a batch for step 4 of reporting, and a host can supply its own measure.
 
 ### What the tracker has to accept
 
 The tracker's rule that every receipt in a batch is issued by the principal that submitted the batch holds for both kinds of record. It adds:
 
 - **`/content/serve` receipts.** The invocation's issuer and audience are both the submitter, and the proof chain runs from the space to the submitter. A served record's egress is the receipt's `bytes`, which may not exceed the invocation's range. A retrieved record's egress is still the size of the range.
+- **A batch counted once.** A reporter may submit one batch CID under more than one `/egress/track` task. The tracker counts it once and answers a repeat with the consolidation it already has.
 - **A total per command.** Each consolidated record adds to the served or the retrieved total for its space, by the invocation's command. No query sums the two.
 - **Days by consolidation date.** Egress is assigned to the day its batch is consolidated, as it is today, whatever the receipts' `iat`. A day's total never changes after the day ends, so a late batch adds to the current billing period and no closed bill is amended.
 - **Batches of any size up to 1 GiB.** The egress tracking spec sets a 10 MiB minimum, which a batch sealed by age on a quiet appliance cannot meet. The minimum is removed: the tracker never enforced it, and Piri's journal sealed every 12 hours whatever its size.
@@ -224,6 +233,7 @@ The reporter's work could run as harmonydb tasks in Piri and as task-runner task
 - The same sequence of S3 requests produces the same served total with the cache enabled and with `cache_writes: false`.
 - A CopyObject between spaces and an UploadPartCopy add nothing to the served total.
 - A GET abandoned after a known number of bytes adds that number to the served total.
+- A ranged GET of an encrypted object adds the length of the range to the served total.
 - The consolidation receipt's total matches the reporter's own sum for every batch in a smelt run.
 - GET latency and throughput for small objects, measured before and after, show the cost of the two signatures.
 - Piri's tracker is re-enabled on the shared package with no batching code of its own.
