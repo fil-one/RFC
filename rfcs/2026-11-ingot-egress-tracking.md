@@ -42,13 +42,13 @@ sequenceDiagram
     Piri--)Ingot: receipt + bytes
     Piri->>Piri: journal receipt
     Ingot--)Client: bytes
-    Ingot->>Ingot: issue and journal receipt (bytes sent)
+    Ingot->>Ingot: issue and journal receipt (bytes read and sent)
 
     Note over Client,Ingot: Cache hit
     Client->>Ingot: GetObject
     Ingot->>Ingot: /content/serve
     Ingot--)Client: bytes
-    Ingot->>Ingot: issue and journal receipt (bytes sent)
+    Ingot->>Ingot: issue and journal receipt (bytes read and sent)
 
     Note over Ingot,Tracker: Reporting
     Ingot->>Tracker: /egress/track (batch of /content/serve receipts)
@@ -95,7 +95,7 @@ The subject is the bucket's space, a `did:key`. The proofs are the requesting ac
 
 A read by a key with no `/content/serve` chain is refused, as a read from a storage node is refused today without a `/content/retrieve` chain. Hilt stores a key's grants when the key is created, so a key issued before Hilt grants `/content/serve` holds no chain. There is no production deployment yet, so development and staging keys are reissued and no grants are migrated.
 
-The invocation says what was asked for and the receipt says what was sent. Ingot issues the invocation when it opens the blob, and issues the receipt itself when the read ends, with the number of bytes it wrote to the response:
+The invocation says what was asked for and the receipt says what happened. Ingot issues the invocation when it opens the blob, and issues the receipt itself when the read ends, with two counts:
 
 ```jsonc
 {
@@ -108,8 +108,10 @@ The invocation says what was asked for and the receipt says what was sent. Ingot
     "ran": { "/": "bafy..serveTask" },
     "out": {
       "ok": {
-        // bytes of the range sent to the client
-        "bytes": 524288
+        // stored bytes of the range that were read
+        "read": 524320,
+        // bytes sent to the client from them
+        "sent": 300000
       }
     }
   },
@@ -123,26 +125,28 @@ Neither token crosses the network. Both are built in the request's goroutine and
 
 ### What Ingot records
 
-Ingot issues one record for each blob the read tier opens for an S3 client's read (`Layered.OpenBlob` and `Layered.OpenBlobRange`). The invocation's range and the receipt's count are both in the blob's stored bytes, the bytes its digest names. The range is the stored bytes the request needs from the blob, and the count is how many of them Ingot had read for the response when the reader was closed.
+Ingot issues one record for each blob it opens for an S3 client's read. It does so in the per-blob opener that maps a range of the object onto the blob's stored bytes, which is the one place that sees both what is read from the blob and what goes to the response.
 
-Nothing is counted after decryption. The command is about a blob, and a count in another unit could not be checked against the range. A ranged GET of an encrypted object reads whole ciphertext chunks, so it counts up to a chunk more at each end than the client receives.
+- The invocation's **range** is the stored bytes the request needs from the blob.
+- The receipt's **`read`** is how many of those stored bytes Ingot had read when the reader was closed. It is in the unit of the range and of the blob's digest, so it can be checked against them.
+- The receipt's **`sent`** is the bytes that went to the response from the blob, after decryption and after trimming to the requested range. This is the customer's egress.
 
-Ingot encrypts in chunks of 256 KiB of plaintext, each stored with a 16-byte tag, and never reads the envelope header when serving. What is recorded against what is sent:
+The two differ for an encrypted object. Ingot encrypts in chunks of 256 KiB of plaintext, each stored with a 16-byte tag, and a ranged GET reads every chunk its range overlaps. It never reads the envelope header when serving.
 
-| Read of an encrypted object | Sent | Recorded |
+| Read of an encrypted object | `sent` | `read` |
 | --- | --- | --- |
 | The whole of a 1 KiB object | 1,024 B | 1,040 B |
 | The whole of a 1 GiB object | 1 GiB | 1 GiB + 64 KiB |
 | 1 MiB at an arbitrary offset | 1 MiB | about 1.25 MiB |
 | 4 KiB at an arbitrary offset | 4 KiB | about 256 KiB |
 
-Whole-object and large sequential reads record 0.006% more than they send. Small ranged reads record far more: a million 4 KiB ranged reads deliver about 3.8 GiB and record about 244 GiB. A trial account that queries Parquet or similar files in place reaches 1 TiB of recorded egress well before it has received that much. An unencrypted bucket records exactly what it sends.
+Whole-object and large sequential reads read 0.006% more than they send. Small ranged reads read far more: a million 4 KiB ranged reads send about 3.8 GiB and read about 244 GiB. A trial limit applied to `read` would cut off an account that queries Parquet or similar files in place well before it had received 1 TiB, which is why the limit is applied to `sent`. For an unencrypted bucket the two counts are equal.
 
 Ingot opens an object's blobs one at a time as the response streams. A GET the client abandons half way records the bytes sent from the blobs it reached and nothing for the rest. A read that sends nothing issues no record. A response cut short by a crash issues no receipt, so its bytes go uncounted.
 
 The record does not depend on the tier. A hit and a miss for the same request produce the same record, and a miss that fills the cache with more than the request asked for still records only what was sent.
 
-Reads that serve no client issue no record: the source reads of a CopyObject between spaces and of an UploadPartCopy, and catalog blocks. The copy paths mark their reads so the read tier issues nothing for them.
+Reads that serve no client issue no record: the source reads of a CopyObject between spaces and of an UploadPartCopy, and catalog blocks. The copy paths mark their reads so the opener issues nothing for them, and catalog blocks never pass through it.
 
 ### Journal and batches
 
@@ -187,13 +191,13 @@ The package (`libforge/egress`) holds the journal and the reporting:
 - **Reporter.** Tracks sealed batches, polls for consolidation receipts, checks the totals and removes settled batches.
 - **Handler.** An `http.Handler` that serves a sealed batch by CID.
 
-The host supplies its signer, the tracker's DID, URL and proofs, a directory, and the public URL of its handler. It records a receipt with one call: Piri from its `/content/retrieve` handler, with the invocation it was sent and the receipt it issued, and Ingot from the read tier, with the `/content/serve` pair it built. The package reads the command in one place, to measure a batch for step 4 of reporting, and a host can supply its own measure.
+The host supplies its signer, the tracker's DID, URL and proofs, a directory, and the public URL of its handler. It records a receipt with one call: Piri from its `/content/retrieve` handler, with the invocation it was sent and the receipt it issued, and Ingot from its blob opener, with the `/content/serve` pair it built. The package reads the command in one place, to measure a batch for step 4 of reporting, and a host can supply its own measure.
 
 ### What the tracker has to accept
 
 The tracker's rule that every receipt in a batch is issued by the principal that submitted the batch holds for both kinds of record. It adds:
 
-- **`/content/serve` receipts.** The invocation's issuer and audience are both the submitter, and the proof chain runs from the space to the submitter. A served record's egress is the receipt's `bytes`, which may not exceed the invocation's range. A retrieved record's egress is still the size of the range.
+- **`/content/serve` receipts.** The invocation's issuer and audience are both the submitter, and the proof chain runs from the space to the submitter. A served record's egress is the receipt's `sent`. The tracker refuses a record whose `read` exceeds the invocation's range or whose `sent` exceeds its `read`. A retrieved record's egress is still the size of the range.
 - **A batch counted once.** A reporter may submit one batch CID under more than one `/egress/track` task. The tracker counts it once and answers a repeat with the consolidation it already has.
 - **A total per command.** Each consolidated record adds to the served or the retrieved total for its space, by the invocation's command. No query sums the two.
 - **Days by consolidation date.** Egress is assigned to the day its batch is consolidated, as it is today, whatever the receipts' `iat`. A day's total never changes after the day ends, so a late batch adds to the current billing period and no closed bill is amended.
@@ -227,6 +231,10 @@ Ingot could issue both tokens when it opens a blob and count the invocation's ra
 
 An abandoned GET would then count the rest of the open blob, up to about 254 MiB, with little sent. A video player that asks for an open-ended range and aborts on every seek could reach the 1 TiB trial limit this way.
 
+### One count in the receipt
+
+The receipt could carry only the stored bytes read, or only the bytes sent. Stored bytes alone make the trial limit wrong for small ranged reads of encrypted objects, by the factor in the table above. Sent bytes alone are in a different unit from the invocation's range, so the tracker could not check the receipt against the invocation, and the blob digest in the arguments would say nothing about what was counted.
+
 ### Count bytes at the S3 layer
 
 Ingot could count the bytes written to each GET response and publish per-bucket totals as metrics or an access log. This costs no signatures and no journal. The figures are unsigned and reach billing through a second pipeline with its own storage, delivery and retention.
@@ -244,7 +252,7 @@ The reporter's work could run as harmonydb tasks in Piri and as task-runner task
 - The same sequence of S3 requests produces the same served total with the cache enabled and with `cache_writes: false`.
 - A CopyObject between spaces and an UploadPartCopy add nothing to the served total.
 - A GET abandoned after a known number of bytes adds that number to the served total.
-- A ranged GET of an encrypted object adds the size of the ciphertext chunks its range covers to the served total.
+- A ranged GET of an encrypted object adds the length of the range to the served total.
 - The consolidation receipt's total matches the reporter's own sum for every batch in a smelt run.
 - GET latency and throughput for small objects, measured before and after, show the cost of the two signatures.
 - Piri's tracker is re-enabled on the shared package with no batching code of its own.
