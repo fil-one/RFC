@@ -123,15 +123,15 @@ Neither token crosses the network. Both are built in the request's goroutine and
 
 ### What Ingot records
 
-Ingot issues one record for each blob it opens to answer an S3 client's read, in the body reader that assembles a response from an object's blobs. The invocation's range is the stored bytes the request needs from that blob (ciphertext offsets for an encrypted blob).
+Ingot issues one record for each blob the read tier opens for an S3 client's read (`Layered.OpenBlob` and `Layered.OpenBlobRange`). The invocation's range and the receipt's count are both in the blob's stored bytes, the bytes its digest names. The range is the stored bytes the request needs from the blob, and the count is how many of them Ingot had read for the response when the reader was closed.
 
-The receipt's count is the bytes of the response body that came from the blob, counted as the response reads them, after decryption and after trimming to the requested range. A one-byte ranged GET of an encrypted object reads a whole ciphertext chunk from the blob and counts one byte.
+Nothing is counted after decryption. The command is about a blob, and a count in another unit could not be checked against the range. A ranged GET of an encrypted object reads whole ciphertext chunks, so it counts up to a chunk more at each end than the client receives.
 
 Ingot opens an object's blobs one at a time as the response streams. A GET the client abandons half way records the bytes sent from the blobs it reached and nothing for the rest. A read that sends nothing issues no record. A response cut short by a crash issues no receipt, so its bytes go uncounted.
 
 The record does not depend on the tier. A hit and a miss for the same request produce the same record, and a miss that fills the cache with more than the request asked for still records only what was sent.
 
-Reads that serve no client issue no record: the source reads of a CopyObject between spaces and of an UploadPartCopy, and catalog blocks. The copy paths mark their reads so the body reader issues nothing for them, and catalog blocks never pass through it.
+Reads that serve no client issue no record: the source reads of a CopyObject between spaces and of an UploadPartCopy, and catalog blocks. The copy paths mark their reads so the read tier issues nothing for them.
 
 ### Journal and batches
 
@@ -176,7 +176,7 @@ The package (`libforge/egress`) holds the journal and the reporting:
 - **Reporter.** Tracks sealed batches, polls for consolidation receipts, checks the totals and removes settled batches.
 - **Handler.** An `http.Handler` that serves a sealed batch by CID.
 
-The host supplies its signer, the tracker's DID, URL and proofs, a directory, and the public URL of its handler. It records a receipt with one call: Piri from its `/content/retrieve` handler, with the invocation it was sent and the receipt it issued, and Ingot from its body reader, with the `/content/serve` pair it built. The package reads the command in one place, to measure a batch for step 4 of reporting, and a host can supply its own measure.
+The host supplies its signer, the tracker's DID, URL and proofs, a directory, and the public URL of its handler. It records a receipt with one call: Piri from its `/content/retrieve` handler, with the invocation it was sent and the receipt it issued, and Ingot from the read tier, with the `/content/serve` pair it built. The package reads the command in one place, to measure a batch for step 4 of reporting, and a host can supply its own measure.
 
 ### What the tracker has to accept
 
@@ -233,7 +233,7 @@ The reporter's work could run as harmonydb tasks in Piri and as task-runner task
 - The same sequence of S3 requests produces the same served total with the cache enabled and with `cache_writes: false`.
 - A CopyObject between spaces and an UploadPartCopy add nothing to the served total.
 - A GET abandoned after a known number of bytes adds that number to the served total.
-- A ranged GET of an encrypted object adds the length of the range to the served total.
+- A ranged GET of an encrypted object adds the size of the ciphertext chunks its range covers to the served total.
 - The consolidation receipt's total matches the reporter's own sum for every batch in a smelt run.
 - GET latency and throughput for small objects, measured before and after, show the cost of the two signatures.
 - Piri's tracker is re-enabled on the shared package with no batching code of its own.
