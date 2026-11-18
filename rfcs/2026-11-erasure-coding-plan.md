@@ -10,7 +10,7 @@ Status: Experimental
 
 Forge protects stored data today with ZFS inside a single disk enclosure. The products we want to sell next need more: data that survives losing an enclosure, then a data center, then a region, without paying for a full copy at every level. Erasure coding is how storage systems get that durability at a fraction of the cost of copies, and building it into Forge is a multi-quarter initiative.
 
-We will build it in five stages, each adding a failure domain the data can survive: stage 1 ships by mid-November 2026, stage 2 by the end of 2026, Sovereign in Q1 2027, Global by the end of Q2 2027, and untrusted operators by the end of 2027. Stage 1 is broken down to user stories, stage 2 has a broad strategy, and later stages are named units of work. Many decisions are still open, and each has a stage by which it has to be settled. Please push on the order and the boundaries of the stages, and help pick off the open questions.
+We will build it in five stages, each adding a failure domain the data can survive: stage 1, the groundwork, lands by the end of November 2026, stage 2 by the end of 2026, Sovereign in Q1 2027, Global by the end of Q2 2027, and untrusted operators by the end of 2027. Stage 1 is broken down to user stories, stage 2 has a broad strategy, and later stages are named units of work. Many decisions are still open, and each has a stage by which it has to be settled. Please push on the order and the boundaries of the stages, and help pick off the open questions.
 
 ## Where we want to end up
 
@@ -60,11 +60,11 @@ The code we expect to start from is systematic Reed-Solomon. That choice is stil
 
 The Forge components involved: ingot is the S3 gateway, which encrypts and will encode data; sprue is the upload service that chooses storage nodes; piri is the storage node, which proves possession on chain through PDP (proof of data possession); Hilt holds tenants and their keys. A head is the server that disk enclosures attach to.
 
-Each stage adds one failure domain. Stage 5 adds a different axis, trust in the operators.
+Stage 1 is groundwork and stages 2 to 4 each add one failure domain. Stage 5 adds a different axis, trust in the operators.
 
 | Stage | Target | Survives loss of | Tier | Where redundancy lives | Repair | Location index |
 |---|---|---|---|---|---|---|
-| 1 | Mid-November 2026 | Disks within an enclosure | Local | ZFS, one pool per enclosure | ZFS | Ingot's Postgres |
+| 1 | End of November 2026 | Disks on one host (dev and staging) | Groundwork | ZFS | ZFS | Ingot's Postgres |
 | 2 | End of 2026 | An enclosure | Local | Erasure coding in ingot, across enclosures | Trusted, simplest possible | Ingot's Postgres |
 | 3 | Q1 2027, aiming for mid-quarter | A data center | Sovereign | Erasure coding across data centers in a region | A separate service, across sites | Replicated across the region's sites |
 | 4 | End of Q2 2027 | A region | Global | Erasure coding across regions | Global | Global (design open) |
@@ -74,39 +74,32 @@ A tier is a placement policy chosen per bucket, and the hardware does not change
 
 We build iteratively wherever a door is two-way, or "one and a half way": reversible with a data migration. "One-way door" in this RFC means a choice no migration can undo.
 
-## Stage 1: Local, resilient to disk failure
+## Stage 1: Groundwork for many piri per site
 
-Stage 1 involves no erasure coding. One ingot serves each data center, one piri serves each disk enclosure, and each enclosure runs a ZFS pool, likely with all of a site's piri processes on the same head. ZFS is the only durability: losing a disk is routine, and losing a whole enclosure loses the data on it. The difference from today is that a site runs several enclosures.
+Stage 1 involves no erasure coding. It gets a site ready to run many piri and gets piri ready to hold erasure-coded pieces, so that stage 2 starts from working operations and a sound storage node. Production sites are expected to start at stage 2, so stage 1 is shown on dev and staging, where ZFS on the host remains the only durability.
 
-Much of this exists. Dev and staging already run three piri behind one ingot, each with its own key, wallet, data set and database ([FIL-1503](https://linear.app/filecoin-foundation/issue/FIL-1503)), and sprue already spreads writes across a site's piri. What production lacks is the operational shape.
+Much of this exists. Dev and staging already run three piri behind one ingot, each with its own key, wallet, data set and database ([FIL-1503](https://linear.app/filecoin-foundation/issue/FIL-1503)), and sprue already spreads writes across a site's piri.
 
-**Story: Run a production site with several enclosures.** As FilOne operations, I want to bring up a site with one head and several ZFS enclosures, each served by its own piri, so that a site's capacity grows past one enclosure.
+**Story: Run and grow a site with many piri.** As FilOne operations, I want to add a piri to a running site and keep deploying as the piri count rises, so that a site can grow to the dozens of piri stage 2 may need.
 
-- A reference design documents the head, the enclosures, and the ZFS layout, and staging mirrors it.
-- A platform deploy completes at the production piri count.
-- Writes spread across a site's piri by available capacity, and a full piri stops taking writes.
+- A new piri joins a running site by a documented procedure, without resetting the site or central services.
+- A platform deploy completes at any piri count. Today a deploy waits for every piri to be in a safe proving window at the same moment.
+- Writes land evenly across a site's piri at equal weights. An off-by-one in the weighted node selector skews them today.
 - Every piri record carries its site and enclosure.
+- Alerts fire when a wallet balance or a payment lock-up runs low ([FIL-1146](https://linear.app/filecoin-foundation/issue/FIL-1146)).
 
-Tasks: the reference hardware and ZFS design; staging on the same layout; deploys that do not wait for every piri to be in a safe proving window at once; database and resource budgets per piri; a free-space admission check; fixing an off-by-one in the weighted node selector, which skews how writes spread at equal weights; flushing blob writes to disk before the database commits ([FIL-1611](https://linear.app/filecoin-foundation/issue/FIL-1611)); failure-domain labels on node records.
+**Story: Piri is ready to hold pieces.** As a Forge engineer, I want piri to store, persist and remove standalone pieces correctly, so that erasure coding builds on a storage node we trust.
 
-**Story: Add and retire enclosures without a reset.** As FilOne operations, I want to add an enclosure to a running site and to drain and retire one, so that sites grow and age without downtime.
+- Piri's aggregation threshold is 8 MiB ([FIL-1656](https://linear.app/filecoin-foundation/issue/FIL-1656)). Piri folds blobs at or below the threshold into shared on-chain aggregates; the design intent is 8 MiB, but the shipped default is still 128 MiB. Erasure-coded pieces are meant to stand alone, so this plan assumes the 8 MiB floor and keeps pieces above it. Once stage 2 cuts objects into pieces near that floor, an object becomes many more blobs, and each blob upload costs its own chain of invocations today. The [multi-blob add protocol](https://github.com/fil-one/RFC/pull/29) announces a whole batch in one exchange.
+- Blob writes reach disk before the database commits the rows that point to them ([FIL-1611](https://linear.app/filecoin-foundation/issue/FIL-1611)).
+- Piece removals are signed and land on chain; they revert today ([FIL-1657](https://linear.app/filecoin-foundation/issue/FIL-1657)). Repair and rebalancing at stage 2 both remove pieces.
 
-- A new piri joins a running site, funded and registered, without resetting the site or central services.
-- A piri can stop taking writes, hand its data off, and leave its data set.
-- Wallet funding and balance alerts are automatic.
+Stage 1 also carries two pieces of design input for later stages:
 
-Tasks: add-a-piri tooling; drain-and-retire tooling; signed on-chain piece removal, which reverts today ([FIL-1657](https://linear.app/filecoin-foundation/issue/FIL-1657)) and blocks retiring anything that has been proven; automated wallet funding.
-
-**Story: Know when an enclosure is in trouble.** As on-call, I want to be alerted by enclosure when a pool degrades, a disk fails, space runs low, or proofs fail, so that we act before customer data is at risk.
-
-- Alerts fire for pool health, disk failure, free space ([FIL-1209](https://linear.app/filecoin-foundation/issue/FIL-1209)) and proving faults, labelled by enclosure.
-- A runbook and a written durability statement cover losing a disk and losing an enclosure.
-
-Stage 1 also carries groundwork that stage 2 depends on:
-
-- **Measure object and part sizes** in production, by count and by bytes. Every small-data decision in stage 2 depends on this distribution.
-- **Lower piri's aggregation threshold to 8 MiB** ([FIL-1656](https://linear.app/filecoin-foundation/issue/FIL-1656)). Piri folds blobs at or below the threshold into shared on-chain aggregates; the design intent is 8 MiB, but the shipped default is still 128 MiB. Erasure-coded pieces are meant to stand alone, so this plan assumes the 8 MiB floor and keeps pieces above it. Once stage 2 cuts objects into pieces near that floor, an object becomes many more blobs, and each blob upload costs its own chain of invocations today. The [multi-blob add protocol](https://github.com/fil-one/RFC/pull/29) announces a whole batch in one exchange.
+- **Measure object and part sizes,** by count and by bytes. Every small-data decision in stage 2 depends on this distribution.
 - **Design stage 3 and 4 location indexing.** Ingot's Postgres is currently the permanent record of where data lives, and it can serve stages 1 and 2. How that record spans sites and regions is a design question for later stages, and it should be started early.
+
+Disk-failure alerting that works for any disk layout follows once the stage 2 layout is chosen.
 
 ## Stage 2: Local, resilient to enclosure loss
 
