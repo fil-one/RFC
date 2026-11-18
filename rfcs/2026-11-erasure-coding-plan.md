@@ -110,7 +110,11 @@ Stage 1 also carries groundwork that stage 2 depends on:
 
 ## Stage 2: Local, resilient to enclosure loss
 
-At stage 2, erasure coding moves into ingot above piri, and placement spreads each stripe's pieces across enclosures so the site survives losing a whole one. How piri maps to disks is open. One option runs enclosures as plain JBODs (disks presented individually, with no RAID or ZFS pool) with one piri per disk, grouped by enclosure: one layer of parity, finer failure domains, and dozens of piri per head. The other keeps one piri per enclosure on its ZFS pool and codes across enclosures on top: today's node shape and fewer piri, paying for ZFS parity underneath the code's. Repair is trusted and as simple as it can be. All traffic stays inside one data center, and there is no single global endpoint yet. Existing ZFS data stays on ZFS, so whole-blob ZFS piri and erasure-coded piri run side by side in a region and routing tells them apart. Whether that data ever moves is open.
+At stage 2, erasure coding moves into ingot above piri, and placement spreads each stripe's pieces across enclosures so the site survives losing a whole one. Repair is trusted and as simple as it can be. All traffic stays inside one data center, and there is no single global endpoint yet. 
+
+How piri maps to disks is open. One option runs enclosures as plain JBODs (disks presented individually, with no RAID or ZFS pool) with one piri per disk, grouped by enclosure: one layer of parity, finer failure domains, and dozens of piri per head. The other keeps one piri per enclosure on its ZFS pool and codes across enclosures on top: today's node shape and fewer piri, paying for ZFS parity underneath the code's. 
+
+Existing ZFS data stays on ZFS, so whole-blob ZFS piri and erasure-coded piri run side by side in a region and routing tells them apart. Whether that data ever moves is open.
 
 The major units of work, with a broad strategy for each:
 
