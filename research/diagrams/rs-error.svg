@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 660 380" role="img" aria-label="A wrong piece does not sit on the line the other pieces agree on" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13">
+  <rect width="660" height="380" fill="#ffffff"/>
+  <g stroke="#e5e7eb" stroke-width="1">
+    <line x1="150" y1="30" x2="150" y2="310"/>
+    <line x1="240" y1="30" x2="240" y2="310"/>
+    <line x1="330" y1="30" x2="330" y2="310"/>
+    <line x1="420" y1="30" x2="420" y2="310"/>
+    <line x1="510" y1="30" x2="510" y2="310"/>
+  </g>
+  <g stroke="#6b7280" stroke-width="1.25">
+    <line x1="60" y1="310" x2="600" y2="310"/>
+    <line x1="60" y1="30" x2="60" y2="310"/>
+  </g>
+  <g fill="#4b5563" text-anchor="middle">
+    <text x="150" y="330">piece 1</text>
+    <text x="240" y="330">piece 2</text>
+    <text x="330" y="330">piece 3</text>
+    <text x="420" y="330">piece 4</text>
+    <text x="510" y="330">piece 5</text>
+  </g>
+  <!-- the line y = 2x + 1 -->
+  <line x1="78" y1="277.8" x2="546" y2="38.6" stroke="#111827" stroke-width="1.5"/>
+  <!-- where piece 3 should be -->
+  <circle cx="330" cy="149" r="8" fill="#ffffff" stroke="#6b7280" stroke-width="1.5" stroke-dasharray="4 3"/>
+  <line x1="330" y1="159" x2="330" y2="231" stroke="#dc2626" stroke-width="1.25" stroke-dasharray="4 3"/>
+  <!-- good points -->
+  <g fill="#2563eb">
+    <circle cx="150" cy="241" r="8"/>
+    <circle cx="240" cy="195" r="8"/>
+  </g>
+  <g fill="#d97706">
+    <circle cx="420" cy="103" r="8"/>
+    <circle cx="510" cy="57" r="8"/>
+  </g>
+  <!-- the wrong point -->
+  <circle cx="330" cy="241" r="8" fill="#dc2626"/>
+  <text x="346" y="246" fill="#dc2626">piece 3 arrived with the wrong value</text>
+  <text x="346" y="146" fill="#4b5563">where the other four say it should be</text>
+  <circle cx="76" cy="358" r="6" fill="#dc2626"/>
+  <text x="90" y="362" fill="#111827">a piece that is present but wrong stands out, because only one line fits the rest</text>
+</svg>
