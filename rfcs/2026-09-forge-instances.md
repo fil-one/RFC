@@ -148,7 +148,10 @@ production nodes as much as possible.
 Typically, we will need to quickly stand up a new pilot region within 72 hours, keep it running &
 meeting SLAs for 90 days, and decommission it after that.
 
-We will _not_ offer data migration from pilot regions to production.
+We will _not_ offer data migration from pilot regions to production. Customers who want to keep
+their data can use the [credible exit export](2026-08-credible-exit-under-encryption.md): a
+key-manifest CAR produced before decommission remains decryptable with the customer's key after the
+pilot instance is gone.
 
 - **Update frequency:** Manually triggered updates. Typically once before the pilot starts and then
   when the customer requests new features or we need to fix bugs.
