@@ -165,8 +165,9 @@ Rejected. The person who merges the promotion decides whether a build has run lo
 
 Forge Instances gave dev a weekly reset.
 
-Rejected. We reset staging when a change needs it, and nothing so far calls for resetting it more
-often.
+Rejected for now. The weekly reset was never implemented for dev, because the need for it did not
+arise. We can add a schedule to staging later, when we need one to reduce the storage used or to
+deal with abuse.
 
 ## Open questions
 
