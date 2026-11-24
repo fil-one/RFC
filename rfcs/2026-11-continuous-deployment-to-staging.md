@@ -13,8 +13,8 @@ Forge repository is deployed to dev within minutes. A bot then opens a pull requ
 the change to staging, and a person merges it.
 
 This RFC proposes to remove the dev instance and deploy every change to staging automatically. It
-updates [Forge Instances & Pilot Regions](./2026-09-forge-instances.md) and the two deployment
-strategy RFCs; [Changes to earlier RFCs](#changes-to-earlier-rfcs) lists what changes in each.
+supersedes parts of [Forge Instances & Pilot Regions](./2026-09-forge-instances.md) and of other
+earlier RFCs, listed in [Superseded parts of earlier RFCs](#superseded-parts-of-earlier-rfcs).
 
 ## Motivation
 
@@ -103,20 +103,22 @@ together with the dev instance.
 - **We have no stable non-production instance.** Anything that needs one, such as a customer demo
   or a long-running performance test, has no home until we decide where it goes.
 
-## Changes to earlier RFCs
+## Superseded parts of earlier RFCs
 
-- [Forge Instances & Pilot Regions](./2026-09-forge-instances.md): the dev instance (section 2) is
-  removed. Staging (section 3) takes dev's update frequency and stability, and its data is reset on
-  demand. The note about access keys spanning dev and staging no longer applies.
-- [Forge-Central Deployment Strategy](./2026-08-forge-central-deployment-strategy.md) and
-  [Fil One Appliance Deployment Strategy](./2026-08-fil-one-appliance-deployment-strategy.md):
-  continuous deployment targets staging, and promotion starts from staging. The dev node and the
-  dev workspaces are removed. What these RFCs say about rehearsing upgrades in dev applies to
-  staging.
+This RFC supersedes the following:
+
+- [Forge Instances & Pilot Regions](./2026-09-forge-instances.md): the dev instance (section 2);
+  the update frequency, stability and data resets of staging (section 3); and the note about access
+  keys scoped to dev or staging.
+- [Forge-Central Deployment Strategy](./2026-08-forge-central-deployment-strategy.md): continuous
+  delivery to the dev environment, and promotion from dev to staging and production.
+- [Fil One Appliance Deployment Strategy](./2026-08-fil-one-appliance-deployment-strategy.md): the
+  dev node, continuous deployment to it, promotion of versions tested in dev, and upgrade
+  rehearsals in dev.
 - [Appliance Layout and Disaster Recovery](./2026-10-appliance-layout-and-disaster-recovery.md):
-  the dev layout on AWS EC2 is removed.
+  the dev layout on AWS EC2.
 - [Forge Network Service Identities](./2026-07-forge-service-identities.md): the `dev` label for
-  ephemeral and personal stages is removed.
+  ephemeral and personal stages.
 
 ## Alternatives considered
 
