@@ -89,7 +89,7 @@ Staging takes over what dev was for, and gives up the role Forge Instances gave 
 ### Remove personal sandbox stages
 
 We documented a way to stand up a personal copy of the central services under the `dev` DNS label.
-Nobody uses it, and a local [smelt](https://github.com/fil-forge/smelt) network already serves the
+Nobody has used it so far, and a local [smelt](https://github.com/fil-forge/smelt) network already serves the
 purpose of trying a change before it merges. The procedure and the `dev` DNS zones are removed
 together with the dev instance.
 
@@ -134,7 +134,7 @@ maintain a third instance, and still keep a semi-stable tier nobody uses.
 
 Keep the procedure and the `dev` DNS zones, and base a personal stage on staging's configuration.
 
-Rejected because nobody uses personal stages and smelt covers the need.
+Rejected because nobody has used a personal stage so far and smelt covers the need.
 
 ### Keep staging's protections and rehearse elsewhere
 
