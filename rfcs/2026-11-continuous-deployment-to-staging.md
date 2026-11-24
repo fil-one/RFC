@@ -33,7 +33,7 @@ earlier RFCs, listed in [Superseded parts of earlier RFCs](#superseded-parts-of-
 - A change merged to `main` in a Forge service repository or infrastructure repository runs on
   staging within minutes, with no action from a person.
 - We operate two long-lived Forge instances: staging and production.
-- One manual step stands between a merged change and production.
+- A routine change needs one manual step to reach production: merging its promotion.
 - Staging is the place for destructive work: network resets, destructive tests and rehearsals of
   risky upgrades.
 
@@ -64,7 +64,9 @@ The automation that deploys to dev today targets staging:
 - The tests run against staging after each deploy. When they pass, a bot opens the pull request
   that promotes the same versions to production.
 
-A person merges the production promotion. That merge is the only manual step.
+A person merges the production promotion. For a routine change, a new image or a configuration
+change, that merge is the only manual step on the way to production. Today the same change needs
+two, because a person also merges the promotion to staging.
 
 ### Staging is the lowest environment
 
