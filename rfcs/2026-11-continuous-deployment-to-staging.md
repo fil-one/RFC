@@ -72,8 +72,7 @@ Staging takes over what dev was for, and gives up the role Forge Instances gave 
 
 - **No stability guarantees.** Staging runs whatever was merged last. It is no longer a stable
   preview and it is no longer updated by hand.
-- **Resets on demand.** We reset staging when a change needs it. There is no reset schedule, so
-  test accounts and their data last until somebody resets the network deliberately.
+- **Resets on demand.** We reset staging when a change needs it. There is no reset schedule.
 - **Destructive tests run against it.** The tests that lock and disable tenants keep running, now
   against staging only.
 - **Staging can be rebuilt.** We remove the protections that stop us from rebuilding staging's
@@ -166,8 +165,8 @@ Rejected. The person who merges the promotion decides whether a build has run lo
 
 Forge Instances gave dev a weekly reset.
 
-Rejected. A scheduled reset removes the test accounts and data the nightly tests rely on. We reset
-staging when a change needs it.
+Rejected. We reset staging when a change needs it, and nothing so far calls for resetting it more
+often.
 
 ## Open questions
 
