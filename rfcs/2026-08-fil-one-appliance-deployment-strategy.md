@@ -2,6 +2,12 @@
 
 **Status:** Proposal
 
+> **Update 2026-11-24:**
+> [Continuous Deployment to Staging](./2026-11-continuous-deployment-to-staging.md) proposes to
+> remove the dev node. Continuous deployment then targets the staging node, promotion to other
+> nodes starts from staging, and what this RFC says about rehearsing upgrades in dev applies to
+> staging.
+
 ## Authors
 
 - [Miroslav Bajtoš](https://github.com/bajtos)

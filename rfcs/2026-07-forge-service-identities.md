@@ -2,6 +2,11 @@
 
 Status: Experimental
 
+> **Update 2026-11-24:**
+> [Continuous Deployment to Staging](./2026-11-continuous-deployment-to-staging.md) proposes to
+> remove the dev network and the personal stages, and with them the `dev` label described in the
+> [Dev](#dev) section.
+
 ## Authors
 
 - [Alan Shaw](https://github.com/alanshaw)
