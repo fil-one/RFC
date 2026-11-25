@@ -66,7 +66,7 @@ Ingot keeps a running count in memory for each bucket's space and the current ho
 | `bytes_sent` | bytes sent in that hour so far |
 | `bytes_reported` | the value of `bytes_sent` Hilt last acknowledged |
 
-The write adds to the row for (space, hour), so several Ingot instances sharing a database count into the same rows. A crash loses at most 5 seconds of counts. Egress is under-counted after a crash and never counted twice.
+The write adds to the row for (space, hour), so several Ingot instances sharing a database count into the same rows. A crash loses at most 5 seconds of counts, so egress is under-counted after a crash. A write that fails is retried. If it had in fact been saved and only its reply was lost, its bytes are added twice, which over-counts by at most 5 seconds of one instance's traffic. That is accepted.
 
 A bucket with no reads in an hour has no row for it.
 
