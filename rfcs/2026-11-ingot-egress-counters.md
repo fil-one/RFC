@@ -105,7 +105,10 @@ A task on Ingot's task runner runs every 10 minutes, which is configurable. It s
 
 When more than 1,000 minutes are waiting, after many buckets were read or Hilt was unreachable, the task sends further invocations, oldest minutes first, until none are left. Each invocation is acknowledged on its own, and one space's minutes may be split across several, since Hilt stores each minute separately.
 
-The command is named for usage, with egress as one field of its arguments, so that it can carry other counts only the gateway knows. Object counts are the expected next one: Ingot registers every object with the upload service today only so that it can be counted there.
+The command is named for usage, with egress as one field of its arguments, so that it can carry other counts only the gateway knows. Two are expected to follow:
+
+- **Object counts.** Ingot registers every object with the upload service today only so that it can be counted there.
+- **Logical bytes stored.** The sum of object sizes as the customer sees them. The upload service counts the bytes a space holds, which include Ingot's catalog segments and the overhead of encryption, and will include parity once blobs are erasure coded. Only Ingot knows what the customer stored.
 
 The entries are tuples, grouped by space, so a space's DID is sent once however many minutes it has. A report names no tenant. Hilt knows each bucket's tenant and provider, and looks them up by space.
 
