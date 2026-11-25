@@ -117,7 +117,9 @@ The entries are tuples, grouped by space, so a space's DID is sent once however 
 
 Hilt accepts a report only from an issuer it has registered as a provider. It stores one row for each (provider, space, hour), where the provider is that issuer, with the bucket's tenant beside it. A report replaces the row's count, so one that is repeated, or resent after a lost response, leaves the same totals. Hilt keeps the rows for as long as the tenant exists: a bucket read in every hour of a year holds 8,760.
 
-One count Hilt cannot use does not fail the report. Hilt skips the counts for a space it does not know, or for a bucket that another provider serves, stores the rest, and names the spaces it skipped in its receipt. Ingot marks the skipped rows as reported, so they are not sent again, and counts them in a metric. A report fails as a whole only when its issuer is not a registered provider or it cannot be read.
+One count Hilt cannot use does not fail the report. Hilt leaves out the counts for a space it does not know, or for a bucket that another provider serves, and stores the rest. Its receipt carries a warning for each space left out, with a `name` (`UnknownBucket` or `BucketRegionMismatch`), a `message` and the `space`. A report fails as a whole only when its issuer is not a registered provider or it cannot be read.
+
+A report Hilt accepts settles every count in it, warned about or not, so Ingot marks them all as reported and sends none again. It logs each warning with its message and counts it under its name. A warning is a named entry, where a list of skipped spaces could say only one thing, so later counts can bring warnings of their own.
 
 Hilt deletes a bucket's record when the bucket is deleted, and a report for the bucket's last hours can arrive afterwards, long afterwards if the appliance was offline. Hilt therefore keeps the space, tenant and provider of a deleted bucket for as long as the tenant exists, and attributes and checks late counts against that.
 
@@ -146,8 +148,8 @@ Storage nodes are a different case and this RFC does not change it. A node's egr
 ## Operations
 
 - **Storage.** The counts live in Ingot's Postgres schema with the rest of its state, and are backed up and restored with it. A bucket read in every hour of a week holds 168 rows. No new filesystem or quota is needed.
-- **Metrics.** Ingot reports the number of rows waiting to be reported, how long the oldest unreported count has waited, and the counts Hilt skipped.
-- **Alerts.** An Ingot whose oldest unreported count has waited longer than three intervals, and any count Hilt skipped. This catches reports that are failing. Detecting an Ingot that is down is left to the monitoring that already watches the appliance.
+- **Metrics.** Ingot reports the number of rows waiting to be reported, how long the oldest unreported count has waited, and Hilt's warnings by name.
+- **Alerts.** An Ingot whose oldest unreported count has waited longer than three intervals, and any warning from Hilt. This catches reports that are failing. Detecting an Ingot that is down is left to the monitoring that already watches the appliance.
 - **Delegations.** None are added or changed, for an appliance or for an access key. Removing a provider from Hilt stops its reports being accepted.
 
 ## Alternatives considered
@@ -173,7 +175,7 @@ Ingot could write a line for each GET and ship the log, and totals would be comp
 - A GET of a known number of bytes adds that number to the bucket's and the tenant's egress at Hilt.
 - A ranged GET of an encrypted object adds the length of the range.
 - A GET abandoned part way adds what was sent, to within one buffer, and a CopyObject adds nothing.
-- A report holding a count for a space Hilt does not know stores its other counts, and Ingot does not send the skipped count again.
+- A report holding a count for a space Hilt does not know stores its other counts and comes back with an `UnknownBucket` warning for that space, and Ingot does not send the count again.
 - The same requests add the same egress with Ingot's cache enabled and with `cache_writes: false`.
 - Hilt accepts a report that carries no proofs from a registered provider, and refuses one from any other issuer.
 - With Hilt unreachable for an hour and then restored, Hilt's totals equal Ingot's, with nothing counted twice.
