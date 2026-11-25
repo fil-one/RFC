@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 300" role="img" aria-label="Rebuilding one lost piece reads four surviving pieces" font-family="-apple-system, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13">
+  <rect width="720" height="300" fill="#ffffff"/>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0L10 5L0 10z" fill="#6b7280"/>
+    </marker>
+  </defs>
+  <!-- pieces -->
+  <g stroke-width="1.25">
+    <rect x="50" y="30" width="90" height="50" rx="6" fill="#dbeafe" stroke="#2563eb"/>
+    <rect x="156" y="30" width="90" height="50" rx="6" fill="#ffffff" stroke="#dc2626" stroke-width="2" stroke-dasharray="5 4"/>
+    <rect x="262" y="30" width="90" height="50" rx="6" fill="#dbeafe" stroke="#2563eb"/>
+    <rect x="368" y="30" width="90" height="50" rx="6" fill="#dbeafe" stroke="#2563eb"/>
+    <rect x="474" y="30" width="90" height="50" rx="6" fill="#fef3c7" stroke="#d97706"/>
+    <rect x="580" y="30" width="90" height="50" rx="6" fill="#fef3c7" stroke="#d97706"/>
+  </g>
+  <g fill="#111827" text-anchor="middle">
+    <text x="95" y="60">Data 1</text>
+    <text x="201" y="54" fill="#dc2626">Data 2</text>
+    <text x="201" y="70" fill="#dc2626" font-size="12">lost</text>
+    <text x="307" y="60">Data 3</text>
+    <text x="413" y="60">Data 4</text>
+    <text x="519" y="60">Parity 1</text>
+    <text x="625" y="60">Parity 2</text>
+  </g>
+  <text x="625" y="100" text-anchor="middle" fill="#6b7280" font-size="12">not needed</text>
+  <!-- reads -->
+  <g stroke="#6b7280" stroke-width="1.25" fill="none">
+    <line x1="95" y1="80" x2="300" y2="148" marker-end="url(#arrow)"/>
+    <line x1="307" y1="80" x2="340" y2="148" marker-end="url(#arrow)"/>
+    <line x1="413" y1="80" x2="380" y2="148" marker-end="url(#arrow)"/>
+    <line x1="519" y1="80" x2="420" y2="148" marker-end="url(#arrow)"/>
+    <line x1="360" y1="190" x2="360" y2="223" marker-end="url(#arrow)"/>
+  </g>
+  <text x="222" y="175" text-anchor="end" fill="#6b7280" font-size="12">read 4 whole pieces</text>
+  <!-- decoder -->
+  <rect x="235" y="150" width="250" height="40" rx="6" fill="#f3f4f6" stroke="#6b7280" stroke-width="1.25"/>
+  <text x="360" y="175" text-anchor="middle" fill="#111827">Decode: solve for the lost values</text>
+  <!-- rebuilt -->
+  <rect x="315" y="225" width="90" height="50" rx="6" fill="#dbeafe" stroke="#2563eb" stroke-width="2"/>
+  <text x="360" y="249" text-anchor="middle" fill="#111827">Data 2</text>
+  <text x="360" y="265" text-anchor="middle" fill="#111827" font-size="12">rebuilt</text>
+</svg>
