@@ -102,11 +102,11 @@ A new command, `/s3/usage/report`, carries counts from Ingot to Hilt. The counts
 }
 ```
 
-A task on Ingot's task runner runs every 10 minutes, which is configurable. It sends every row whose `bytes_sent` differs from `bytes_reported`, up to 1,000 hours in one invocation, and sets `bytes_reported` to the value it sent when Hilt answers.
+Ingot reports every 10 minutes, which is configurable. A report sends every row whose `bytes_sent` differs from `bytes_reported`, up to 1,000 hours in one invocation, and sets `bytes_reported` to the value it sent when Hilt answers.
 
 The hour still in progress is sent with the rest. A report carries an hour's total so far, and Hilt replaces what it holds, so the same hour is sent again each time its count has grown. Hilt is therefore at most one interval behind, though the counts are kept by the hour.
 
-When more than 1,000 hours are waiting, after many buckets were read or Hilt was unreachable, the task sends further invocations, oldest hours first, until none are left. Each invocation is acknowledged on its own, and one space's hours may be split across several, since Hilt stores each hour separately.
+When more than 1,000 hours are waiting, after many buckets were read or Hilt was unreachable, Ingot sends further invocations, oldest hours first, until none are left. Each invocation is acknowledged on its own, and one space's hours may be split across several, since Hilt stores each hour separately.
 
 The command is named for usage, with egress as one field of its arguments, so that it can carry other counts only the gateway knows. Two are expected to follow:
 
