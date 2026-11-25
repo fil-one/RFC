@@ -45,7 +45,7 @@ sequenceDiagram
     Ingot->>Ingot: add bytes to (bucket, minute)
 
     Note over Ingot,Hilt: every 10 minutes
-    Ingot->>Hilt: /s3/egress/report (closed minutes)
+    Ingot->>Hilt: /s3/usage/report (closed minutes)
     Hilt->>Hilt: store counts
     Hilt--)Ingot: receipt
 
@@ -71,16 +71,17 @@ A bucket with no reads in a minute has no row for it.
 
 ### Reporting to Hilt
 
-A new command, `/s3/egress/report`, carries counts from Ingot to Hilt. Ingot invokes it as it invokes the other `/s3/*` commands, with the delegation Hilt issues it at provisioning.
+A new command, `/s3/usage/report`, carries counts from Ingot to Hilt. The counts are Ingot's own account of what it sent, so Ingot is the subject of the invocation as well as its issuer, and Hilt is the audience. An invocation on the issuer's own authority needs no delegation.
 
 ```jsonc
 {
   "iss": "did:web:ingot.example.com",
-  "sub": "did:web:hilt.example.com",
-  "cmd": "/s3/egress/report",
+  "aud": "did:web:hilt.example.com",
+  "sub": "did:web:ingot.example.com",
+  "cmd": "/s3/usage/report",
   "args": {
     // one entry for each space
-    "counts": [
+    "egress": [
       [
         "did:key:zBucketSpaceA",
         [
@@ -106,23 +107,25 @@ When more than 1,000 minutes are waiting, after many buckets were read or Hilt w
 
 The entries are tuples, grouped by space, so a space's DID is sent once however many minutes it has. A report names no tenant. Hilt knows each bucket's tenant and provider, and looks them up by space.
 
-Hilt stores one row for each (provider, space, minute), where the provider is the Ingot's registered identity, with the bucket's tenant beside it. A report replaces the row's count, so one that is repeated, or resent after a lost response, leaves the same totals. Hilt refuses counts for a space it does not know and for a bucket that another provider serves.
+Hilt accepts a report only from an issuer it has registered as a provider. It stores one row for each (provider, space, minute), where the provider is that issuer, with the bucket's tenant beside it. A report replaces the row's count, so one that is repeated, or resent after a lost response, leaves the same totals. Hilt refuses counts for a space it does not know and for a bucket that another provider serves.
 
 Hilt deletes a bucket's record when the bucket is deleted, and a report for the bucket's last minutes can arrive afterwards. Hilt therefore keeps the space, tenant and provider of a deleted bucket for 7 days, and attributes and checks late counts against that.
 
-Ingot reports when it has no rows to send, so Hilt can tell a quiet Ingot from a silent one.
+Ingot sends nothing when it has no rows to report.
 
 Ingot deletes a row 7 days after it was last reported. Until then a report can be repeated if Hilt loses data.
 
 ### Serving from Hilt
 
-Hilt's metrics endpoints already return an egress series beside storage and ingress, for a tenant and for a bucket, in windows of whole hours. Hilt fills each sample with the sum of the minutes that start in its window: a bucket's from the rows for its space, a tenant's from the rows stored with that tenant, which include its deleted buckets'. A window with no rows reports zero once its provider has reported past it, and has no sample before then: the series does not claim a reading it has not received.
+Hilt's metrics endpoints already return an egress series beside storage and ingress, for a tenant and for a bucket, in windows of whole hours. Hilt fills each sample with the sum of the minutes that start in its window: a bucket's from the rows for its space, a tenant's from the rows stored with that tenant, which include its deleted buckets'. A window with no rows reports zero. Counts that arrive later, up to the reporting interval behind or longer after an outage, raise the windows they belong to.
 
-fil-one needs no change to read it. Its usage job sums the series for each tenant and applies the limit, so a tenant's egress is already totalled across its buckets.
+fil-one needs no change to read it. Its usage job asks for each tenant's series from the start of the current billing period to now, sums it and applies the limit, so a tenant's egress is already totalled across its buckets. The limit is on egress within a billing period.
 
 ### How late a count is
 
 A byte sent is in Ingot's database within 5 seconds, in a closed minute within 2 minutes, and at Hilt within about 12 minutes at the default interval. fil-one's usage job runs every 12 hours, and that interval decides how far past the limit a trial account can read.
+
+The job sums the whole period again on every run and keeps no running total. A count that reaches Hilt late, after an outage, is missing from one run and included in the next, so a late report delays the limit by at most one run and loses no egress.
 
 ### Trust
 
@@ -133,9 +136,9 @@ Storage nodes are a different case and this RFC does not change it. A node's egr
 ## Operations
 
 - **Storage.** The counts live in Ingot's Postgres schema with the rest of its state, and are backed up and restored with it. A bucket read in every minute of a week holds about 10,000 rows. No new filesystem or quota is needed.
-- **Metrics.** Ingot reports the time since its last acknowledged report and the number of rows waiting to be reported. Hilt reports the time since each provider last reported.
-- **Alerts.** An Ingot whose last acknowledged report is older than three intervals, and a provider Hilt has not heard from in that time.
-- **Delegation.** `/s3/egress/report` is added to the commands of the Hilt-to-Ingot delegation, which is issued once for each appliance at provisioning and has to be issued again for the appliances that exist. No access key's grants change.
+- **Metrics.** Ingot reports the number of rows waiting to be reported and the age of the oldest.
+- **Alerts.** An Ingot whose oldest waiting row is older than three intervals. This catches reports that are failing. Detecting an Ingot that is down is left to the monitoring that already watches the appliance.
+- **Delegations.** None are added or changed, for an appliance or for an access key. Removing a provider from Hilt stops its reports being accepted.
 
 ## Alternatives considered
 
@@ -165,15 +168,15 @@ Ingot could write a line for each GET and ship the log, and totals would be comp
 - A ranged GET of an encrypted object adds the length of the range.
 - A GET abandoned part way adds what was sent, and a CopyObject adds nothing.
 - The same requests add the same egress with Ingot's cache enabled and with `cache_writes: false`.
+- Hilt accepts a report that carries no proofs from a registered provider, and refuses one from any other issuer.
 - With Hilt unreachable for an hour and then restored, Hilt's totals equal Ingot's, with nothing counted twice.
 - These run against the smelt stack in CI.
 
 ## Order of work
 
-1. Add `/s3/egress/report` to libforge.
+1. Add `/s3/usage/report` to libforge.
 2. Hilt: store the counts, keep a deleted bucket's tenant and provider for 7 days, and fill the egress series.
-3. Add the command to the Hilt-to-Ingot delegation in `infra-central` and smelt, and issue it again for existing appliances.
-4. Ingot: count, store and report, with the metrics above.
+3. Ingot: count, store and report, with the metrics above.
 
 ## References
 
