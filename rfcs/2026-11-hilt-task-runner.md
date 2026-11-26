@@ -18,12 +18,12 @@ Ingot had the same problem and solved it with a task runner ([RFC](./2026-10-ing
 
 ## Goals
 
-- A tenant's status change takes effect at Ingot within seconds, for a tenant with any number of keys.
+- A tenant's status change takes effect at Ingot within seconds while the revocation service is up, for a tenant with any number of keys.
 - Write-locking stops uploads and leaves reads and deletes working.
 - Two changes to one tenant's authority never run at the same time, without either taking a lock the other must know about.
 - A change that fails part way resumes and finishes without the caller retrying.
 - No request is authorized from a state a change has already replaced, or while that change is waiting or running.
-- A revocation service outage delays revocations and blocks no tenant.
+- A revocation service outage blocks no tenant. During one, a key Ingot has already cached keeps its old access until the revocation is published or the cached copy expires at the next UTC midnight, which is the delay every status change has today.
 
 ## Design
 
@@ -133,7 +133,7 @@ Flip the status, call the revocation routine tenant deletion already has, and re
 - A status change for a tenant with 2,000 keys completes.
 - Two policy writes and a key creation issued at once for one tenant all succeed, with none reporting a concurrent change.
 - Hilt killed part way through publishing a status change's revocations finishes them after restart, with no call repeated by fil-one.
-- With the revocation service down, a status change succeeds, the tenant's new requests are answered from the new status, no tenant sees a `503`, and the revocations are published once the service returns.
+- With the revocation service down, a status change succeeds, requests that reach Hilt are answered from the new status, no tenant sees a `503`, and the revocations are published once the service returns. A key Ingot had cached keeps working until then.
 
 ## Order of work
 
