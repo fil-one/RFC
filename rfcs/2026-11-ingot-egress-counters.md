@@ -108,10 +108,10 @@ The hour still in progress is sent with the rest. A report carries an hour's tot
 
 When more than 1,000 hours are waiting, after many buckets were read or Hilt was unreachable, Ingot sends further invocations, oldest hours first, until none are left. Each invocation is acknowledged on its own, and one space's hours may be split across several, since Hilt stores each hour separately.
 
-The command is named for usage, with egress as one field of its arguments, so that it can carry other counts only the gateway knows. Two are expected to follow:
+The command is named for usage, with egress as one field of its arguments, so that it can carry other counts only the gateway knows:
 
-- **Object counts.** Ingot registers every object with the upload service today only so that it can be counted there.
-- **Logical bytes stored.** The sum of object sizes as the customer sees them. The upload service counts the bytes a space holds, which include Ingot's catalog segments and the overhead of encryption, and will include parity once blobs are erasure coded. Only Ingot knows what the customer stored.
+- **Object counts** are a second field of the same arguments, described under [Object counts](#object-counts).
+- **Logical bytes stored** are expected to follow. They are the sum of object sizes as the customer sees them. The upload service counts the bytes a space holds, which include Ingot's catalog segments and the overhead of encryption, and will include parity once blobs are erasure coded. Only Ingot knows what the customer stored.
 
 The entries are tuples, grouped by space, so a space's DID is sent once however many hours it has. A report names no tenant. Hilt knows each bucket's tenant and provider, and looks them up by space.
 
@@ -145,12 +145,81 @@ Hilt takes Ingot's counts on Ingot's word. Ingot already authenticates every req
 
 Storage nodes are a different case and this RFC does not change it. A node's egress is evidenced by the `/content/retrieve` receipts it issues for invocations its clients sign, reported through the egress tracking service.
 
+## Object counts
+
+Hilt's metrics endpoints also return an object count, for a tenant and for a bucket. Counting objects at the upload service needs Ingot to register every object version there with an `/upload/add` invocation and take it away again with `/upload/remove`, and the registration serves no other purpose. Ingot counts its own objects instead and reports them in the same `/s3/usage/report`.
+
+### What is counted as an object
+
+Ingot counts what AWS reports as `NumberOfObjects` for a general purpose bucket:
+
+- every version of every key, current or not
+- every delete marker
+- every part of a multipart upload in progress
+
+A PutObject to an unversioned bucket adds one object and removes the one it replaces. A delete that writes a delete marker adds one. Completing a multipart upload removes its parts and adds the object they form, and aborting one removes its parts. Uploading a part number a second time changes nothing.
+
+### Counting objects in Ingot
+
+Each bucket keeps two totals for its whole life: the objects it has gained and the objects it has lost. Neither ever goes down. The transaction that changes a bucket's objects adds to them, and copies both to the row for the bucket's space and the current hour:
+
+| Column | Meaning |
+| --- | --- |
+| `space` | the bucket's space |
+| `hour` | start of the hour, UTC |
+| `added` | objects the bucket had ever gained, as of the last change in the hour |
+| `removed` | objects the bucket had ever lost, as of the same change |
+| `added_reported`, `removed_reported` | the values Hilt last acknowledged |
+
+The counts commit with the change they count, so a crash loses none and a retried write counts nothing twice. The hour is taken from the database's clock, so instances sharing a database agree on it.
+
+The bucket holds `added` less `removed`. Two totals are kept, where one net count would do for Ingot, so that reports stay safe to repeat. A net count goes up and down, and Hilt could not tell a late report from a new one. Each total only grows, so Hilt keeps the largest of each, as it does for egress.
+
+A bucket whose objects did not change in an hour has no row for it.
+
+### Reporting object counts
+
+The counts travel in a second field of the arguments, `objects`, shaped like `egress`:
+
+```jsonc
+{
+  "cmd": "/s3/usage/report",
+  "args": {
+    "egress": [],
+    "objects": [
+      [
+        "did:key:zBucketSpaceA",
+        [
+          // [start of hour (Unix seconds), objects ever gained, objects ever lost]
+          [1795604400, 1204, 37]
+        ]
+      ]
+    ]
+  }
+  // ...
+}
+```
+
+Ingot sends them on the same schedule as egress, in invocations of their own, with the same limit of 1,000 hours each. A row is sent whenever either total differs from the one Hilt acknowledged, the hour in progress included. Warnings, acknowledgement and the 7 days a reported row is kept are the same as for egress.
+
+### Serving object counts from Hilt
+
+Hilt stores one row for each (space, hour) and keeps the larger of each total it is sent. A sample's object count is `added` less `removed` in the latest hour that starts before the end of the sample's window. It is zero when the bucket has no such hour, or when `removed` is the larger. A tenant's count is the sum of its buckets'.
+
+### What object counts replace
+
+Ingot sends no `/upload/add` or `/upload/remove` invocation, and Hilt delegates neither command to an access key for any S3 permission.
+
+Counting starts from zero when this is deployed. Objects stored before then are not counted, so a bucket that already held some reports fewer than it holds, and reports none while it has lost more objects than it has gained since. Such a bucket's count stays wrong until its environment is reset, which is accepted.
+
+Ingot authorizes a request locally only when the access key holds a delegation for every command Hilt's permission table lists for the action. An Ingot built on a table that still lists the upload commands, facing a Hilt that has stopped delegating them, asks Hilt to authorize every write and delete. So on each stage Ingot moves to the table without them before Hilt stops delegating them.
+
 ## Operations
 
 - **Storage.** The counts live in Ingot's Postgres schema with the rest of its state, and are backed up and restored with it. A bucket read in every hour of a week holds 168 rows. No new filesystem or quota is needed.
-- **Metrics.** Ingot reports the number of rows waiting to be reported, how long the oldest unreported count has waited, and Hilt's warnings by name.
+- **Metrics.** Ingot reports the number of rows waiting to be reported and how long the oldest unreported count has waited, for egress and for object counts each, and Hilt's warnings by name.
 - **Alerts.** An Ingot whose oldest unreported count has waited longer than three intervals, and any warning from Hilt. This catches reports that are failing. Detecting an Ingot that is down is left to the monitoring that already watches the appliance.
-- **Delegations.** None are added or changed, for an appliance or for an access key. Removing a provider from Hilt stops its reports being accepted.
+- **Delegations.** None are added, for an appliance or for an access key. Object counts take the two upload commands away from access keys (see [What object counts replace](#what-object-counts-replace)). Removing a provider from Hilt stops its reports being accepted.
 
 ## Alternatives considered
 
@@ -176,6 +245,8 @@ Ingot could write a line for each GET and ship the log, and totals would be comp
 - A ranged GET of an encrypted object adds the length of the range.
 - A GET abandoned part way adds what was sent, to within one buffer, and a CopyObject adds nothing.
 - A report holding a count for a space Hilt does not know stores its other counts and comes back with an `UnknownBucket` warning for that space, and Ingot does not send the count again.
+- A PutObject adds one to the bucket's object count at Hilt, and deleting that version takes it away. A multipart upload counts one for each part while it is in progress and one once it is complete.
+- An object count report that is repeated, or delivered after a newer one, leaves Hilt's count unchanged.
 - The same requests add the same egress with Ingot's cache enabled and with `cache_writes: false`.
 - Hilt accepts a report that carries no proofs from a registered provider, and refuses one from any other issuer.
 - With Hilt unreachable for an hour and then restored, Hilt's totals equal Ingot's, with nothing counted twice.
