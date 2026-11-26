@@ -19,7 +19,7 @@ Ingot had the same problem and solved it with a task runner ([RFC](./2026-10-ing
 ## Goals
 
 - A tenant's status change takes effect at Ingot within seconds while the revocation service is up, for a tenant with any number of keys.
-- Write-locking stops uploads and leaves reads and deletes working.
+- Write-locking stops uploads and bucket creation and leaves reads, listings and deletes working.
 - Two changes to one tenant's authority never run at the same time, without either taking a lock the other must know about.
 - A change that fails part way resumes and finishes without the caller retrying.
 - No request is authorized from a state a change has already replaced, or while that change is waiting or running.
@@ -88,7 +88,7 @@ A reply already on its way to Ingot when a change commits is handled by Ingot, a
 
 **Disabled.** The change sets the status and records every grant the tenant's keys hold as a revocation owed. Nothing is issued. Returning to active sets the status and issues fresh grants for every key from its stored permissions and policies.
 
-**Write-locked.** The change sets the status, records every grant as a revocation owed, and issues narrower ones that carry reads, lists and deletes. Authorization also has to refuse writes itself for requests that reach it, which needs each S3 operation classed as a read, a cleanup or a write. hilt#137 has that classification and [ingot#411](https://github.com/fil-forge/ingot/pull/411) has the matching change for Ingot, which must enforce the reduced set of S3 actions because deletes and uploads share some of the same Forge commands. Both carry over.
+**Write-locked.** fil-one's [Service Orchestrator integration guide](https://github.com/fil-one/fil-one/blob/main/docs/service-orchestrator-integration/README.md#tenant-state-enforcement) defines the state: uploads and bucket creation are blocked, and reads, listings and deletes succeed. The change sets the status, records every grant as a revocation owed, and issues narrower ones that carry reads, lists and deletes. Authorization also has to refuse writes itself for requests that reach it, which needs each S3 operation classed as a read, a cleanup or a write. hilt#137 has that classification and [ingot#411](https://github.com/fil-forge/ingot/pull/411) has the matching change for Ingot, which must enforce the reduced set of S3 actions because deletes and uploads share some of the same Forge commands. Both carry over.
 
 Key creation and policy writes read the tenant's status when they issue grants, and they run on the same subject as the status change. A key created for a write-locked tenant therefore gets the narrow grants without a lock to arrange it.
 
@@ -153,3 +153,4 @@ Each move removes that operation's locks. The four share locks in authorization 
 - [hilt#137: Reconcile tenant status with fenced stored authority](https://github.com/fil-forge/hilt/pull/137)
 - [ingot#411: Map tenant write-lock denials and verify cached action boundaries](https://github.com/fil-forge/ingot/pull/411)
 - [RFC: Ingot task runner](./2026-10-ingot-task-runner.md)
+- [fil-one: Service Orchestrator integration guide, tenant state enforcement](https://github.com/fil-one/fil-one/blob/main/docs/service-orchestrator-integration/README.md#tenant-state-enforcement)
