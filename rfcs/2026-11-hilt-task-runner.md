@@ -137,11 +137,16 @@ Flip the status, call the revocation routine tenant deletion already has, and re
 
 ## Order of work
 
-1. Extract the task runner into a shared module, with Ingot importing it, and add the call that lists a subject's unfinished tasks.
+1. Extract the task runner into a shared module, with Ingot importing it, and add the calls that list a subject's unfinished tasks and wait for several tasks.
 2. Remove Hilt's in-memory stores and move the service tests to Postgres.
-3. Add the two queues and the table of revocations owed to Hilt, and the pending check and snapshot read to authorization.
-4. Move the tenant status change onto it, with disabling first and write-locking second.
-5. Move policy writes, principal removal, key creation and deletion, bucket deletion and tenant deletion, one at a time, removing each one's locks as it moves.
+3. Add the two queues and the table of revocations owed to Hilt, and the pending check to authorization.
+4. Move the tenant status change onto it, with disabling and reactivation. Write-locking still only sets the status at this point.
+5. Move access key creation and deletion.
+6. Move policy writes.
+7. Write-locking: narrowed grants and the refusal of writes in authorization. It comes after steps 5 and 6 because a write-locked tenant stays live, so every operation that issues grants has to be on the tenant's queue before narrowing them is safe. Disabling has no such need, since nothing issued for a disabled tenant can be used.
+8. Move principal removal, bucket deletion and tenant deletion.
+
+Each move removes that operation's locks. The four share locks in authorization go with the last writer that needs them.
 
 ## References
 
