@@ -2,6 +2,11 @@
 
 **Status:** Proposal
 
+> **Update 2026-11-24:**
+> [Continuous Deployment to Staging](./2026-11-continuous-deployment-to-staging.md) proposes to
+> remove the dev node, and with it the dev layout on AWS EC2 described here. Staging keeps its
+> backups and the restore drills.
+
 ## Authors
 
 - [Miroslav Bajtoš](https://github.com/bajtos)

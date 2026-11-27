@@ -2,6 +2,11 @@
 
 **Status:** Proposal
 
+> **Update 2026-11-24:**
+> [Continuous Deployment to Staging](./2026-11-continuous-deployment-to-staging.md) proposes to
+> remove the dev instance (section 2) and to deploy every change to staging. Staging (section 3)
+> takes dev's update frequency and stability, and gives up the customer-demo role.
+
 ## Authors
 
 - [Miroslav Bajtoš](https://github.com/bajtos)

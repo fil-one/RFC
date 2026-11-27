@@ -2,6 +2,11 @@
 
 **Status:** Proposal
 
+> **Update 2026-11-24:**
+> [Continuous Deployment to Staging](./2026-11-continuous-deployment-to-staging.md) proposes to
+> remove the dev environment. Continuous delivery then targets staging, and promotion to production
+> starts from staging.
+
 ## Authors
 
 - [Miroslav Bajtoš](https://github.com/bajtos)
