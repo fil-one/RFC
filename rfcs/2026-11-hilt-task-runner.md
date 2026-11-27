@@ -159,6 +159,7 @@ Flip the status, call the revocation routine tenant deletion already has, and re
 8. Move principal removal, bucket deletion and tenant deletion.
 
 9. Follow-up, after the steps above have merged: authorization replies carry the grants they rest on, read before the status, and `/s3/bucket/info` is removed. See [Replies that outlive a change](#replies-that-outlive-a-change).
+10. Follow-up: Hilt exports its metrics, and an alert fires when the oldest revocation owed is more than a few minutes old. Step 3 registers gauges for the count of revocations owed and the age of the oldest, but Hilt exports no metrics yet, so nothing reads them. See [Operations](#operations).
 
 Each move removes that operation's locks. The four share locks in authorization go with the last writer that needs them.
 
