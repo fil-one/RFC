@@ -82,7 +82,7 @@ Authorization does not wait for revocations. Waiting would add nothing: Hilt alr
 
 Authorization reads the key, the principal, the policy and the grants in separate queries. It reads them in one database snapshot so that a change committing between two of them cannot produce an answer that mixes old and new.
 
-A reply already on its way to Ingot when a change commits is handled by Ingot, as it is today. Ingot remembers every revoked delegation and does not cache a reply that names one.
+A reply already on its way to Ingot when a change commits can outlive the change. [Replies that outlive a change](#replies-that-outlive-a-change) describes when that matters and the follow-up that closes it.
 
 ### Disabling and write-locking
 
@@ -91,6 +91,18 @@ A reply already on its way to Ingot when a change commits is handled by Ingot, a
 **Write-locked.** fil-one's [Service Orchestrator integration guide](https://github.com/fil-one/fil-one/blob/main/docs/service-orchestrator-integration/README.md#tenant-state-enforcement) defines the state: uploads and bucket creation are blocked, and reads, listings and deletes succeed. The change sets the status, records every grant as a revocation owed, and issues narrower ones that carry reads, lists and deletes. Authorization also has to refuse writes itself for requests that reach it, which needs each S3 operation classed as a read, a cleanup or a write. hilt#137 has that classification and [ingot#411](https://github.com/fil-forge/ingot/pull/411) has the matching change for Ingot, which must enforce the reduced set of S3 actions because deletes and uploads share some of the same Forge commands. Both carry over.
 
 Key creation and policy writes read the tenant's status when they issue grants, and they run on the same subject as the status change. A key created for a write-locked tenant therefore gets the narrow grants without a lock to arrange it.
+
+### Replies that outlive a change
+
+An authorization reply built just before a change commits can reach Ingot after it, still saying what the key could do before. Ingot remembers every revoked delegation and does not cache a reply that names one, but a reply names only the key's own short-lived delegations, which Hilt creates for each reply and which are never revoked. The grants behind them reach Ingot separately, from `/s3/bucket/info`, and by then Hilt returns the new ones. So nothing in the reply or its chain is revoked, and Ingot can keep the out-of-date permission list until its cache expires at the next UTC midnight.
+
+For a disabled tenant this does no harm: its keys hold no grants, so Ingot has no chain to serve a request from. For a write-locked tenant it does. A key that may delete holds every Forge command an upload needs, so Ingot decides from the cached permission list, and an out-of-date one lets uploads continue. It needs a reply built within moments of the write-lock, for a key that may delete.
+
+This is a known gap in the first implementation. The follow-up that closes it:
+
+- **Authorization replies carry the grants they rest on,** the bucket's grant to the tenant and the tenant's grants to the key, as delegation blocks.
+- **Hilt reads those grants before the tenant's status and the key's permissions.** Every change to what a key may do on a bucket replaces that key's grants over the bucket in the same commit, so a reply that was out of date when it left Hilt carries grants that are being revoked. Ingot's existing check then refuses to cache it, or drops it when the revocation arrives. No snapshot read is needed.
+- **`/s3/bucket/info` is removed.** Completing a chain is its only use, and the reply then carries the whole chain. Authorization is already Ingot's slow path, taken only when its cache cannot answer, so the extra blocks are sent only then, and a key's first request for a bucket needs one round trip where it needs two today.
 
 ### The runner
 
@@ -145,6 +157,8 @@ Flip the status, call the revocation routine tenant deletion already has, and re
 6. Move policy writes.
 7. Write-locking: narrowed grants and the refusal of writes in authorization. It comes after steps 5 and 6 because a write-locked tenant stays live, so every operation that issues grants has to be on the tenant's queue before narrowing them is safe. Disabling has no such need, since nothing issued for a disabled tenant can be used.
 8. Move principal removal, bucket deletion and tenant deletion.
+
+9. Follow-up, after the steps above have merged: authorization replies carry the grants they rest on, read before the status, and `/s3/bucket/info` is removed. See [Replies that outlive a change](#replies-that-outlive-a-change).
 
 Each move removes that operation's locks. The four share locks in authorization go with the last writer that needs them.
 
